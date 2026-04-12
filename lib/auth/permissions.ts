@@ -12,6 +12,7 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
   "/forecasts": ["analyst", "admin", "super_admin"],
   "/settings": ["admin", "super_admin"],
   "/access": ["admin", "super_admin"],
+  "/admin": ["admin", "super_admin"],
   "/api/data/refresh": ["analyst", "admin", "super_admin"],
   "/api/admin": ["admin", "super_admin"],
 };
@@ -20,10 +21,12 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
  * Routes that are always publicly accessible — no auth required.
  */
 export const PUBLIC_ROUTES: string[] = [
+  "/login",
   "/sign-in",
-  "/invite",
   "/access-request",
   "/api/auth",
+  "/api/admin/bootstrap",
+  "/api/test/seed",
   "/_next",
   "/favicon.ico",
 ];
