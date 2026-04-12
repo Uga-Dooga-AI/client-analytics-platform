@@ -1,0 +1,23 @@
+# Build artifacts
+.next
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Dependencies (will be installed in container)
+node_modules
+
+# Development files
+.env.local
+.env.development.local
+.env.test.local
+
+# Test/e2e
+e2e
+playwright-report
+test-results
+
+# Local tooling
+.firebase
+firebase-debug.log
+firestore-debug.log
+.npmrc
