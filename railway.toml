@@ -1,0 +1,20 @@
+[build]
+builder = "nixpacks"
+buildCommand = "npm run build"
+
+[build.nixpacksPlan.variables]
+NIXPACKS_NODE_VERSION = "20"
+
+[deploy]
+startCommand = "npm run start"
+healthcheckPath = "/"
+healthcheckTimeout = 60
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+[[services]]
+name = "web"
+
+[services.variables]
+PORT = "3000"
+NODE_ENV = "production"
