@@ -1,5 +1,5 @@
 import { TopFilterRail } from "@/components/top-filter-rail";
-import { MOCK_ACCESS_MEMBERS, MOCK_ACCESS_REQUESTS, MOCK_ROLE_MATRIX } from "@/lib/mock-data";
+import { getAccessMembers, getAccessRequests, getRoleMatrix } from "@/lib/data/access";
 
 const ROLE_STYLE = {
   super_admin: { color: "#7c3aed", bg: "#ede9fe" },
@@ -9,7 +9,13 @@ const ROLE_STYLE = {
   viewer: { color: "var(--color-ink-500)", bg: "var(--color-panel-soft)" },
 };
 
-export default function AccessPage() {
+export default async function AccessPage() {
+  const [accessMembers, accessRequests, roleMatrix] = await Promise.all([
+    getAccessMembers(),
+    getAccessRequests(),
+    getRoleMatrix(),
+  ]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <TopFilterRail title="Access" />
@@ -97,10 +103,10 @@ export default function AccessPage() {
               </tr>
             </thead>
             <tbody>
-              {MOCK_ACCESS_MEMBERS.map((member, index) => {
+              {accessMembers.map((member, index) => {
                 const roleStyle = ROLE_STYLE[member.role];
                 return (
-                  <tr key={member.email} style={{ borderBottom: index < MOCK_ACCESS_MEMBERS.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
+                  <tr key={member.email} style={{ borderBottom: index < accessMembers.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
                     <td style={{ padding: "13px 20px", fontSize: 13.5, fontWeight: 600, color: "var(--color-ink-950)" }}>{member.name}</td>
                     <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-500)" }}>{member.email}</td>
                     <td style={{ padding: "13px 20px" }}>
@@ -126,7 +132,7 @@ export default function AccessPage() {
             </div>
 
             <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-              {MOCK_ACCESS_REQUESTS.map((request) => (
+              {accessRequests.map((request) => (
                 <div key={request.email} style={{ border: "1px solid var(--color-border-soft)", borderRadius: 8, padding: "14px 14px 12px" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>{request.name}</div>
@@ -179,8 +185,8 @@ export default function AccessPage() {
                 </tr>
               </thead>
               <tbody>
-                {MOCK_ROLE_MATRIX.map((row, index) => (
-                  <tr key={row.role} style={{ borderBottom: index < MOCK_ROLE_MATRIX.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
+                {roleMatrix.map((row, index) => (
+                  <tr key={row.role} style={{ borderBottom: index < roleMatrix.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
                     <td style={{ padding: "12px 16px", fontWeight: 600, color: "var(--color-ink-950)" }}>{row.role}</td>
                     <td style={{ padding: "12px 16px", color: "var(--color-ink-700)", fontSize: 13 }}>{row.experiments}</td>
                     <td style={{ padding: "12px 16px", color: "var(--color-ink-700)", fontSize: 13 }}>{row.forecasts}</td>

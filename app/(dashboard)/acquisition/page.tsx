@@ -1,11 +1,7 @@
 import { ConfidenceBandChart } from "@/components/confidence-band-chart";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
-import {
-  MOCK_ACQUISITION_BREAKDOWN,
-  MOCK_ACQUISITION_TRAJECTORIES,
-  type AcquisitionBreakdownRow,
-} from "@/lib/mock-data";
+import { getAcquisitionTrajectories, getAcquisitionBreakdown, type AcquisitionBreakdownRow } from "@/lib/data/acquisition";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
@@ -77,10 +73,12 @@ export default async function AcquisitionPage({
 }) {
   const filters = parseDashboardSearchParams(await searchParams, "/acquisition");
   const projectLabel = getProjectLabel(filters.projectKey);
-  const chartSeries = MOCK_ACQUISITION_TRAJECTORIES.filter((entry) => entry.project === projectLabel);
-  const visibleRows = MOCK_ACQUISITION_BREAKDOWN.filter((row) =>
-    matchesRowFilters(row, filters, projectLabel)
-  );
+  const [allTrajectories, allRows] = await Promise.all([
+    getAcquisitionTrajectories({ projectKey: filters.projectKey }),
+    getAcquisitionBreakdown({ projectKey: filters.projectKey }),
+  ]);
+  const chartSeries = allTrajectories.filter((entry) => entry.project === projectLabel);
+  const visibleRows = allRows.filter((row) => matchesRowFilters(row, filters, projectLabel));
   const summary = aggregateSummary(visibleRows);
 
   return (

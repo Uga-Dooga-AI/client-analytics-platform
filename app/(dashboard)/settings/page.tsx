@@ -1,5 +1,5 @@
 import { TopFilterRail } from "@/components/top-filter-rail";
-import { MOCK_DATA_SOURCES, MOCK_METRIC_CATALOG, MOCK_PROJECT_BINDINGS } from "@/lib/mock-data";
+import { getDataSources, getProjectBindings, getMetricCatalog } from "@/lib/data/settings";
 
 const SOURCE_STYLE = {
   deferred: { label: "Deferred", color: "var(--color-ink-500)", bg: "var(--color-panel-soft)" },
@@ -13,7 +13,13 @@ const PROJECT_STYLE = {
   partial_data: { color: "var(--color-success)", bg: "#dcfce7" },
 };
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
+  const [dataSources, projectBindings, metricCatalog] = await Promise.all([
+    getDataSources(),
+    getProjectBindings(),
+    getMetricCatalog(),
+  ]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <TopFilterRail title="Settings" />
@@ -78,10 +84,10 @@ export default function SettingsPage() {
               </tr>
             </thead>
             <tbody>
-              {MOCK_DATA_SOURCES.map((source, index) => {
+              {dataSources.map((source, index) => {
                 const status = SOURCE_STYLE[source.status];
                 return (
-                  <tr key={source.source} style={{ borderBottom: index < MOCK_DATA_SOURCES.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
+                  <tr key={source.source} style={{ borderBottom: index < dataSources.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
                     <td style={{ padding: "13px 20px", fontSize: 13.5, fontWeight: 600, color: "var(--color-ink-950)" }}>{source.source}</td>
                     <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-700)" }}>{source.project}</td>
                     <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-700)" }}>{source.deliveryMode}</td>
@@ -107,7 +113,7 @@ export default function SettingsPage() {
             </div>
 
             <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-              {MOCK_PROJECT_BINDINGS.map((project) => {
+              {projectBindings.map((project) => {
                 const style = PROJECT_STYLE[project.status];
                 return (
                   <div key={project.projectKey} style={{ border: "1px solid var(--color-border-soft)", borderRadius: 8, padding: "14px 14px 12px" }}>
@@ -161,8 +167,8 @@ export default function SettingsPage() {
                 </tr>
               </thead>
               <tbody>
-                {MOCK_METRIC_CATALOG.map((metric, index) => (
-                  <tr key={metric.metric} style={{ borderBottom: index < MOCK_METRIC_CATALOG.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
+                {metricCatalog.map((metric, index) => (
+                  <tr key={metric.metric} style={{ borderBottom: index < metricCatalog.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
                     <td style={{ padding: "12px 16px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, color: "var(--color-ink-700)" }}>{metric.metric}</td>
                     <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--color-ink-700)" }}>{metric.owner}</td>
                     <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--color-ink-700)" }}>{metric.grain}</td>

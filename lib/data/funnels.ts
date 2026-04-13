@@ -1,4 +1,4 @@
-import { MOCK_FUNNELS, type Funnel } from "@/lib/mock-data";
+import { MOCK_FUNNELS, MOCK_FUNNEL_DETAILS, type Funnel, type FunnelDetail } from "@/lib/mock-data";
 import { matchesProject, type DashboardProjectKey } from "@/lib/dashboard-filters";
 
 export type FunnelsFilter = {
@@ -12,4 +12,8 @@ export async function getFunnels(filters?: FunnelsFilter): Promise<Funnel[]> {
 
 export async function getFunnelById(id: string): Promise<Funnel | null> {
   return MOCK_FUNNELS.find((f) => f.id === id) ?? null;
+}
+
+export async function getFunnelDetail(id: string): Promise<FunnelDetail | null> {
+  return MOCK_FUNNEL_DETAILS.find((d) => d.funnelId === id) ?? null;
 }

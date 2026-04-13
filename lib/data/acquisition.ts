@@ -4,6 +4,8 @@ import {
   type AcquisitionTrajectory,
   type AcquisitionBreakdownRow,
 } from "@/lib/mock-data";
+
+export type { AcquisitionBreakdownRow, AcquisitionTrajectory };
 import { matchesProject, type DashboardProjectKey } from "@/lib/dashboard-filters";
 
 export type AcquisitionFilter = {
