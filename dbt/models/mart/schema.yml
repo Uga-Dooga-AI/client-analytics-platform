@@ -1,6 +1,53 @@
 version: 2
 
 models:
+  - name: fact_experiment_exposure
+    description: >
+      Первая экспозиция устройства на A/B эксперимент из AppMetrica ab_* событий.
+      Один ряд = (device_id, experiment_id, variant) — первый факт экспозиции.
+      Дедупликация по MIN(exposed_at). Партиционировано по exposure_date.
+      Источник: stg_appmetrica__ab_events. Связано с UGAA-1507.
+    columns:
+      - name: exposure_id
+        description: >
+          Суррогатный ключ (MD5 от device_id | experiment_id | variant).
+          Детерминированный, используется для JOIN с другими mart.
+        tests:
+          - not_null
+          - unique
+      - name: device_id
+        description: Уникальный ID устройства в AppMetrica
+        tests:
+          - not_null
+      - name: user_id
+        description: Клиентский user_id; пустая строка для анонимных сессий
+        tests:
+          - not_null
+      - name: app_id
+        description: ID приложения в AppMetrica
+        tests:
+          - not_null
+      - name: experiment_id
+        description: Идентификатор эксперимента (часть имени события после 'ab_')
+        tests:
+          - not_null
+      - name: variant
+        description: Вариант эксперимента из JSON параметра variant_key
+      - name: first_exposure_at
+        description: Timestamp первой экспозиции (UTC)
+        tests:
+          - not_null
+      - name: exposure_date
+        description: Дата первой экспозиции (UTC) — ключ партиционирования
+        tests:
+          - not_null
+      - name: os_name
+        description: Операционная система при первой экспозиции (ios / android)
+      - name: app_version
+        description: Версия приложения при первой экспозиции
+      - name: country_code
+        description: ISO-код страны при первой экспозиции
+
   - name: mart_experiment_daily
     description: >
       Дневная агрегация результатов A/B-экспериментов.
@@ -107,3 +154,140 @@ models:
         description: Верхняя граница доверительного интервала (90-й перцентиль)
       - name: generated_at
         description: Timestamp запуска модели
+
+  - name: mart_daily_active_users
+    description: >
+      Daily Active Users по app_id и os_name.
+      Активный пользователь = device_id с хотя бы одним событием за день.
+      Grain: app_id × os_name × date. Партиционировано по date.
+    columns:
+      - name: date
+        description: Дата активности (UTC)
+        tests:
+          - not_null
+      - name: app_id
+        description: ID приложения в AppMetrica
+        tests:
+          - not_null
+      - name: os_name
+        description: Операционная система (ios / android)
+        tests:
+          - not_null
+      - name: dau
+        description: Количество уникальных активных устройств за день
+        tests:
+          - not_null
+      - name: dau_logged_in
+        description: DAU из залогиненных пользователей (user_id != '')
+      - name: total_events
+        description: Общее количество событий за день
+      - name: login_rate
+        description: Доля залогиненных среди активных (dau_logged_in / dau)
+
+  - name: mart_installs_funnel
+    description: >
+      Воронка: установка → первая сессия → D1 retention → D7 retention.
+      Grain: install_date × os_name × tracker_name. Партиционировано по install_date.
+    columns:
+      - name: install_date
+        description: Дата инсталляции (UTC)
+        tests:
+          - not_null
+      - name: os_name
+        description: Операционная система
+        tests:
+          - not_null
+      - name: tracker_name
+        description: Источник трафика (AppsFlyer, Organic, unknown)
+        tests:
+          - not_null
+      - name: installed
+        description: Количество новых инсталляций
+        tests:
+          - not_null
+      - name: first_session
+        description: Устройства с первой сессией в день установки или D+1
+      - name: retained_d1
+        description: Устройства, вернувшиеся на D+1
+      - name: retained_d7
+        description: Устройства, вернувшиеся на D+7
+      - name: install_to_first_session_rate
+        description: Конверсия установка → первая сессия (0–1)
+      - name: d1_retention_rate
+        description: D1 retention rate (0–1)
+      - name: d7_retention_rate
+        description: D7 retention rate (0–1)
+
+  - name: mart_session_metrics
+    description: >
+      Агрегированные метрики сессий по дням.
+      Grain: date × os_name. Партиционировано по date.
+    columns:
+      - name: date
+        description: Дата (UTC)
+        tests:
+          - not_null
+      - name: os_name
+        description: Операционная система
+        tests:
+          - not_null
+      - name: total_sessions
+        description: Общее количество сессий за день
+        tests:
+          - not_null
+      - name: unique_devices
+        description: Уникальные устройства с сессиями
+      - name: avg_session_duration_sec
+        description: Средняя длительность сессии в секундах
+      - name: median_session_duration_sec
+        description: Медианная длительность сессии в секундах
+      - name: max_session_duration_sec
+        description: Максимальная длительность сессии в секундах
+      - name: short_sessions
+        description: Количество коротких сессий (<60 сек)
+      - name: medium_sessions
+        description: Количество средних сессий (60–299 сек)
+      - name: long_sessions
+        description: Количество длинных сессий (>=300 сек)
+      - name: sessions_per_user
+        description: Среднее количество сессий на активного пользователя
+      - name: long_session_rate
+        description: Доля длинных сессий (0–1)
+
+  - name: mart_revenue_metrics
+    description: >
+      Метрики выручки из AppMetrica revenue events (purchase, in_app_purchase, subscription_start).
+      Активируется только при наличии revenue событий в AppMetrica stream.
+      Grain: date × os_name × country_code × app_id × product_id × currency.
+      Партиционировано по date.
+    columns:
+      - name: date
+        description: Дата транзакции (UTC)
+        tests:
+          - not_null
+      - name: os_name
+        description: Операционная система
+        tests:
+          - not_null
+      - name: country_code
+        description: ISO-код страны
+      - name: app_id
+        description: ID приложения
+        tests:
+          - not_null
+      - name: product_id
+        description: Идентификатор продукта/SKU (unknown если не передан)
+        tests:
+          - not_null
+      - name: currency
+        description: Валюта транзакции (по умолчанию USD)
+      - name: purchase_count
+        description: Количество покупок (после дедупликации по transaction_id)
+      - name: paying_users
+        description: Количество уникальных покупателей за день
+      - name: gross_revenue
+        description: Валовая выручка в исходной валюте
+      - name: avg_order_value
+        description: Средний чек (gross_revenue / purchase_count)
+      - name: arppu
+        description: ARPPU — выручка на платящего пользователя

@@ -24,3 +24,6 @@ models:
     mart:
       +materialized: table
       +schema: mart
+      # Все mart таблицы партиционированы по дате — BigQuery cost optimization
+      # Конкретный partition_by field задаётся в каждой модели через {{ config() }}
+      # т.к. grain у моделей разный (date vs install_date)

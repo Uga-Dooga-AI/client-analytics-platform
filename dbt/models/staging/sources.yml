@@ -35,6 +35,8 @@ sources:
             description: ID сессии AppMetrica
           - name: application_id
             description: ID приложения в AppMetrica
+          # Revenue-специфичные поля (присутствуют в событиях purchase / in_app_purchase)
+          # передаются через event_json как структура {"product_id":..., "price":..., "currency":..., "transaction_id":...}
 
       - name: installs
         description: >

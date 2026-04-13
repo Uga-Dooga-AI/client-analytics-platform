@@ -1,0 +1,156 @@
+version: 2
+
+models:
+  - name: stg_appmetrica__events
+    description: >
+      Очищенные события AppMetrica с явной типизацией полей.
+      Базовый слой для всех downstream трансформаций.
+      Grain: одна строка = одно событие.
+    columns:
+      - name: device_id
+        description: Уникальный ID устройства в AppMetrica (строка)
+        tests:
+          - not_null
+      - name: user_id
+        description: Клиентский user_id; пустая строка для анонимных сессий
+        tests:
+          - not_null
+      - name: app_id
+        description: ID приложения в AppMetrica
+        tests:
+          - not_null
+      - name: event_at
+        description: Timestamp события (UTC)
+        tests:
+          - not_null
+      - name: event_date
+        description: Дата события (UTC, производное от event_at)
+        tests:
+          - not_null
+      - name: event_name
+        description: Название события (например session_start, ab_experiment_assigned)
+        tests:
+          - not_null
+      - name: event_params
+        description: JSON-объект с произвольными параметрами события
+      - name: session_id
+        description: ID сессии AppMetrica
+      - name: os_name
+        description: Операционная система в нижнем регистре (ios / android)
+      - name: app_version
+        description: Версия приложения при записи события
+      - name: country_code
+        description: ISO-код страны в верхнем регистре (например RU, US)
+      - name: city
+        description: Город по данным AppMetrica
+
+  - name: stg_appmetrica__installs
+    description: >
+      Инсталляции приложения из AppMetrica с device metadata и источником трафика.
+      Grain: одна строка = одна инсталляция.
+    columns:
+      - name: device_id
+        description: Уникальный ID устройства
+        tests:
+          - not_null
+          - unique
+      - name: user_id
+        description: Клиентский user_id; пустая строка если не задан при установке
+        tests:
+          - not_null
+      - name: installed_at
+        description: Timestamp инсталляции (UTC)
+        tests:
+          - not_null
+      - name: install_date
+        description: Дата инсталляции (UTC)
+        tests:
+          - not_null
+      - name: tracker_name
+        description: Название трекера / источника установки (AppsFlyer, Organic и т.д.)
+      - name: os_name
+        description: Операционная система в нижнем регистре
+      - name: app_version
+        description: Версия приложения при установке
+      - name: country_code
+        description: ISO-код страны в верхнем регистре
+
+  - name: stg_appmetrica__sessions
+    description: >
+      Сессии пользователей из AppMetrica с длительностью и bucket-классификацией.
+      Grain: одна строка = одна сессия (session_id уникален).
+    columns:
+      - name: device_id
+        description: Уникальный ID устройства
+        tests:
+          - not_null
+      - name: user_id
+        description: Клиентский user_id
+        tests:
+          - not_null
+      - name: session_id
+        description: Уникальный ID сессии AppMetrica
+        tests:
+          - not_null
+          - unique
+      - name: session_started_at
+        description: Timestamp начала сессии (UTC)
+        tests:
+          - not_null
+      - name: session_date
+        description: Дата начала сессии (UTC)
+        tests:
+          - not_null
+      - name: duration_seconds
+        description: Длительность сессии в секундах (>= 0)
+        tests:
+          - not_null
+      - name: session_length_bucket
+        description: >
+          Категория длительности: short (<60s), medium (60-299s), long (>=300s)
+        tests:
+          - accepted_values:
+              values: ['short', 'medium', 'long']
+      - name: os_name
+        description: Операционная система в нижнем регистре
+
+  - name: stg_appmetrica__ab_events
+    description: >
+      События A/B-экспозиции из AppMetrica (события с префиксом ab_*).
+      Variant извлекается из JSON-параметра variant_key.
+      Grain: device_id × experiment_id × exposed_at (один факт экспозиции).
+    columns:
+      - name: device_id
+        description: Уникальный ID устройства
+        tests:
+          - not_null
+      - name: user_id
+        description: Клиентский user_id
+        tests:
+          - not_null
+      - name: app_id
+        description: ID приложения
+        tests:
+          - not_null
+      - name: exposed_at
+        description: Timestamp экспозиции (UTC)
+        tests:
+          - not_null
+      - name: exposure_date
+        description: Дата экспозиции (UTC)
+        tests:
+          - not_null
+      - name: experiment_id
+        description: Идентификатор эксперимента (часть имени события после 'ab_')
+        tests:
+          - not_null
+      - name: variant_key
+        description: Вариант эксперимента из JSON параметра variant_key
+      - name: os_name
+        description: Операционная система
+      - name: app_version
+        description: Версия приложения
+      - name: country_code
+        description: ISO-код страны
+      - name: session_id
+        description: ID сессии при экспозиции
