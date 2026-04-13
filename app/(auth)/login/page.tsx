@@ -3,20 +3,76 @@
 import Link from "next/link";
 import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { GoogleAuthProvider, signInWithPopup } from "firebase/auth";
+import { auth } from "@/lib/firebase/client";
 const DEMO_ACCESS_ENABLED = process.env.NEXT_PUBLIC_DEMO_ACCESS_ENABLED === "true";
+
+function describeGoogleSignInError(error: unknown) {
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    switch (error.code) {
+      case "auth/popup-closed-by-user":
+        return "Вход отменён до завершения Google-авторизации.";
+      case "auth/popup-blocked":
+        return "Браузер заблокировал окно входа. Разрешите pop-up и попробуйте снова.";
+      case "auth/operation-not-allowed":
+        return "Google provider не включён в Firebase Auth для этого проекта.";
+      default:
+        break;
+    }
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Не удалось выполнить вход через Google.";
+}
 
 function LoginContent() {
   const searchParams = useSearchParams();
   const [loading, setLoading] = useState(false);
+  const [clientError, setClientError] = useState<string | null>(null);
   const runtimeError = searchParams.get("error");
   const callbackUrl = useMemo(
     () => searchParams.get("callbackUrl") ?? "/overview",
     [searchParams]
   );
 
-  function handleGoogleSignIn() {
+  async function handleGoogleSignIn() {
     setLoading(true);
-    window.location.href = `/api/auth/google/start?callbackUrl=${encodeURIComponent(callbackUrl)}`;
+    setClientError(null);
+
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+
+      const credential = await signInWithPopup(auth, provider);
+      const idToken = await credential.user.getIdToken();
+      const response = await fetch("/api/auth/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, callbackUrl }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        redirectTo?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Не удалось создать сессию приложения.");
+      }
+
+      window.location.href = payload.redirectTo ?? callbackUrl;
+    } catch (error) {
+      setClientError(describeGoogleSignInError(error));
+      setLoading(false);
+    }
   }
 
   return (
@@ -108,7 +164,7 @@ function LoginContent() {
         </Link>
       ) : null}
 
-      {runtimeError && (
+      {(runtimeError || clientError) && (
         <div
           style={{
             marginTop: 16,
@@ -121,7 +177,7 @@ function LoginContent() {
             lineHeight: 1.5,
           }}
         >
-          {runtimeError}
+          {clientError ?? runtimeError}
         </div>
       )}
 

@@ -8,11 +8,12 @@ import {
   verifyOAuthStateToken,
 } from "@/lib/auth/session";
 import { syncGoogleLoginUser } from "@/lib/auth/store";
+import { buildPublicUrl } from "@/lib/auth/url";
 
 export const runtime = "nodejs";
 
 function redirectToLogin(request: NextRequest, message: string) {
-  const loginUrl = new URL("/login", request.url);
+  const loginUrl = buildPublicUrl(request, "/login");
   loginUrl.searchParams.set("error", message);
   return NextResponse.redirect(loginUrl);
 }
@@ -53,9 +54,9 @@ export async function GET(request: NextRequest) {
       avatarUrl: user.avatarUrl,
     });
 
-    const destination = new URL(
-      user.approved ? state.callbackUrl : "/access-request",
-      request.url
+    const destination = buildPublicUrl(
+      request,
+      user.approved ? state.callbackUrl : "/access-request"
     );
     const response = NextResponse.redirect(destination);
     setSessionCookie(response, sessionToken);

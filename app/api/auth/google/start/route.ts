@@ -5,6 +5,7 @@ import {
   sanitizeCallbackUrl,
   setOAuthStateCookie,
 } from "@/lib/auth/session";
+import { buildPublicUrl } from "@/lib/auth/url";
 
 export const runtime = "nodejs";
 
@@ -20,7 +21,7 @@ export async function GET(request: NextRequest) {
     setOAuthStateCookie(response, nonce);
     return response;
   } catch (error) {
-    const loginUrl = new URL("/login", request.url);
+    const loginUrl = buildPublicUrl(request, "/login");
     loginUrl.searchParams.set(
       "error",
       error instanceof Error ? error.message : "Google sign-in is unavailable."

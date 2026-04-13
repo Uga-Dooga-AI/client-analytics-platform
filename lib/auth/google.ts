@@ -2,6 +2,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { randomBytes } from "crypto";
 import type { NextRequest } from "next/server";
 import { sanitizeCallbackUrl } from "./session";
+import { buildPublicUrl } from "./url";
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -28,7 +29,7 @@ function requireGoogleConfig() {
 }
 
 export function getGoogleCallbackUrl(request: NextRequest) {
-  return new URL("/api/auth/google/callback", request.url).toString();
+  return buildPublicUrl(request, "/api/auth/google/callback").toString();
 }
 
 export function buildGoogleAuthorizationUrl(params: {
