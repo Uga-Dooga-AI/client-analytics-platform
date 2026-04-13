@@ -10,6 +10,7 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
   "/funnels": ["viewer", "analyst", "admin", "super_admin"],
   "/experiments": ["analyst", "ab_analyst", "admin", "super_admin"],
   "/forecasts": ["analyst", "admin", "super_admin"],
+  "/acquisition": ["analyst", "admin", "super_admin"],
   "/settings": ["admin", "super_admin"],
   "/access": ["admin", "super_admin"],
   "/admin": ["admin", "super_admin"],

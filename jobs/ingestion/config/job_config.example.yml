@@ -1,0 +1,51 @@
+# AppMetrica → GCS → BigQuery ingestion job configuration
+# Copy to job_config.yml and fill in real values before running.
+# All sensitive values should be passed via environment variables, not this file.
+
+appmetrica:
+  # List of AppMetrica application IDs to ingest
+  # Obtain from AppMetrica dashboard → Settings → App ID
+  app_ids:
+    - REPLACE_WITH_APP_ID_1
+    - REPLACE_WITH_APP_ID_2
+
+  # Event names to fetch (empty list = all events)
+  event_names: []
+
+  # Lookback window in days (D+1 cadence: always ingest previous day)
+  lookback_days: 1
+
+gcs:
+  # GCS bucket name for raw data landing
+  # Env var: GCS_BUCKET
+  bucket: REPLACE_WITH_BUCKET_NAME
+
+  # Path prefix inside bucket
+  # Final path: {prefix}/{app_id}/{date}/{event_type}.ndjson
+  prefix: raw/appmetrica
+
+bigquery:
+  # GCP project ID
+  # Env var: GCP_PROJECT_ID
+  project_id: REPLACE_WITH_GCP_PROJECT_ID
+
+  # Dataset for raw landing tables (layer: raw)
+  raw_dataset: raw
+
+  # Dataset for staging tables (layer: stg)
+  stg_dataset: stg
+
+  # Table name for AppMetrica events
+  events_table: appmetrica_events
+
+schedule:
+  # UTC hour at which the daily run is triggered by Cloud Scheduler
+  # Default: 04:00 UTC = 07:00 MSK (UTC+3)
+  utc_hour: 4
+
+# Environment variables required at runtime (do not set values here):
+#   APPMETRICA_TOKEN   — AppMetrica OAuth token
+#   GCP_PROJECT_ID     — GCP project ID (overrides bigquery.project_id)
+#   GCS_BUCKET         — GCS bucket (overrides gcs.bucket)
+#   GOOGLE_APPLICATION_CREDENTIALS — path to service account JSON (or use Workload Identity)
+#   JOB_CONFIG_PATH    — path to this config file (default: config/job_config.example.yml)

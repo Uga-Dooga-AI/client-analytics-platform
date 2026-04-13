@@ -1,11 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 import { auth } from "@/lib/firebase/client";
 
 const googleProvider = new GoogleAuthProvider();
+const DEMO_ACCESS_ENABLED = process.env.NEXT_PUBLIC_DEMO_ACCESS_ENABLED === "true";
 
 function LoginContent() {
   const router = useRouter();
@@ -116,6 +118,32 @@ function LoginContent() {
         {loading ? "Входим…" : "Войти через Google"}
       </button>
 
+      {DEMO_ACCESS_ENABLED ? (
+        <Link
+          href={searchParams.get("callbackUrl") ?? "/overview"}
+          style={{
+            marginTop: 10,
+            width: "100%",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            padding: "11px 16px",
+            borderRadius: 8,
+            border: "1.5px solid var(--color-border-strong)",
+            backgroundColor: "var(--color-panel-base)",
+            color: "var(--color-ink-900)",
+            fontSize: 14,
+            fontWeight: 600,
+            textDecoration: "none",
+            letterSpacing: "-0.01em",
+            boxSizing: "border-box",
+          }}
+        >
+          Открыть demo workspace
+        </Link>
+      ) : null}
+
       {error && (
         <div
           style={{
@@ -132,6 +160,23 @@ function LoginContent() {
           {error}
         </div>
       )}
+
+      {DEMO_ACCESS_ENABLED ? (
+        <div
+          style={{
+            marginTop: 16,
+            padding: "12px 14px",
+            borderRadius: 8,
+            backgroundColor: "#fef3c7",
+            border: "1px solid #fde68a",
+            fontSize: 13,
+            color: "#78350f",
+            lineHeight: 1.5,
+          }}
+        >
+          Demo access включён. Можно зайти в продукт без Google-логина и посмотреть весь интерфейс в review-режиме.
+        </div>
+      ) : null}
 
       <style>{`
         @keyframes spin {

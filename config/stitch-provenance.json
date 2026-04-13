@@ -1,0 +1,68 @@
+{
+  "projectId": "cap-stitch-2026-04-12",
+  "sitePlan": "../.stitch/SITE.md",
+  "designSystem": "../.stitch/DESIGN.md",
+  "baton": "../.stitch/next-prompt.md",
+  "routes": {
+    "/overview": {
+      "page": "overview",
+      "status": "backed",
+      "artifact": "../.stitch/designs/overview.html",
+      "wave": 1
+    },
+    "/experiments": {
+      "page": "experiments",
+      "status": "backed",
+      "artifact": "../.stitch/designs/experiments.html",
+      "wave": 2
+    },
+    "/experiments/[id]": {
+      "page": "experiments",
+      "status": "backed",
+      "artifact": "../.stitch/designs/experiments.html",
+      "wave": 2
+    },
+    "/funnels": {
+      "page": "funnels",
+      "status": "backed",
+      "artifact": "../.stitch/designs/funnels.html",
+      "wave": 2
+    },
+    "/funnels/[id]": {
+      "page": "funnels",
+      "status": "backed",
+      "artifact": "../.stitch/designs/funnels.html",
+      "wave": 2
+    },
+    "/forecasts": {
+      "page": "forecasts",
+      "status": "backed",
+      "artifact": "../.stitch/designs/forecasts.html",
+      "wave": 2
+    },
+    "/acquisition": {
+      "page": "acquisition",
+      "status": "pending",
+      "artifact": "../.stitch/designs/acquisition.html",
+      "wave": 5
+    },
+    "/cohorts": {
+      "page": "cohorts",
+      "status": "prompt_ready",
+      "artifact": "../.stitch/designs/cohorts.html",
+      "wave": 3
+    },
+    "/access": {
+      "page": "access",
+      "status": "pending",
+      "artifact": "../.stitch/designs/access.html",
+      "wave": 4
+    },
+    "/settings": {
+      "page": "settings",
+      "status": "pending",
+      "artifact": "../.stitch/designs/settings.html",
+      "wave": 4
+    }
+  }
+}

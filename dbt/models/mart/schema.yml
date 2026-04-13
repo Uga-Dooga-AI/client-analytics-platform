@@ -1,0 +1,109 @@
+version: 2
+
+models:
+  - name: mart_experiment_daily
+    description: >
+      Дневная агрегация результатов A/B-экспериментов.
+      Источник экспозиции — AppMetrica events с префиксом ab_* (Firebase Remote Config).
+      Grain: experiment_id × variant × date.
+    columns:
+      - name: experiment_id
+        description: Идентификатор эксперимента (часть имени события после 'ab_')
+        tests:
+          - not_null
+      - name: variant
+        description: Вариант эксперимента (значение параметра variant_key из event_json)
+        tests:
+          - not_null
+      - name: date
+        description: Дата события (UTC)
+        tests:
+          - not_null
+      - name: exposures
+        description: Количество уникальных устройств, получивших экспозицию в этот день
+      - name: activations
+        description: Количество уникальных устройств, совершивших целевое действие в день экспозиции
+      - name: revenue
+        description: Выручка (заглушка; подключить после получения revenue source)
+      - name: guardrail_crashes
+        description: Количество уникальных устройств с crash-событием в день экспозиции
+      - name: guardrail_errors
+        description: Количество уникальных устройств с error-событием в день экспозиции
+
+  - name: mart_funnel_daily
+    description: >
+      Дневная воронка по шагам.
+      Grain: funnel_id × step_name × date.
+      Определения воронок — hardcoded заглушки; перенести в seeds/funnel_definitions.csv.
+    columns:
+      - name: funnel_id
+        description: Идентификатор воронки (например onboarding, subscription)
+        tests:
+          - not_null
+      - name: step_name
+        description: Название шага воронки
+        tests:
+          - not_null
+      - name: step_order
+        description: Порядковый номер шага (начиная с 1)
+        tests:
+          - not_null
+      - name: date
+        description: Дата события (UTC)
+        tests:
+          - not_null
+      - name: entries
+        description: Количество уникальных устройств, достигших этого шага
+      - name: drop_off
+        description: Количество устройств, не перешедших на следующий шаг
+      - name: conversions
+        description: Конверсия из предыдущего шага (0–1)
+
+  - name: mart_cohort_daily
+    description: >
+      Дневные когорты удержания и LTV.
+      Когорта определяется первым днём активности устройства.
+      Grain: cohort_id × cohort_date × period_day.
+    columns:
+      - name: cohort_id
+        description: Идентификатор когорты (сегмент; сейчас 'default')
+        tests:
+          - not_null
+      - name: cohort_date
+        description: Дата первой активности когорты
+        tests:
+          - not_null
+      - name: period_day
+        description: День с момента первой активности (0 = день установки)
+        tests:
+          - not_null
+      - name: users
+        description: Размер когорты (количество устройств в день 0)
+      - name: retained
+        description: Количество устройств, активных на данный period_day
+      - name: retention_rate
+        description: Доля удержанных пользователей (retained / users)
+      - name: ltv
+        description: LTV на period_day (заглушка; подключить после получения revenue source)
+
+  - name: mart_forecast_points
+    description: >
+      Результаты прогнозных моделей (p50/p10/p90).
+      Источник: Cloud Run Jobs → BigQuery stg.forecast_runs.
+      Grain: run_id × metric × date.
+      Сейчас — заглушка; активируется после подключения GCP credentials (UGAA-1167).
+    columns:
+      - name: run_id
+        description: Идентификатор запуска forecast-модели
+      - name: metric
+        description: Название метрики прогноза (например dau, revenue, retention_d7)
+      - name: date
+        description: Дата прогноза
+      - name: p50
+        description: Медианный прогноз
+      - name: p10
+        description: Нижняя граница доверительного интервала (10-й перцентиль)
+      - name: p90
+        description: Верхняя граница доверительного интервала (90-й перцентиль)
+      - name: generated_at
+        description: Timestamp запуска модели

@@ -7,6 +7,7 @@
     "build": "NODE_ENV=production next build",
     "start": "next start",
     "lint": "next lint",
+    "verify:stitch": "node scripts/verify-stitch-first.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed",
@@ -14,10 +15,12 @@
     "test:unit:watch": "vitest"
   },
   "dependencies": {
+    "@types/pg": "^8.20.0",
     "firebase": "^12.12.0",
     "firebase-admin": "^13.8.0",
     "jose": "^6.2.2",
     "next": "^15.5.15",
+    "pg": "^8.20.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

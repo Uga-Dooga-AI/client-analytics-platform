@@ -1,0 +1,74 @@
+version: 2
+
+sources:
+  - name: appmetrica_raw
+    description: >
+      Сырые данные AppMetrica, загружаемые через Logs API → GCS → BigQuery.
+      Схема: raw в dataset вашего GCP-проекта.
+    database: "{{ env_var('GCP_SOURCE_PROJECT', 'YOUR_GCP_PROJECT_ID') }}"
+    schema: raw
+    tables:
+      - name: events
+        description: >
+          Поток всех событий AppMetrica (installs, sessions, custom events, ab_*).
+          Обновляется ежедневно D+1 в 07:00 MSK.
+        columns:
+          - name: event_datetime
+            description: Дата и время события (UTC)
+          - name: event_name
+            description: Название события (например session_start, ab_experiment_assigned)
+          - name: appmetrica_device_id
+            description: Уникальный ID устройства в AppMetrica (строка)
+          - name: profile_id
+            description: Клиентский user_id; может быть null для анонимных сессий
+          - name: app_version_name
+            description: Версия приложения (строка)
+          - name: os_name
+            description: Операционная система (ios / android)
+          - name: country_iso_code
+            description: ISO-код страны устройства
+          - name: city
+            description: Город устройства
+          - name: event_json
+            description: JSON-строка с произвольными параметрами события
+          - name: session_id
+            description: ID сессии AppMetrica
+          - name: application_id
+            description: ID приложения в AppMetrica
+
+      - name: installs
+        description: >
+          Инсталляции приложения из AppMetrica.
+          Используется для acquisition-воронки.
+        columns:
+          - name: install_datetime
+            description: Дата и время инсталляции (UTC)
+          - name: appmetrica_device_id
+            description: Уникальный ID устройства
+          - name: profile_id
+            description: Клиентский user_id (может быть null)
+          - name: tracker_name
+            description: Название трекера / источника установки
+          - name: country_iso_code
+            description: ISO-код страны
+          - name: os_name
+            description: Операционная система
+          - name: app_version_name
+            description: Версия приложения при установке
+
+      - name: sessions
+        description: >
+          Сессии пользователей из AppMetrica.
+        columns:
+          - name: session_start_datetime
+            description: Дата и время начала сессии (UTC)
+          - name: appmetrica_device_id
+            description: Уникальный ID устройства
+          - name: profile_id
+            description: Клиентский user_id
+          - name: session_id
+            description: ID сессии
+          - name: duration_seconds
+            description: Длительность сессии в секундах
+          - name: os_name
+            description: Операционная система

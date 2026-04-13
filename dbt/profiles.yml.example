@@ -1,0 +1,22 @@
+client_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      project: YOUR_GCP_PROJECT_ID          # замените на ID вашего GCP проекта
+      dataset: dbt_dev                       # dev-схема; для prod используйте dbt_prod
+      location: europe-west3                 # регион BigQuery
+      keyfile: /path/to/service-account.json # путь к JSON-ключу service account
+      timeout_seconds: 300
+      threads: 4
+
+    prod:
+      type: bigquery
+      method: service-account
+      project: YOUR_GCP_PROJECT_ID
+      dataset: dbt_prod
+      location: europe-west3
+      keyfile: /path/to/service-account.json
+      timeout_seconds: 300
+      threads: 4

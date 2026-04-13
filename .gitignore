@@ -46,3 +46,7 @@ firestore-debug.log
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# npm cache
+.npm-cache/
+.playwright-cli/
