@@ -1,4 +1,4 @@
-import { adminDb } from "@/lib/firebase/admin";
+import { isBootstrapComplete as readBootstrapComplete } from "@/lib/auth/store";
 
 /**
  * One-way in-process cache for bootstrapComplete flag.
@@ -14,8 +14,7 @@ let bootstrapCompleteCache: boolean | null = null;
 export async function isBootstrapComplete(): Promise<boolean> {
   if (bootstrapCompleteCache === true) return true;
 
-  const doc = await adminDb.collection("config").doc("bootstrap").get();
-  const complete = doc.exists && doc.data()?.bootstrapComplete === true;
+  const complete = await readBootstrapComplete();
 
   if (complete) bootstrapCompleteCache = true;
   return complete;

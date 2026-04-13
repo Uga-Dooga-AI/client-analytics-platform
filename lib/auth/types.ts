@@ -14,4 +14,5 @@ export interface AuthClaims {
 
 export interface AuthUser extends AuthClaims {
   displayName: string | null;
+  avatarUrl: string | null;
 }

@@ -20,6 +20,15 @@ No credentials required for the UI shell. Data-connected sections show placehold
 
 The current build mode is `mock-first`: interface delivery proceeds independently from BigQuery, Google Cloud, and AppMetrica setup.
 
+Auth/runtime path is now:
+
+- Google OAuth on the server
+- signed httpOnly session cookie
+- Railway-hosted app/API
+- own access store in Railway Postgres
+
+Firebase Functions and Firestore are no longer part of the primary app runtime.
+
 To review the product without logging in, enable demo access:
 
 ```bash
@@ -27,11 +36,13 @@ DEMO_ACCESS_ENABLED=true NEXT_PUBLIC_DEMO_ACCESS_ENABLED=true npm run dev
 ```
 
 This bypasses auth middleware locally and opens the full workspace in demo mode.
-It also skips the bootstrap-key startup check so the shell can be reviewed before auth/bootstrap secrets are issued.
+It also skips the bootstrap-key and auth-secret startup checks so the shell can be reviewed before auth/bootstrap secrets are issued.
+When `DATABASE_URL` is absent in demo mode, admin/access APIs fall back to an in-memory review store so the interface still works end to end.
 
 For production auto-approval of the primary operator account, set:
 
 ```bash
+AUTO_APPROVED_SUPERADMIN_EMAILS=sergey.mishustin@ugadooga.com
 AUTO_APPROVED_ADMIN_EMAILS=sergey.mishustin@ugadooga.com
 ```
 
@@ -56,7 +67,8 @@ This checks that:
 | Route | Status | Notes |
 |---|---|---|
 | `/` | Shell | Redirects to `/overview` or `/sign-in` |
-| `/sign-in` | Shell | Auth placeholder (auth provider TBD, UGAA-1169) |
+| `/login` | Live | Google OAuth entrypoint |
+| `/sign-in` | Live | Redirects to `/login` |
 | `/overview` | Shell | KPI surface and operator overview |
 | `/experiments` | Shell | Experiment list and filters |
 | `/experiments/[id]` | Shell | Experiment detail, variants, guardrails, CI shell |

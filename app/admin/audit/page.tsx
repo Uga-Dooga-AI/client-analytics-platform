@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { auth } from "@/lib/firebase/client";
 
 interface AuditEntry {
   id: string;
@@ -53,12 +52,6 @@ export default function AdminAuditPage() {
   const [dateTo, setDateTo] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  async function getToken() {
-    const user = auth.currentUser;
-    if (!user) throw new Error("Not authenticated");
-    return user.getIdToken();
-  }
-
   const fetchEntries = useCallback(
     async (cursor?: string | null, append = false) => {
       if (!append) setLoading(true);
@@ -66,7 +59,6 @@ export default function AdminAuditPage() {
       setError(null);
 
       try {
-        const token = await getToken();
         const params = new URLSearchParams({ limit: "50" });
         if (actionFilter !== "all") params.set("action", actionFilter);
         if (dateFrom) params.set("from", new Date(dateFrom).toISOString());
@@ -77,9 +69,7 @@ export default function AdminAuditPage() {
         }
         if (cursor) params.set("after", cursor);
 
-        const res = await fetch(`/api/admin/audit?${params}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await fetch(`/api/admin/audit?${params}`, { cache: "no-store" });
         if (!res.ok) throw new Error("Failed to load audit log");
 
         const data = await res.json();

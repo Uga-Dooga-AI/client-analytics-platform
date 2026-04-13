@@ -2,8 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { signOut } from "firebase/auth";
-import { auth } from "@/lib/firebase/client";
 import { useAuth } from "@/lib/auth/context";
 
 type RequestStatus = "idle" | "submitting" | "submitted" | "rejected";
@@ -20,13 +18,9 @@ export default function AccessRequestPage() {
     setErrorMsg(null);
 
     try {
-      const idToken = await user.getIdToken();
       const res = await fetch("/api/access-requests", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${idToken}`,
-        },
+        headers: { "Content-Type": "application/json" },
       });
 
       if (res.status === 409) {
@@ -47,7 +41,6 @@ export default function AccessRequestPage() {
   }
 
   async function handleSignOut() {
-    await signOut(auth);
     await fetch("/api/auth/session", { method: "DELETE" });
     router.replace("/login");
   }
@@ -98,10 +91,10 @@ export default function AccessRequestPage() {
             marginBottom: 20,
           }}
         >
-          {user.photoURL ? (
+          {user.avatarUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={user.photoURL}
+              src={user.avatarUrl}
               alt=""
               width={36}
               height={36}

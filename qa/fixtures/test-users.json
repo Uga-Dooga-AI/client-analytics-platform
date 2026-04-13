@@ -1,0 +1,11 @@
+{
+  "qaTestUser": {
+    "email": "qa-test@analytics-platform.test",
+    "password": "qatest-staging-2026",
+    "displayName": "QA Test User",
+    "uid": "kGmi1sjbhkf0f2dMqMpAKYHFCCJ2",
+    "emailVerified": true,
+    "firebaseProject": "analytics-platform-53335",
+    "note": "Created via Firebase Admin SDK. Use signInWithEmailAndPassword() in Playwright. Recreate via scripts/create-qa-test-user.mjs if uid changes."
+  }
+}

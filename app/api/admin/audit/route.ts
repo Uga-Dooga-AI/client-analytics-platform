@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerAuth } from "@/lib/auth/server";
-import { adminDb } from "@/lib/firebase/admin";
-import type { Query, CollectionReference } from "firebase-admin/firestore";
+import { listAuditEntries, toTimestampValue } from "@/lib/auth/store";
+
+export const runtime = "nodejs";
 
 /**
  * GET /api/admin/audit
@@ -21,32 +22,25 @@ export async function GET(request: NextRequest) {
   const from = searchParams.get("from");
   const to = searchParams.get("to");
   const limitParam = Math.min(Number(searchParams.get("limit") ?? 50), 200);
-  const afterId = searchParams.get("after");
+  const after = searchParams.get("after");
+  const { entries, nextAfter } = await listAuditEntries({
+    action,
+    from,
+    to,
+    limit: limitParam,
+    after,
+  });
 
-  let ref: CollectionReference | Query = adminDb.collection("audit_log");
-
-  if (action) {
-    ref = ref.where("action", "==", action);
-  }
-  if (from) {
-    ref = (ref as Query).where("timestamp", ">=", new Date(from));
-  }
-  if (to) {
-    ref = (ref as Query).where("timestamp", "<=", new Date(to));
-  }
-
-  ref = (ref as Query).orderBy("timestamp", "desc").limit(limitParam);
-
-  if (afterId) {
-    const cursorDoc = await adminDb.collection("audit_log").doc(afterId).get();
-    if (cursorDoc.exists) {
-      ref = (ref as Query).startAfter(cursorDoc);
-    }
-  }
-
-  const snap = await ref.get();
-  const entries = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-  const lastId = snap.docs[snap.docs.length - 1]?.id ?? null;
-
-  return NextResponse.json({ entries, nextAfter: entries.length === limitParam ? lastId : null });
+  return NextResponse.json({
+    entries: entries.map((entry) => ({
+      id: entry.logId,
+      timestamp: toTimestampValue(entry.timestamp),
+      actorEmail: entry.actorEmail,
+      targetEmail: entry.targetEmail,
+      action: entry.action,
+      oldRole: entry.oldRole,
+      newRole: entry.newRole,
+    })),
+    nextAfter,
+  });
 }

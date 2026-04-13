@@ -2,8 +2,6 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { auth } from "@/lib/firebase/client";
 import type { UserRole } from "@/lib/auth/types";
 
 interface UserRecord {
@@ -36,7 +34,6 @@ const ROLE_COLORS: Record<UserRole, { bg: string; color: string }> = {
 const ASSIGNABLE_ROLES: UserRole[] = ["admin", "analyst", "ab_analyst", "viewer"];
 
 export default function AdminUsersPage() {
-  const router = useRouter();
   const [users, setUsers] = useState<UserRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -44,20 +41,11 @@ export default function AdminUsersPage() {
   const [roleEdit, setRoleEdit] = useState<{ uid: string; role: UserRole } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
 
-  async function getToken() {
-    const user = auth.currentUser;
-    if (!user) throw new Error("Not authenticated");
-    return user.getIdToken();
-  }
-
   async function fetchUsers() {
     setLoading(true);
     setError(null);
     try {
-      const token = await getToken();
-      const res = await fetch("/api/admin/users", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch("/api/admin/users", { cache: "no-store" });
       if (!res.ok) throw new Error("Failed to load users");
       const data = await res.json();
       setUsers(data.users);
@@ -73,10 +61,8 @@ export default function AdminUsersPage() {
   async function handleDeleteConfirm(uid: string) {
     setActionLoading(true);
     try {
-      const token = await getToken();
       const res = await fetch(`/api/admin/users/${uid}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error("Delete failed");
       setUsers((prev) => prev.filter((u) => u.uid !== uid));
@@ -91,12 +77,10 @@ export default function AdminUsersPage() {
   async function handleRoleChange(uid: string, newRole: UserRole) {
     setActionLoading(true);
     try {
-      const token = await getToken();
       const res = await fetch(`/api/admin/users/${uid}/role`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ role: newRole }),
       });

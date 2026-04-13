@@ -11,36 +11,50 @@
 ## Surfaces
 
 - Web: Railway deployment (Next.js), desktop browser
+- Staging URL: https://acceptable-benevolence-production-5a19.up.railway.app
 - iOS: не в scope для v1
 - Android: не в scope для v1
 - Other: n/a
 
 ## Suites
 
-- Smoke: `qa/test-cases/smoke/`
-  - `auth-smoke.md` — sign-in, sign-out, session persistence
-  - `nav-smoke.md` — sidebar navigation, placeholder routes
-- Feature packs: `qa/test-cases/features/`
-  - `auth/` — Firebase Auth + RBAC (30 E2E тестов, все 8 AC покрыты)
-  - `overview.md` — overview page: KPI strip, tables, panels
-- Regression: `qa/test-cases/regression/` _(заполняется к RC)_
-- Fixtures: `qa/test-cases/fixtures/`
-  - `auth-emulator.md` — Firebase Emulator setup, seed-стратегия, review-mode path
+### Smoke (release-critical)
+- `smoke/navigation.md` — все dashboard routes загружаются без ошибок (NAV-01..NAV-08)
+- `smoke/auth-gate.md` — неавторизованный доступ перенаправляется на /login (AUTH-GATE-01..06)
+
+### Feature packs
+- `features/auth/` — Firebase Auth + RBAC (30 E2E тестов, все 8 AC покрыты)
+- `features/experiments/list.md` — фильтрация, status badge, переход на detail (EXP-LIST-01..09)
+- `features/experiments/detail.md` — variant comparison table, CI band, guardrail metrics (EXP-DET-01..10)
+- `features/funnels/list.md` — список воронок, KPI summary, status badge (FUNNEL-LIST-01..08)
+- `features/funnels/detail.md` — step-by-step funnel visualization (FUNNEL-DET-01..08)
+- `features/cohorts/grid.md` — retention grid heatmap, trend charts (COH-01..09)
+- `features/forecasts/list.md` — forecast runs, confidence band charts, cards (FORE-01..11)
+
+### Regression
+- `regression/auth-rbac.md` — full auth/RBAC regression pack для security changes и pre-RC
+
+### Fixtures
+- `fixtures/auth-emulator.md` — Firebase Emulator setup, seed-стратегия, review-mode path
 
 ## Release-critical flows
 
 - Auth: успешный вход / выход, session persistence, RBAC enforcement
-- Navigation: sidebar, route transitions без ошибок
-- Overview page: рендер KPI strip и основных панелей
+- Navigation: sidebar, все 7 dashboard routes без ошибок
+- Experiments: list + detail с guardrail metrics
+- Funnels: list + detail visualization
+- Cohorts: retention grid render
+- Forecasts: runs table + confidence band chart
 
 ## Правило scope selection
 
 | Тип изменений | Что запускать |
 |---|---|
-| Small fix | Smoke + затронутый branch |
+| Small fix | Smoke + затронутый feature pack |
 | Feature work | Smoke + feature pack + смежные области |
-| RC / owner review | Smoke + feature pack + regression + evidence pack |
-| High-risk (auth, nav, infra) | Smoke + feature pack + broader regression |
+| Auth/security change | Smoke + `features/auth/` + `regression/auth-rbac.md` |
+| RC / owner review | Smoke + все feature packs + regression + evidence pack |
+| High-risk (nav shell, middleware) | Smoke + все затронутые feature packs + broader regression |
 
 ## Auth E2E — быстрый запуск
 
@@ -63,11 +77,15 @@ npx playwright test e2e/auth/rbac.spec.ts        # AC-5, AC-6
 - Firebase Emulator: настроен (`firebase.json`, `.env.test`)
 - Playwright E2E: настроен (`playwright.config.ts`, `e2e/`)
 - Mock auth для browser-прохода: через E2E seed helpers (без Google OAuth popup)
-- Полный интерактивный browser-проход с UI: **заблокирован UGAA-1169** (production Firebase creds)
+- Полный интерактивный browser-проход (staging): требует pre-approved Google аккаунт
+- Admin role тестирование: требует аккаунт с role=admin в Firestore + `ADMIN_SECRET_PATH`
+
+## Блокеры
+
+- Реальные данные (BigQuery, AppMetrica) заблокированы UGAA-1166/1167 — все feature packs работают на mock data
 
 ## Notes
 
 - Стандарт: `/Users/sergeymishustin/.paperclip/operating-standards/testing/TEST_CASE_STANDARD.md`
 - E2E требуют: Firebase Emulators `--only auth,firestore` (Cloud Functions не обязателен)
-- Реальные данные (BigQuery, AppMetrica) заблокированы задачами UGAA-1166/1167
-- Auth E2E полностью готовы к запуску как только Firebase Emulators запущены
+- Smoke pack исполним на staging под авторизованным аккаунтом

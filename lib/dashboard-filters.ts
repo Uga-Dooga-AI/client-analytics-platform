@@ -10,9 +10,11 @@ export type DashboardSegmentKey =
   | "paid-ua";
 export type DashboardGroupByKey =
   | "none"
+  | "platform"
   | "country"
   | "source"
   | "campaign"
+  | "creative"
   | "company";
 export type DashboardTagKey =
   | "all"
@@ -69,9 +71,11 @@ export const SEGMENT_OPTIONS: Array<{ key: DashboardSegmentKey; label: string }>
 
 export const GROUP_BY_OPTIONS: Array<{ key: DashboardGroupByKey; label: string }> = [
   { key: "none", label: "No grouping" },
+  { key: "platform", label: "Platform" },
   { key: "country", label: "Country" },
   { key: "source", label: "Traffic source" },
   { key: "campaign", label: "Campaign" },
+  { key: "creative", label: "Creative" },
   { key: "company", label: "Company" },
 ];
 

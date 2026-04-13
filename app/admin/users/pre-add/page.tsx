@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { auth } from "@/lib/firebase/client";
 import type { UserRole } from "@/lib/auth/types";
 
 const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
@@ -26,15 +25,10 @@ export default function PreAddUserPage() {
     setError(null);
 
     try {
-      const user = auth.currentUser;
-      if (!user) throw new Error("Not authenticated");
-      const token = await user.getIdToken();
-
       const res = await fetch("/api/admin/users/pre-add", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ email, role }),
       });

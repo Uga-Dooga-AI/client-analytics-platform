@@ -3,8 +3,6 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { signOut } from "firebase/auth";
-import { auth } from "@/lib/firebase/client";
 import { useAuth } from "@/lib/auth/context";
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
@@ -25,13 +23,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     if (role !== "admin" && role !== "super_admin") return;
     async function fetchCount() {
       try {
-        const { user } = auth.currentUser
-          ? { user: auth.currentUser }
-          : { user: null };
-        if (!user) return;
-        const idToken = await user.getIdToken();
         const res = await fetch("/api/admin/requests?status=pending&countOnly=true", {
-          headers: { Authorization: `Bearer ${idToken}` },
+          cache: "no-store",
         });
         if (res.ok) {
           const data = await res.json();
@@ -45,7 +38,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   }, [role]);
 
   async function handleSignOut() {
-    await signOut(auth);
     await fetch("/api/auth/session", { method: "DELETE" });
     router.replace("/login");
   }

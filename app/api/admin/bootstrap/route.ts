@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebase/admin";
-import { setCustomClaims } from "@/lib/auth/claims";
-import { FieldValue, Timestamp } from "@/lib/firebase/firestore";
 import { isBootstrapComplete } from "@/lib/bootstrap/guard";
 import { checkRateLimit } from "@/lib/bootstrap/rateLimiter";
 import { logBootstrapEvent } from "@/lib/bootstrap/audit";
+import { compareBootstrapKey } from "@/lib/bootstrap/compareKey";
+import { bootstrapSuperAdmin } from "@/lib/auth/store";
+import { readSessionFromRequest } from "@/lib/auth/session";
+
+export const runtime = "nodejs";
 
 /**
  * POST /api/admin/bootstrap
@@ -12,13 +14,13 @@ import { logBootstrapEvent } from "@/lib/bootstrap/audit";
  * Creates the first super_admin. Protected by SUPERADMIN_BOOTSTRAP_KEY.
  *
  * Security mechanisms:
- *  1. Atomicity — Firestore transaction creates user + sets bootstrapComplete flag.
+ *  1. Atomicity — store transaction creates user + sets bootstrapComplete flag.
  *  2. bootstrapGuard — 410 if system is already initialised.
  *  3. Startup validation — validateBootstrapConfig() throws on boot if key < 32 chars.
  *  4. Rate limiting — 5 req / 15 min per IP → 429.
  *  5. Audit logging — every call writes one event to `audit_log`.
  *
- * Body: { uid: string, bootstrapKey: string }
+ * Body: { bootstrapKey: string }
  */
 export async function POST(request: NextRequest) {
   const ip =
@@ -51,7 +53,7 @@ export async function POST(request: NextRequest) {
   }
 
   // ── Parse body ──────────────────────────────────────────────────────────────
-  let body: { uid?: string; bootstrapKey?: string };
+  let body: { bootstrapKey?: string };
   try {
     body = await request.json();
   } catch {
@@ -61,7 +63,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { uid, bootstrapKey: providedKey } = body;
+  const { bootstrapKey: providedKey } = body;
 
   // ── 3. Key validation (also enforced at startup via validateBootstrapConfig) ─
   const bootstrapKey = process.env.SUPERADMIN_BOOTSTRAP_KEY;
@@ -75,63 +77,33 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!providedKey || providedKey !== bootstrapKey) {
+  if (!providedKey || !compareBootstrapKey(providedKey, bootstrapKey)) {
     await logBootstrapEvent("bootstrap_failure", ip, {
       reason: "invalid_key",
     });
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  if (!uid || typeof uid !== "string") {
+  const session = await readSessionFromRequest(request);
+  if (!session) {
     await logBootstrapEvent("bootstrap_attempt", ip, {
-      reason: "missing_uid",
-    });
-    return NextResponse.json({ error: "uid is required" }, { status: 400 });
-  }
-
-  // ── Verify Firebase user exists ─────────────────────────────────────────────
-  const firebaseUser = await adminAuth.getUser(uid).catch(() => null);
-  if (!firebaseUser) {
-    await logBootstrapEvent("bootstrap_attempt", ip, {
-      reason: "firebase_user_not_found",
+      reason: "session_not_found",
     });
     return NextResponse.json(
-      { error: "Firebase user not found" },
-      { status: 404 }
+      { error: "Authenticated session required" },
+      { status: 401 }
     );
   }
 
-  const adminEmail = firebaseUser.email ?? "";
+  const adminEmail = session.email ?? "";
 
-  // ── 1. Atomic Firestore transaction ─────────────────────────────────────────
+  // ── 1. Atomic store transaction ─────────────────────────────────────────────
   try {
-    await adminDb.runTransaction(async (tx) => {
-      const bootstrapRef = adminDb.collection("config").doc("bootstrap");
-      const bootstrapDoc = await tx.get(bootstrapRef);
-
-      // Re-check inside the transaction to guard against race conditions.
-      if (bootstrapDoc.exists && bootstrapDoc.data()?.bootstrapComplete === true) {
-        throw new Error("BOOTSTRAP_COMPLETE");
-      }
-
-      const userRef = adminDb.collection("users").doc(uid);
-      tx.set(userRef, {
-        uid,
-        email: adminEmail,
-        displayName: firebaseUser.displayName ?? null,
-        role: "super_admin",
-        approved: true,
-        preAdded: false,
-        addedBy: null,
-        createdAt: Timestamp.now(),
-        lastLoginAt: null,
-      });
-
-      tx.set(bootstrapRef, {
-        bootstrapComplete: true,
-        completedAt: FieldValue.serverTimestamp(),
-        completedByEmail: adminEmail,
-      });
+    await bootstrapSuperAdmin({
+      authUid: session.uid,
+      email: adminEmail,
+      displayName: session.displayName,
+      avatarUrl: session.avatarUrl,
     });
   } catch (err) {
     if (err instanceof Error && err.message === "BOOTSTRAP_COMPLETE") {
@@ -155,11 +127,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Set custom claims outside the transaction (Firebase Auth, not Firestore).
-  await setCustomClaims(uid, { role: "super_admin", approved: true });
-
   // ── 5. Audit log — success ──────────────────────────────────────────────────
   await logBootstrapEvent("bootstrap_success", ip, { email: adminEmail });
 
-  return NextResponse.json({ ok: true, uid, role: "super_admin" });
+  return NextResponse.json({ ok: true, uid: session.uid, role: "super_admin" });
 }

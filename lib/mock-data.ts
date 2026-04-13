@@ -616,6 +616,11 @@ export const MOCK_PROJECT_BINDINGS: ProjectBinding[] = [
 export const MOCK_METRIC_CATALOG = [
   { metric: "d1_activation_rate", owner: "Product", grain: "experiment_daily", status: "Canonical" },
   { metric: "revenue_per_active_user", owner: "Monetization", grain: "experiment_daily", status: "Canonical" },
+  { metric: "ua_roas_total_d60", owner: "Growth", grain: "ua_cohort_daily", status: "Canonical" },
+  { metric: "ua_roas_ads_d60", owner: "Growth", grain: "ua_cohort_daily", status: "Canonical" },
+  { metric: "ua_roas_iap_d60", owner: "Growth", grain: "ua_cohort_daily", status: "Canonical" },
+  { metric: "retention_d7", owner: "Growth", grain: "cohort_daily", status: "Canonical" },
+  { metric: "avg_session_length_minutes", owner: "Product", grain: "cohort_daily", status: "Canonical" },
   { metric: "tutorial_completion_rate", owner: "Growth", grain: "funnel_daily", status: "Draft" },
   { metric: "forecast_ci_width", owner: "Data Science", grain: "forecast_run", status: "Canonical" },
 ];

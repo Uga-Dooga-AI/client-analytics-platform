@@ -54,6 +54,80 @@ export default async function SettingsPage() {
           </div>
         </section>
 
+        <section style={{ display: "grid", gridTemplateColumns: "1.15fr 1fr", gap: 20 }}>
+          <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, overflow: "hidden" }}>
+            <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border-soft)" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Project bootstrap contract</div>
+              <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>What an administrator provides once, so the rest of the project can be provisioned remotely.</div>
+            </div>
+
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Input", "Where it lands", "What gets created automatically"].map((column) => (
+                    <th
+                      key={column}
+                      style={{
+                        padding: "10px 16px",
+                        textAlign: "left",
+                        fontSize: 10.5,
+                        fontWeight: 600,
+                        letterSpacing: "0.06em",
+                        textTransform: "uppercase",
+                        color: "var(--color-ink-500)",
+                        background: "var(--color-panel-soft)",
+                        borderBottom: "1px solid var(--color-border-soft)",
+                      }}
+                    >
+                      {column}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  ["AppMetrica app id + token", "Secret store + project registry", "Logs API ingestion job, raw landing table, source health checks"],
+                  ["BigQuery project + dataset", "Connector registry", "Canonical marts, serving views, scheduled transforms"],
+                  ["Bounds artifact bucket", "GCS project binding", "Versioned confidence-interval artifacts, refresh manifests, cache pointers"],
+                  ["Project slug + display name", "Project registry", "UI shell, route visibility, default filter presets, access scopes"],
+                ].map((row, index, rows) => (
+                  <tr key={row[0]} style={{ borderBottom: index < rows.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
+                    {row.map((cell) => (
+                      <td key={cell} style={{ padding: "12px 16px", fontSize: 13, color: "var(--color-ink-700)", lineHeight: 1.55 }}>
+                        {cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, padding: 18 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Storage split</div>
+              <div style={{ marginTop: 8, fontSize: 12.5, color: "var(--color-ink-700)", lineHeight: 1.65 }}>
+                <strong style={{ color: "var(--color-ink-950)" }}>BigQuery</strong> should remain the serving and comparison
+                layer for cohort slices, grouped marts, and API-facing aggregates.
+              </div>
+              <div style={{ marginTop: 8, fontSize: 12.5, color: "var(--color-ink-700)", lineHeight: 1.65 }}>
+                <strong style={{ color: "var(--color-ink-950)" }}>Google Cloud Storage</strong> is a better home for
+                interval helper artifacts and versioned bound snapshots than Google Drive because jobs can read and rotate
+                them without notebook-specific coupling.
+              </div>
+            </div>
+
+            <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, padding: 18 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Refresh model</div>
+              <div style={{ marginTop: 8, fontSize: 12.5, color: "var(--color-ink-700)", lineHeight: 1.65 }}>
+                Range and bound recalculation should run as batch refreshes, write new artifacts to GCS, publish the active
+                manifest version, and only then update BigQuery serving marts. That keeps the UI stable while intervals are
+                recomputed.
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, overflow: "hidden" }}>
           <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border-soft)" }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Data source registry</div>

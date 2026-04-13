@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth/context";
-import { TestSignInHelper } from "@/components/TestSignInHelper";
 
 export const metadata: Metadata = {
   title: "Client Analytics Platform",
@@ -25,7 +24,6 @@ export default function RootLayout({
       </head>
       <body>
         <AuthProvider>
-          {process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST ? <TestSignInHelper /> : null}
           {children}
         </AuthProvider>
       </body>

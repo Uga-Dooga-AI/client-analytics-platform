@@ -1,13 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerAuth } from "@/lib/auth/server";
-import { setCustomClaims } from "@/lib/auth/claims";
-import {
-  getAccessRequest,
-  updateAccessRequest,
-  upsertUserDoc,
-  writeAuditLog,
-  Timestamp,
-} from "@/lib/firebase/firestore";
+import { approveAccessRequest } from "@/lib/auth/store";
 import type { UserRole } from "@/lib/auth/types";
 
 const ASSIGNABLE_ROLES: UserRole[] = [
@@ -16,6 +9,8 @@ const ASSIGNABLE_ROLES: UserRole[] = [
   "ab_analyst",
   "viewer",
 ];
+
+export const runtime = "nodejs";
 
 /**
  * POST /api/admin/requests/[requestId]/approve
@@ -52,43 +47,24 @@ export async function POST(
     );
   }
 
-  const accessRequest = await getAccessRequest(requestId);
-  if (!accessRequest) {
-    return NextResponse.json({ error: "Access request not found" }, { status: 404 });
+  try {
+    await approveAccessRequest({
+      requestId,
+      role,
+      actor: { uid: auth.uid, email: auth.email },
+    });
+    return NextResponse.json({ ok: true, requestId, role });
+  } catch (error) {
+    if (!(error instanceof Error)) {
+      throw error;
+    }
+
+    if (error.message === "NOT_FOUND") {
+      return NextResponse.json({ error: "Access request not found" }, { status: 404 });
+    }
+    if (error.message === "ALREADY_RESOLVED") {
+      return NextResponse.json({ error: "Request is already resolved" }, { status: 409 });
+    }
+    throw error;
   }
-  if (accessRequest.status !== "pending") {
-    return NextResponse.json(
-      { error: `Request is already ${accessRequest.status}` },
-      { status: 409 }
-    );
-  }
-
-  const now = Timestamp.now();
-
-  await setCustomClaims(accessRequest.uid, { role, approved: true });
-
-  await upsertUserDoc(accessRequest.uid, {
-    role,
-    approved: true,
-    lastLoginAt: now,
-  });
-
-  await updateAccessRequest(requestId, {
-    status: "approved",
-    assignedRole: role,
-    resolvedAt: now,
-    resolvedBy: auth.uid,
-  });
-
-  await writeAuditLog({
-    actorUid: auth.uid,
-    actorEmail: auth.email,
-    targetUid: accessRequest.uid,
-    targetEmail: accessRequest.email,
-    action: "access_approved",
-    oldRole: null,
-    newRole: role,
-  });
-
-  return NextResponse.json({ ok: true, requestId, role });
 }

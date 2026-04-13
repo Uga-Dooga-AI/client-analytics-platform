@@ -1,58 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { GoogleAuthProvider, signInWithPopup } from "firebase/auth";
-import { auth } from "@/lib/firebase/client";
-
-const googleProvider = new GoogleAuthProvider();
+import { Suspense, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 const DEMO_ACCESS_ENABLED = process.env.NEXT_PUBLIC_DEMO_ACCESS_ENABLED === "true";
 
 function LoginContent() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const runtimeError = searchParams.get("error");
+  const callbackUrl = useMemo(
+    () => searchParams.get("callbackUrl") ?? "/overview",
+    [searchParams]
+  );
 
-  async function handleGoogleSignIn() {
+  function handleGoogleSignIn() {
     setLoading(true);
-    setError(null);
-
-    try {
-      const credential = await signInWithPopup(auth, googleProvider);
-      const idToken = await credential.user.getIdToken();
-
-      // Establish httpOnly session cookie via server
-      const res = await fetch("/api/auth/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken }),
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to create session");
-      }
-
-      const claims = await res.json();
-      const callbackUrl = searchParams.get("callbackUrl") ?? "/overview";
-
-      if (!claims.approved) {
-        router.replace("/access-request");
-      } else {
-        router.replace(callbackUrl);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Sign-in failed";
-      // User closing the popup is not a real error
-      if (msg.includes("popup-closed") || msg.includes("cancelled")) {
-        setError(null);
-      } else {
-        setError(msg);
-      }
-    } finally {
-      setLoading(false);
-    }
+    window.location.href = `/api/auth/google/start?callbackUrl=${encodeURIComponent(callbackUrl)}`;
   }
 
   return (
@@ -120,7 +84,7 @@ function LoginContent() {
 
       {DEMO_ACCESS_ENABLED ? (
         <Link
-          href={searchParams.get("callbackUrl") ?? "/overview"}
+          href={callbackUrl}
           style={{
             marginTop: 10,
             width: "100%",
@@ -144,7 +108,7 @@ function LoginContent() {
         </Link>
       ) : null}
 
-      {error && (
+      {runtimeError && (
         <div
           style={{
             marginTop: 16,
@@ -157,7 +121,7 @@ function LoginContent() {
             lineHeight: 1.5,
           }}
         >
-          {error}
+          {runtimeError}
         </div>
       )}
 

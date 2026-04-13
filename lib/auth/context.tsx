@@ -6,18 +6,16 @@ import {
   useEffect,
   useState,
   ReactNode,
+  useCallback,
 } from "react";
-import { onIdTokenChanged, User } from "firebase/auth";
-import { auth } from "@/lib/firebase/client";
-import type { UserRole } from "./types";
+import type { AuthUser, UserRole } from "./types";
 
 interface AuthState {
-  user: User | null;
+  user: AuthUser | null;
   role: UserRole | null;
   approved: boolean;
   loading: boolean;
-  /** Current Firebase ID token — refreshed automatically */
-  idToken: string | null;
+  refresh: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState>({
@@ -25,7 +23,7 @@ const AuthContext = createContext<AuthState>({
   role: null,
   approved: false,
   loading: true,
-  idToken: null,
+  refresh: async () => undefined,
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -34,38 +32,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     role: null,
     approved: false,
     loading: true,
-    idToken: null,
+    refresh: async () => undefined,
   });
 
-  useEffect(() => {
-    /**
-     * onIdTokenChanged fires on:
-     *  - sign-in / sign-out
-     *  - token refresh (every ~1 hour)
-     *  - custom claims update (after forceRefresh)
-     *
-     * This ensures role + approved stay in sync with Firestore-backed custom claims.
-     */
-    const unsubscribe = onIdTokenChanged(auth, async (user) => {
-      if (!user) {
-        setState({ user: null, role: null, approved: false, loading: false, idToken: null });
+  const refresh = useCallback(async () => {
+    try {
+      const response = await fetch("/api/auth/me", {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        setState({
+          user: null,
+          role: null,
+          approved: false,
+          loading: false,
+          refresh,
+        });
         return;
       }
 
-      const tokenResult = await user.getIdTokenResult();
-      const claims = tokenResult.claims as { role?: UserRole; approved?: boolean };
-
+      const data = (await response.json()) as { user: AuthUser };
       setState({
-        user,
-        role: claims.role ?? null,
-        approved: claims.approved ?? false,
+        user: data.user,
+        role: data.user.role,
+        approved: data.user.approved,
         loading: false,
-        idToken: tokenResult.token,
+        refresh,
       });
-    });
-
-    return unsubscribe;
+    } catch {
+      setState({
+        user: null,
+        role: null,
+        approved: false,
+        loading: false,
+        refresh,
+      });
+    }
   }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   return <AuthContext.Provider value={state}>{children}</AuthContext.Provider>;
 }

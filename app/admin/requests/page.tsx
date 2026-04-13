@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { auth } from "@/lib/firebase/client";
 import type { UserRole } from "@/lib/auth/types";
 
 interface AccessRequest {
@@ -30,20 +29,11 @@ export default function AdminRequestsPage() {
   const [rejectConfirm, setRejectConfirm] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
 
-  async function getToken() {
-    const user = auth.currentUser;
-    if (!user) throw new Error("Not authenticated");
-    return user.getIdToken();
-  }
-
   async function fetchRequests() {
     setLoading(true);
     setError(null);
     try {
-      const token = await getToken();
-      const res = await fetch("/api/admin/requests?status=pending", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch("/api/admin/requests?status=pending", { cache: "no-store" });
       if (!res.ok) throw new Error("Failed to load requests");
       const data = await res.json();
       setRequests(data.requests);
@@ -60,12 +50,10 @@ export default function AdminRequestsPage() {
     if (!approveModal) return;
     setActionLoading(true);
     try {
-      const token = await getToken();
       const res = await fetch(`/api/admin/requests/${approveModal.requestId}/approve`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ role: approveRole }),
       });
@@ -82,10 +70,8 @@ export default function AdminRequestsPage() {
   async function handleReject(requestId: string) {
     setActionLoading(true);
     try {
-      const token = await getToken();
       const res = await fetch(`/api/admin/requests/${requestId}/reject`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error("Reject failed");
       setRequests((prev) => prev.filter((r) => r.requestId !== requestId));

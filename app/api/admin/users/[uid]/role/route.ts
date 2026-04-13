@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerAuth } from "@/lib/auth/server";
-import { adminAuth, adminDb } from "@/lib/firebase/admin";
-import { FieldValue } from "firebase-admin/firestore";
 import type { UserRole } from "@/lib/auth/types";
+import { updateUserRole } from "@/lib/auth/store";
 
 const VALID_ROLES: UserRole[] = ["super_admin", "admin", "analyst", "ab_analyst", "viewer"];
+
+export const runtime = "nodejs";
 
 /**
  * PATCH /api/admin/users/:uid/role
@@ -31,34 +32,16 @@ export async function PATCH(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const userRef = adminDb.collection("users").doc(uid);
-  const userSnap = await userRef.get();
-  const oldRole = userSnap.data()?.role ?? null;
-
-  const batch = adminDb.batch();
-
-  batch.update(userRef, { role: newRole, updatedAt: FieldValue.serverTimestamp() });
-
-  const auditRef = adminDb.collection("audit_log").doc();
-  batch.set(auditRef, {
-    logId: auditRef.id,
-    timestamp: FieldValue.serverTimestamp(),
-    actorUid: actor.uid,
-    actorEmail: actor.email,
-    targetUid: uid,
-    targetEmail: userSnap.data()?.email ?? null,
-    action: oldRole ? "role_changed" : "role_assigned",
-    oldRole,
-    newRole,
-  });
-
-  await batch.commit();
-
-  // Update Firebase custom claims so the next token refresh reflects the new role
-  await adminAuth.setCustomUserClaims(uid, {
-    role: newRole,
-    approved: true,
-  });
-
-  return NextResponse.json({ ok: true, role: newRole });
+  try {
+    await updateUserRole({ userKey: uid, role: newRole, actor });
+    return NextResponse.json({ ok: true, role: newRole });
+  } catch (error) {
+    if (error instanceof Error && error.message === "NOT_FOUND") {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+    if (error instanceof Error && error.message === "FORBIDDEN") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    throw error;
+  }
 }

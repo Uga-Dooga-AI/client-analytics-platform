@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerAuth } from "@/lib/auth/server";
-import {
-  getAccessRequest,
-  updateAccessRequest,
-  writeAuditLog,
-  Timestamp,
-} from "@/lib/firebase/firestore";
+import { rejectAccessRequest } from "@/lib/auth/store";
+
+export const runtime = "nodejs";
 
 /**
  * POST /api/admin/requests/[requestId]/reject
@@ -26,34 +23,23 @@ export async function POST(
 
   const { requestId } = await params;
 
-  const accessRequest = await getAccessRequest(requestId);
-  if (!accessRequest) {
-    return NextResponse.json({ error: "Access request not found" }, { status: 404 });
+  try {
+    await rejectAccessRequest({
+      requestId,
+      actor: { uid: auth.uid, email: auth.email },
+    });
+    return NextResponse.json({ ok: true, requestId });
+  } catch (error) {
+    if (!(error instanceof Error)) {
+      throw error;
+    }
+
+    if (error.message === "NOT_FOUND") {
+      return NextResponse.json({ error: "Access request not found" }, { status: 404 });
+    }
+    if (error.message === "ALREADY_RESOLVED") {
+      return NextResponse.json({ error: "Request is already resolved" }, { status: 409 });
+    }
+    throw error;
   }
-  if (accessRequest.status !== "pending") {
-    return NextResponse.json(
-      { error: `Request is already ${accessRequest.status}` },
-      { status: 409 }
-    );
-  }
-
-  const now = Timestamp.now();
-
-  await updateAccessRequest(requestId, {
-    status: "rejected",
-    resolvedAt: now,
-    resolvedBy: auth.uid,
-  });
-
-  await writeAuditLog({
-    actorUid: auth.uid,
-    actorEmail: auth.email,
-    targetUid: accessRequest.uid,
-    targetEmail: accessRequest.email,
-    action: "access_rejected",
-    oldRole: null,
-    newRole: null,
-  });
-
-  return NextResponse.json({ ok: true, requestId });
 }

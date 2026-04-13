@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerAuth } from "@/lib/auth/server";
-import { adminDb } from "@/lib/firebase/admin";
-import type { Query, CollectionReference } from "firebase-admin/firestore";
+import { listAccessRequests, toTimestampValue } from "@/lib/auth/store";
+
+export const runtime = "nodejs";
 
 /**
  * GET /api/admin/requests
@@ -16,19 +17,26 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const status = searchParams.get("status") ?? "pending";
   const countOnly = searchParams.get("countOnly") === "true";
-
-  let ref: CollectionReference | Query = adminDb.collection("access_requests");
-  if (status !== "all") {
-    ref = ref.where("status", "==", status);
-  }
-  ref = (ref as Query).orderBy("requestedAt", "desc");
-
-  const snap = await ref.get();
+  const requests = await listAccessRequests({
+    status: status === "all" ? "all" : (status as "pending" | "approved" | "rejected"),
+  });
 
   if (countOnly) {
-    return NextResponse.json({ count: snap.size });
+    return NextResponse.json({ count: requests.length });
   }
 
-  const requests = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-  return NextResponse.json({ requests });
+  return NextResponse.json({
+    requests: requests.map((entry) => ({
+      id: entry.requestId,
+      requestId: entry.requestId,
+      uid: entry.authUid,
+      email: entry.email,
+      displayName: entry.displayName,
+      status: entry.status,
+      requestedAt: toTimestampValue(entry.requestedAt),
+      resolvedAt: toTimestampValue(entry.resolvedAt),
+      resolvedBy: entry.resolvedBy,
+      assignedRole: entry.assignedRole,
+    })),
+  });
 }

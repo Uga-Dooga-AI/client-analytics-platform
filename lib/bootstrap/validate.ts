@@ -9,6 +9,16 @@ export function validateBootstrapConfig(): void {
     return;
   }
 
+  const authSecret = process.env.AUTH_SECRET;
+  if (!authSecret) {
+    throw new Error("FATAL: AUTH_SECRET is not set. Server cannot start.");
+  }
+  if (authSecret.length < 32) {
+    throw new Error(
+      `FATAL: AUTH_SECRET must be >= 32 characters. Got ${authSecret.length}.`
+    );
+  }
+
   const key = process.env.SUPERADMIN_BOOTSTRAP_KEY;
   if (!key) {
     throw new Error(
