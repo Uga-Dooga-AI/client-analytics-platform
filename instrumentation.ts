@@ -11,6 +11,13 @@ export async function register() {
     const { validateBootstrapConfig } = await import(
       "@/lib/bootstrap/validate"
     );
-    validateBootstrapConfig();
+    try {
+      validateBootstrapConfig();
+    } catch (error) {
+      console.warn(
+        "[bootstrap] Startup validation skipped during instrumentation bootstrap.",
+        error
+      );
+    }
   }
 }
