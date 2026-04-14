@@ -22,7 +22,8 @@ function getAuthSecret() {
   const secret =
     process.env.AUTH_SECRET?.trim() ||
     process.env.NEXTAUTH_SECRET?.trim() ||
-    process.env.SUPERADMIN_BOOTSTRAP_KEY?.trim();
+    process.env.SUPERADMIN_BOOTSTRAP_KEY?.trim() ||
+    process.env.ADMIN_SECRET_PATH?.trim();
   if (!secret || secret.length < 32) {
     throw new Error("AUTH_SECRET must be configured and at least 32 characters long.");
   }
