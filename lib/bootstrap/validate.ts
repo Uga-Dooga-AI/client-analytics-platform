@@ -10,9 +10,9 @@ export function validateBootstrapConfig(): void {
   }
 
   const authSecret =
-    process.env.AUTH_SECRET ??
-    process.env.NEXTAUTH_SECRET ??
-    process.env.SUPERADMIN_BOOTSTRAP_KEY;
+    process.env.AUTH_SECRET?.trim() ||
+    process.env.NEXTAUTH_SECRET?.trim() ||
+    process.env.SUPERADMIN_BOOTSTRAP_KEY?.trim();
   if (!authSecret) {
     throw new Error("FATAL: AUTH_SECRET is not set. Server cannot start.");
   }
