@@ -11,9 +11,11 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
   "/experiments": ["analyst", "ab_analyst", "admin", "super_admin"],
   "/forecasts": ["analyst", "admin", "super_admin"],
   "/acquisition": ["analyst", "admin", "super_admin"],
+  "/segments": ["analyst", "ab_analyst", "admin", "super_admin"],
   "/settings": ["admin", "super_admin"],
   "/access": ["admin", "super_admin"],
   "/admin": ["admin", "super_admin"],
+  "/api/segments": ["analyst", "ab_analyst", "admin", "super_admin"],
   "/api/data/refresh": ["analyst", "admin", "super_admin"],
   "/api/admin": ["admin", "super_admin"],
 };

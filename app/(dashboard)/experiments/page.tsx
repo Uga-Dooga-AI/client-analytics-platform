@@ -1,13 +1,20 @@
+import { cookies } from "next/headers";
 import Link from "next/link";
 import { AcquisitionWorkbench } from "@/components/acquisition-workbench";
 import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
+import { ExperimentAnalysisWorkbench } from "@/components/experiment-analysis-workbench";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import {
   getAcquisitionDashboardData,
   parseAcquisitionSearchParams,
 } from "@/lib/data/acquisition";
-import { getExperiments } from "@/lib/data/experiments";
+import {
+  getExperimentAnalysisData,
+  getExperiments,
+  parseExperimentAnalysisSearchParams,
+} from "@/lib/data/experiments";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
+import { parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
 
 const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
   running: { color: "var(--color-success)", bg: "#dcfce7", label: "Running" },
@@ -25,10 +32,23 @@ export default async function ExperimentsPage({
   const rawSearchParams = await searchParams;
   const filters = parseDashboardSearchParams(rawSearchParams, "/experiments");
   const localFilters = parseAcquisitionSearchParams(rawSearchParams);
+  const analysisFilters = parseExperimentAnalysisSearchParams(rawSearchParams);
+  const cookieStore = await cookies();
+  const savedSegments = parseSavedSegmentsCookie(cookieStore.get(SAVED_SEGMENTS_COOKIE)?.value);
   const [visibleExperiments, compareData] = await Promise.all([
     getExperiments({ projectKey: filters.projectKey }),
-    getAcquisitionDashboardData(filters, localFilters),
+    getAcquisitionDashboardData(filters, localFilters, savedSegments),
   ]);
+  const activeExperimentId =
+    visibleExperiments.find((experiment) => experiment.id === analysisFilters.experimentId)?.id ??
+    visibleExperiments[0]?.id ??
+    null;
+  const analysisData = await getExperimentAnalysisData(
+    activeExperimentId,
+    analysisFilters,
+    savedSegments,
+    filters.projectKey
+  );
   const selectedProject = getProjectLabel(filters.projectKey);
 
   return (
@@ -88,6 +108,120 @@ export default async function ExperimentsPage({
             </div>
           ))}
         </section>
+
+        {analysisData ? (
+          <>
+            <ExperimentAnalysisWorkbench
+              experiments={visibleExperiments}
+              analysis={analysisData}
+            />
+
+            <section
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: 1,
+                background: "var(--color-border-soft)",
+                border: "1px solid var(--color-border-soft)",
+                borderRadius: 10,
+                overflow: "hidden",
+              }}
+            >
+              {[
+                {
+                  label: "Selected experiment",
+                  value: analysisData.experiment.name,
+                  sub: `${analysisData.selectedSegmentLabel} segment`,
+                },
+                {
+                  label: `${analysisData.leftVariant.label} vs ${analysisData.rightVariant.label}`,
+                  value: analysisData.primaryMetricDeltaLabel,
+                  sub: analysisData.primaryMetricLabel,
+                },
+                {
+                  label: "Revenue / user delta",
+                  value: `${analysisData.summary.revenueDelta > 0 ? "+" : ""}$${analysisData.summary.revenueDelta.toFixed(2)}`,
+                  sub: `${analysisData.summary.exposureDelta > 0 ? "+" : ""}${analysisData.summary.exposureDelta.toLocaleString()} users delta`,
+                },
+              ].map((card) => (
+                <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
+                  <div style={CARD_LABEL_STYLE}>{card.label}</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1.15 }}>
+                    {card.value}
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{card.sub}</div>
+                </div>
+              ))}
+            </section>
+
+            <section style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 20 }}>
+              {analysisData.charts.map((chart) => (
+                <ComparisonConfidenceChart key={chart.id} chart={chart} />
+              ))}
+            </section>
+
+            <section
+              style={{
+                background: "var(--color-panel-base)",
+                borderRadius: 12,
+                border: "1px solid var(--color-border-soft)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "16px 20px",
+                  borderBottom: "1px solid var(--color-border-soft)",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                    Segment cuts for {analysisData.experiment.name}
+                  </div>
+                  <div style={{ marginTop: 3, fontSize: 12, color: "var(--color-ink-500)" }}>
+                    One experiment, multiple saved or built-in segments, same variant comparison contract.
+                  </div>
+                </div>
+              </div>
+
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--color-border-soft)", backgroundColor: "var(--color-panel-soft)" }}>
+                    {["Segment", "Users", analysisData.leftVariant.label, analysisData.rightVariant.label, "Primary delta", "Revenue delta"].map((column) => (
+                      <th key={column} style={HEADER_CELL_STYLE}>
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {analysisData.segmentRows.map((row, index) => (
+                    <tr
+                      key={row.segmentKey}
+                      style={{ borderBottom: index < analysisData.segmentRows.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}
+                    >
+                      <td style={{ ...BODY_CELL_STYLE, fontWeight: 600, color: "var(--color-ink-950)" }}>{row.segmentLabel}</td>
+                      <td style={BODY_CELL_STYLE}>{row.users.toLocaleString()}</td>
+                      <td style={BODY_CELL_STYLE}>{row.leftPrimaryMetric.toFixed(1)}%</td>
+                      <td style={BODY_CELL_STYLE}>{row.rightPrimaryMetric.toFixed(1)}%</td>
+                      <td style={{ ...BODY_CELL_STYLE, color: row.primaryDelta >= 0 ? "var(--color-success)" : "var(--color-danger)", fontWeight: 600 }}>
+                        {row.primaryDelta >= 0 ? "+" : ""}
+                        {row.primaryDelta.toFixed(1)}pp
+                      </td>
+                      <td style={{ ...BODY_CELL_STYLE, color: row.revenueDelta >= 0 ? "var(--color-success)" : "var(--color-danger)", fontWeight: 600 }}>
+                        {row.revenueDelta >= 0 ? "+" : ""}
+                        ${row.revenueDelta.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </>
+        ) : null}
 
         <AcquisitionWorkbench
           title="Comparison workspace"

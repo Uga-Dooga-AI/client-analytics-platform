@@ -1,13 +1,14 @@
 export type DashboardProjectKey = "all" | "word-catcher" | "words-in-word" | "2pg";
 export type DashboardRangeKey = "7d" | "30d" | "90d" | "mtd" | "custom";
 export type DashboardPlatformKey = "all" | "ios" | "android" | "web";
-export type DashboardSegmentKey =
+export type DashboardSegmentPresetKey =
   | "all"
   | "new-users"
   | "returning"
   | "payers"
   | "high-value"
   | "paid-ua";
+export type DashboardSegmentKey = string;
 export type DashboardGroupByKey =
   | "none"
   | "platform"
@@ -60,7 +61,7 @@ export const PLATFORM_OPTIONS: Array<{ key: DashboardPlatformKey; label: string 
   { key: "web", label: "Web" },
 ];
 
-export const SEGMENT_OPTIONS: Array<{ key: DashboardSegmentKey; label: string }> = [
+export const SEGMENT_OPTIONS: Array<{ key: DashboardSegmentPresetKey; label: string }> = [
   { key: "all", label: "All users" },
   { key: "new-users", label: "New users" },
   { key: "returning", label: "Returning" },
@@ -130,11 +131,11 @@ function getRangeDates(rangeKey: DashboardRangeKey, now = new Date()) {
 }
 
 function getDefaultProjectForPath(pathname: string): DashboardProjectKey {
-  return pathname === "/overview" ? "all" : "word-catcher";
+  return pathname === "/overview" || pathname === "/segments" ? "all" : "word-catcher";
 }
 
 export function getProjectOptions(pathname: string) {
-  if (pathname === "/overview") {
+  if (pathname === "/overview" || pathname === "/segments") {
     return [
       { key: "all" as const, label: "Cross-project overview", shortLabel: "All" },
       ...DASHBOARD_PROJECTS,
@@ -212,7 +213,7 @@ export function parseDashboardSearchParams(
     from: readSingleParam(raw, "from") ?? defaultRange.from,
     to: readSingleParam(raw, "to") ?? defaultRange.to,
     platform: PLATFORM_OPTIONS.some((option) => option.key === platform) ? platform : "all",
-    segment: SEGMENT_OPTIONS.some((option) => option.key === segment) ? segment : "all",
+    segment,
     groupBy: GROUP_BY_OPTIONS.some((option) => option.key === groupBy) ? groupBy : "none",
     tag: TAG_OPTIONS.some((option) => option.key === tag) ? tag : "all",
   };

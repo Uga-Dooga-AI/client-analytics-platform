@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import { AcquisitionWorkbench } from "@/components/acquisition-workbench";
 import { CohortMatrixTable } from "@/components/cohort-matrix-table";
 import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
@@ -7,6 +8,7 @@ import {
   parseAcquisitionSearchParams,
 } from "@/lib/data/acquisition";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
+import { getSegmentLabel, parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
@@ -24,8 +26,11 @@ export default async function AcquisitionPage({
   const rawSearchParams = await searchParams;
   const filters = parseDashboardSearchParams(rawSearchParams, "/acquisition");
   const localFilters = parseAcquisitionSearchParams(rawSearchParams);
-  const data = await getAcquisitionDashboardData(filters, localFilters);
+  const cookieStore = await cookies();
+  const savedSegments = parseSavedSegmentsCookie(cookieStore.get(SAVED_SEGMENTS_COOKIE)?.value);
+  const data = await getAcquisitionDashboardData(filters, localFilters, savedSegments);
   const selectedProject = getProjectLabel(filters.projectKey);
+  const selectedSegmentLabel = getSegmentLabel(filters.segment, savedSegments, filters.projectKey);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -144,7 +149,7 @@ export default async function AcquisitionPage({
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
               <InfoStat
                 label="Selected segment"
-                value={filters.segment === "all" ? "All users" : filters.segment}
+                value={selectedSegmentLabel}
               />
               <InfoStat label="Revenue view" value={capitalizeMode(data.localFilters.revenueMode)} />
               <InfoStat label="Grouping" value={filters.groupBy === "none" ? "Ungrouped" : filters.groupBy} />

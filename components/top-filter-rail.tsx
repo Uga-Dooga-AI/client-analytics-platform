@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useMemo, type ReactNode } from "react";
+import { Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getStitchRoute, getStitchStatusMeta } from "@/lib/stitch";
 import {
@@ -11,12 +11,12 @@ import {
   parseDashboardSearchParams,
   PLATFORM_OPTIONS,
   RANGE_OPTIONS,
-  SEGMENT_OPTIONS,
   serializeDashboardFilters,
   TAG_OPTIONS,
   type DashboardFilters,
   type DashboardRangeKey,
 } from "@/lib/dashboard-filters";
+import { getSegmentLabel, getSegmentOptions, type SavedUserSegment } from "@/lib/segments";
 
 const DEMO_ACCESS_ENABLED = process.env.NEXT_PUBLIC_DEMO_ACCESS_ENABLED === "true";
 
@@ -32,6 +32,7 @@ function TopFilterRailContent({ title }: { title: string }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const [savedSegments, setSavedSegments] = useState<SavedUserSegment[]>([]);
 
   const filters = useMemo(
     () => normalizeFiltersForPath(parseDashboardSearchParams(searchParams, pathname), pathname),
@@ -40,6 +41,43 @@ function TopFilterRailContent({ title }: { title: string }) {
   const stitchRoute = getStitchRoute(pathname);
   const stitchStatus = stitchRoute ? getStitchStatusMeta(stitchRoute.status) : null;
   const projectOptions = getProjectOptions(pathname);
+  const segmentOptions = useMemo(() => {
+    const options = getSegmentOptions(savedSegments, filters.projectKey).map((option) => ({
+      value: option.key,
+      label: option.label,
+    }));
+
+    if (!options.some((option) => option.value === filters.segment)) {
+      options.push({
+        value: filters.segment,
+        label: getSegmentLabel(filters.segment, savedSegments, filters.projectKey),
+      });
+    }
+
+    return options;
+  }, [filters.projectKey, filters.segment, savedSegments]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSavedSegments() {
+      const response = await fetch("/api/segments", { cache: "no-store" }).catch(() => null);
+      if (!response || !response.ok) {
+        return;
+      }
+
+      const payload = await response.json().catch(() => null);
+      if (!cancelled) {
+        setSavedSegments(payload?.segments ?? []);
+      }
+    }
+
+    void loadSavedSegments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function commitFilters(patch: Partial<DashboardFilters>) {
     const nextFilters = normalizeFiltersForPath({ ...filters, ...patch }, pathname);
@@ -57,6 +95,7 @@ function TopFilterRailContent({ title }: { title: string }) {
       stitchStatusLabel={stitchStatus?.label}
       stitchStatusColor={stitchStatus?.color}
       stitchWave={stitchRoute?.wave}
+      onManageSegments={pathname === "/segments" ? undefined : () => router.push("/segments")}
       controlRows={
         <>
           <div
@@ -89,7 +128,7 @@ function TopFilterRailContent({ title }: { title: string }) {
               label="Segment"
               value={filters.segment}
               onChange={(value) => commitFilters({ segment: value as DashboardFilters["segment"] })}
-              options={SEGMENT_OPTIONS.map((option) => ({ value: option.key, label: option.label }))}
+              options={segmentOptions}
             />
             <FilterField
               label="Group by"
@@ -147,6 +186,7 @@ function TopFilterRailContent({ title }: { title: string }) {
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
                 <SlicePill label={projectOptions.find((project) => project.key === filters.projectKey)?.shortLabel ?? "NA"} />
                 <SlicePill label={filters.platform === "all" ? "All platforms" : filters.platform.toUpperCase()} />
+                <SlicePill label={getSegmentLabel(filters.segment, savedSegments, filters.projectKey)} />
                 <SlicePill label={filters.groupBy === "none" ? "Ungrouped" : filters.groupBy} />
               </div>
             </div>
@@ -228,12 +268,14 @@ function TopFilterRailFrame({
   stitchStatusLabel,
   stitchStatusColor,
   stitchWave,
+  onManageSegments,
   controlRows,
 }: {
   title: string;
   stitchStatusLabel?: string;
   stitchStatusColor?: string;
   stitchWave?: number;
+  onManageSegments?: () => void;
   controlRows?: ReactNode;
 }) {
   return (
@@ -308,10 +350,19 @@ function TopFilterRailFrame({
             color: "var(--color-ink-500)",
             lineHeight: 1.5,
             textAlign: "right",
-            maxWidth: 280,
+            maxWidth: 340,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+            alignItems: "flex-end",
           }}
         >
-          Project-first filtering, custom date window, segmentation, and grouping are active in the shell.
+          <div>Project-first filtering, custom date window, segmentation, and grouping are active in the shell.</div>
+          {onManageSegments ? (
+            <button type="button" onClick={onManageSegments} style={MANAGE_BUTTON_STYLE}>
+              Manage segments
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -339,4 +390,15 @@ const FIELD_STYLE = {
   padding: "0 12px",
   outline: "none",
   boxSizing: "border-box" as const,
+};
+
+const MANAGE_BUTTON_STYLE = {
+  borderRadius: 999,
+  border: "1px solid var(--color-border-soft)",
+  background: "var(--color-panel-base)",
+  color: "var(--color-ink-700)",
+  padding: "7px 12px",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
 };

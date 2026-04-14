@@ -1,6 +1,8 @@
+import { cookies } from "next/headers";
 import { AcquisitionWorkbench } from "@/components/acquisition-workbench";
 import { CohortMatrixTable } from "@/components/cohort-matrix-table";
 import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
+import { RetentionTrendChart } from "@/components/retention-trend-chart";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import {
   getAcquisitionDashboardData,
@@ -8,6 +10,7 @@ import {
 } from "@/lib/data/acquisition";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
 import { getCohortDefinitions, getCohortGrid, getCohortTrends } from "@/lib/data/cohorts";
+import { parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
 
 const PERIOD_LABELS = ["D0", "D1", "D3", "D7", "D14", "D30"];
 const COHORT_COMPARE_CHART_IDS = [
@@ -28,24 +31,6 @@ function heatColor(value: number) {
   return `rgba(37, 99, 235, ${alpha.toFixed(2)})`;
 }
 
-function pointX(index: number, total: number) {
-  if (total <= 1) {
-    return 32;
-  }
-
-  return 32 + index * (280 / (total - 1));
-}
-
-function pointY(value: number) {
-  return 116 - value * 1.6;
-}
-
-function linePath(values: number[]) {
-  return values
-    .map((value, index) => `${index === 0 ? "M" : "L"} ${pointX(index, values.length)} ${pointY(value)}`)
-    .join(" ");
-}
-
 export default async function CohortsPage({
   searchParams,
 }: {
@@ -55,12 +40,14 @@ export default async function CohortsPage({
   const filters = parseDashboardSearchParams(rawSearchParams, "/cohorts");
   const localFilters = parseAcquisitionSearchParams(rawSearchParams);
   const selectedProject = getProjectLabel(filters.projectKey);
+  const cookieStore = await cookies();
+  const savedSegments = parseSavedSegmentsCookie(cookieStore.get(SAVED_SEGMENTS_COOKIE)?.value);
 
   const [visibleDefinitions, cohortGrid, cohortTrends, compareData] = await Promise.all([
     getCohortDefinitions({ projectKey: filters.projectKey }),
     getCohortGrid(),
     getCohortTrends(),
-    getAcquisitionDashboardData(filters, localFilters),
+    getAcquisitionDashboardData(filters, localFilters, savedSegments),
   ]);
 
   const cohortCompareCharts = COHORT_COMPARE_CHART_IDS.map((chartId) =>
@@ -449,74 +436,7 @@ export default async function CohortsPage({
                 platform trend read.
               </div>
 
-              <svg
-                viewBox="0 0 340 140"
-                style={{
-                  width: "100%",
-                  marginTop: 16,
-                  background: "var(--color-panel-soft)",
-                  borderRadius: 8,
-                  border: "1px solid var(--color-border-soft)",
-                }}
-              >
-                {[20, 40, 60].map((grid) => (
-                  <line
-                    key={grid}
-                    x1="28"
-                    y1={pointY(grid)}
-                    x2="316"
-                    y2={pointY(grid)}
-                    stroke="var(--color-border-soft)"
-                    strokeWidth="1"
-                  />
-                ))}
-                <line x1="28" y1="116" x2="316" y2="116" stroke="var(--color-border-strong)" strokeWidth="1" />
-                <path
-                  d={linePath(cohortTrends.iosD7)}
-                  fill="none"
-                  stroke="var(--color-signal-blue)"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d={linePath(cohortTrends.androidD7)}
-                  fill="none"
-                  stroke="rgba(37, 99, 235, 0.45)"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d={linePath(cohortTrends.iosD30)}
-                  fill="none"
-                  stroke="var(--color-success)"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d={linePath(cohortTrends.androidD30)}
-                  fill="none"
-                  stroke="rgba(22, 163, 74, 0.45)"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-
-                {cohortTrends.labels.map((label, index) => (
-                  <text
-                    key={label}
-                    x={pointX(index, cohortTrends.labels.length)}
-                    y="134"
-                    textAnchor="middle"
-                    fill="var(--color-ink-500)"
-                    fontSize="10"
-                  >
-                    {label.replace("Mar ", "M").replace("Apr ", "A")}
-                  </text>
-                ))}
-              </svg>
+              <RetentionTrendChart trend={cohortTrends} />
 
               <div style={{ display: "flex", gap: 14, marginTop: 12, flexWrap: "wrap" }}>
                 {[

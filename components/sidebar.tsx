@@ -74,6 +74,17 @@ const NAV_ITEMS = [
       </svg>
     ),
   },
+  {
+    label: "Segments",
+    href: "/segments",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2.5 4.5h5l2 2h4v5l-2 2h-9l-1-1v-7l1-1z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+        <circle cx="5.5" cy="8" r="1.25" fill="currentColor" />
+        <circle cx="8.5" cy="8" r="1.25" fill="currentColor" />
+      </svg>
+    ),
+  },
 ];
 
 const BOTTOM_ITEMS = [

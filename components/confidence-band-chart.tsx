@@ -1,3 +1,7 @@
+"use client";
+
+import { useMemo, useState } from "react";
+
 type ConfidencePoint = {
   label: string;
   value: number;
@@ -21,6 +25,7 @@ export function ConfidenceBandChart({
   predictedColor?: string;
   actualColor?: string;
 }) {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const width = 520;
   const height = 236;
   const paddingLeft = 48;
@@ -33,7 +38,6 @@ export function ConfidenceBandChart({
   const upperBound = Math.max(...series.map((point) => point.upper));
   const lowerBound = Math.min(...series.map((point) => point.lower));
   const span = upperBound - lowerBound || 1;
-
   const yTicks = Array.from({ length: 4 }, (_, index) => lowerBound + (span / 3) * index);
 
   function getX(index: number) {
@@ -69,6 +73,22 @@ export function ConfidenceBandChart({
     })
     .join(" ");
 
+  const tooltip = useMemo(() => {
+    if (hoveredIndex === null) {
+      return null;
+    }
+
+    const point = series[hoveredIndex];
+    return {
+      label: point.label,
+      x: getX(hoveredIndex),
+      value: point.value,
+      lower: point.lower,
+      upper: point.upper,
+      actual: point.actual ?? null,
+    };
+  }, [hoveredIndex, series]);
+
   return (
     <div
       style={{
@@ -90,62 +110,127 @@ export function ConfidenceBandChart({
         </div>
       </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto", display: "block" }}>
-        {yTicks.map((tick) => (
-          <g key={tick}>
-            <line
-              x1={paddingLeft}
-              y1={getY(tick)}
-              x2={width - paddingRight}
-              y2={getY(tick)}
-              stroke="var(--color-border-soft)"
-              strokeWidth="1"
-            />
-            <text
-              x={paddingLeft - 10}
-              y={getY(tick) + 4}
-              textAnchor="end"
-              fill="var(--color-ink-500)"
-              fontSize="10.5"
-            >
-              {tick.toFixed(0)}
-              {unit}
-            </text>
-          </g>
-        ))}
-
-        <path d={bandPath} fill="rgba(37, 99, 235, 0.14)" />
-        <path d={predictedPath} fill="none" stroke={predictedColor} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
-        {actualPath ? (
-          <path
-            d={actualPath}
-            fill="none"
-            stroke={actualColor}
-            strokeWidth="2"
-            strokeDasharray="5 5"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
+      <div style={{ position: "relative" }}>
+        {tooltip ? (
+          <div
+            style={{
+              position: "absolute",
+              left: `${(tooltip.x / width) * 100}%`,
+              top: 10,
+              transform: "translateX(-50%)",
+              zIndex: 2,
+              minWidth: 180,
+              padding: "10px 12px",
+              borderRadius: 10,
+              background: "rgba(11, 18, 32, 0.96)",
+              color: "#fff",
+              pointerEvents: "none",
+              boxShadow: "0 14px 32px rgba(11, 18, 32, 0.18)",
+            }}
+          >
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", opacity: 0.78 }}>
+              {tooltip.label}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.55 }}>
+              Predicted {formatValue(tooltip.value, unit)}
+              <br />
+              Band {formatValue(tooltip.lower, unit)}–{formatValue(tooltip.upper, unit)}
+              {tooltip.actual !== null ? (
+                <>
+                  <br />
+                  Actual {formatValue(tooltip.actual, unit)}
+                </>
+              ) : null}
+            </div>
+          </div>
         ) : null}
 
-        {series.map((point, index) => (
-          <g key={point.label}>
-            <circle cx={getX(index)} cy={getY(point.value)} r="4" fill={predictedColor} />
-            {typeof point.actual === "number" ? (
-              <circle cx={getX(index)} cy={getY(point.actual)} r="3" fill={actualColor} />
-            ) : null}
-            <text
-              x={getX(index)}
-              y={height - 12}
-              textAnchor="middle"
-              fill="var(--color-ink-500)"
-              fontSize="10.5"
-            >
-              {point.label}
-            </text>
-          </g>
-        ))}
-      </svg>
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          style={{ width: "100%", height: "auto", display: "block" }}
+          onMouseLeave={() => setHoveredIndex(null)}
+        >
+          {yTicks.map((tick) => (
+            <g key={tick}>
+              <line
+                x1={paddingLeft}
+                y1={getY(tick)}
+                x2={width - paddingRight}
+                y2={getY(tick)}
+                stroke="var(--color-border-soft)"
+                strokeWidth="1"
+              />
+              <text
+                x={paddingLeft - 10}
+                y={getY(tick) + 4}
+                textAnchor="end"
+                fill="var(--color-ink-500)"
+                fontSize="10.5"
+              >
+                {formatValue(tick, unit)}
+              </text>
+            </g>
+          ))}
+
+          {tooltip ? (
+            <line
+              x1={tooltip.x}
+              y1={paddingTop}
+              x2={tooltip.x}
+              y2={height - paddingBottom}
+              stroke="rgba(37, 99, 235, 0.35)"
+              strokeDasharray="4 4"
+            />
+          ) : null}
+
+          <path d={bandPath} fill="rgba(37, 99, 235, 0.14)" />
+          <path d={predictedPath} fill="none" stroke={predictedColor} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+          {actualPath ? (
+            <path
+              d={actualPath}
+              fill="none"
+              stroke={actualColor}
+              strokeWidth="2"
+              strokeDasharray="5 5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          ) : null}
+
+          {series.map((point, index) => {
+            const leftEdge = index === 0 ? paddingLeft : (getX(index - 1) + getX(index)) / 2;
+            const rightEdge = index === series.length - 1 ? width - paddingRight : (getX(index) + getX(index + 1)) / 2;
+            const active = hoveredIndex === index;
+
+            return (
+              <g key={point.label}>
+                <rect
+                  x={leftEdge}
+                  y={paddingTop}
+                  width={Math.max(20, rightEdge - leftEdge)}
+                  height={chartHeight}
+                  fill={active ? "rgba(37, 99, 235, 0.05)" : "transparent"}
+                  onMouseEnter={() => setHoveredIndex(index)}
+                  onMouseMove={() => setHoveredIndex(index)}
+                />
+                <circle cx={getX(index)} cy={getY(point.value)} r={active ? "5.25" : "4"} fill={predictedColor} />
+                {typeof point.actual === "number" ? (
+                  <circle cx={getX(index)} cy={getY(point.actual)} r={active ? "4" : "3"} fill={actualColor} />
+                ) : null}
+                <text
+                  x={getX(index)}
+                  y={height - 12}
+                  textAnchor="middle"
+                  fill="var(--color-ink-500)"
+                  fontSize="10.5"
+                >
+                  {point.label}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
     </div>
   );
 }
@@ -157,4 +242,16 @@ function LegendSwatch({ label, color }: { label: string; color: string }) {
       {label}
     </div>
   );
+}
+
+function formatValue(value: number, unit: string) {
+  if (unit === "$") {
+    return `$${value.toFixed(2)}`;
+  }
+
+  if (unit === "m") {
+    return `${value.toFixed(1)}m`;
+  }
+
+  return `${value.toFixed(1)}${unit}`;
 }

@@ -2,9 +2,16 @@ import {
   getProjectLabel,
   type DashboardFilters,
   type DashboardGroupByKey,
+  type DashboardProjectKey,
   type DashboardSegmentKey,
   type DashboardTagKey,
 } from "@/lib/dashboard-filters";
+import {
+  getSegmentBehavior,
+  getSegmentLabel,
+  getSegmentOptions,
+  type SavedUserSegment,
+} from "@/lib/segments";
 
 export type AcquisitionCompareByKey =
   | "platform"
@@ -144,6 +151,14 @@ export type AcquisitionFilterOptions = {
   compareValues: AcquisitionOption[];
 };
 
+export type SegmentBuilderCatalog = {
+  countries: AcquisitionOption[];
+  companies: AcquisitionOption[];
+  sources: AcquisitionOption[];
+  campaigns: AcquisitionOption[];
+  creatives: AcquisitionOption[];
+};
+
 export type AcquisitionDashboardData = {
   localFilters: AcquisitionLocalFilters;
   options: AcquisitionFilterOptions;
@@ -230,14 +245,6 @@ const COMPARE_DIMENSIONS: Array<{ value: AcquisitionCompareByKey; label: string 
   { value: "segment", label: "User segment" },
 ];
 const GROUP_COLORS = ["#2563eb", "#d97706", "#059669"];
-
-const SEGMENT_VALUES: Array<{ value: DashboardSegmentKey; label: string }> = [
-  { value: "new-users", label: "New users" },
-  { value: "returning", label: "Returning" },
-  { value: "payers", label: "Payers" },
-  { value: "high-value", label: "High value" },
-  { value: "paid-ua", label: "Paid UA" },
-];
 
 const REVENUE_MODE_OPTIONS: Array<{ value: RevenueModeKey; label: string }> = [
   { value: "total", label: "Total revenue" },
@@ -490,23 +497,6 @@ function interpolateMetric(
   return anchors[last];
 }
 
-function getSegmentProfile(segment: DashboardSegmentKey) {
-  switch (segment) {
-    case "new-users":
-      return { spend: 1.02, installs: 1.08, roas: 0.91, variance: 1.06 };
-    case "returning":
-      return { spend: 0.72, installs: 0.66, roas: 1.14, variance: 0.94 };
-    case "payers":
-      return { spend: 0.58, installs: 0.44, roas: 1.27, variance: 0.88 };
-    case "high-value":
-      return { spend: 0.46, installs: 0.31, roas: 1.39, variance: 0.85 };
-    case "paid-ua":
-      return { spend: 1.0, installs: 1.0, roas: 1.03, variance: 1.0 };
-    default:
-      return { spend: 1.0, installs: 1.0, roas: 1.0, variance: 1.0 };
-  }
-}
-
 function buildSliceCatalog(project: string) {
   const definition = PROJECT_DEFINITIONS[project];
   if (!definition) {
@@ -594,10 +584,71 @@ function buildOptions<T extends string>(
   ];
 }
 
+function applySavedSegmentRules(
+  descriptors: SliceDescriptor[],
+  segment: SavedUserSegment
+) {
+  return descriptors.filter((descriptor) => {
+    if (segment.rules.projectKey !== "all") {
+      const expectedProject = getProjectLabel(segment.rules.projectKey);
+      if (descriptor.project !== expectedProject) {
+        return false;
+      }
+    }
+
+    if (segment.rules.platform !== "all" && descriptor.platform.toLowerCase() !== segment.rules.platform) {
+      return false;
+    }
+
+    if (segment.rules.tag !== "all" && !descriptor.tags.includes(segment.rules.tag)) {
+      return false;
+    }
+
+    if (segment.rules.country !== "all" && descriptor.country !== segment.rules.country) {
+      return false;
+    }
+
+    if (segment.rules.company !== "all" && descriptor.company !== segment.rules.company) {
+      return false;
+    }
+
+    if (segment.rules.source !== "all" && descriptor.source !== segment.rules.source) {
+      return false;
+    }
+
+    if (segment.rules.campaign !== "all" && descriptor.campaign !== segment.rules.campaign) {
+      return false;
+    }
+
+    if (segment.rules.creative !== "all" && descriptor.creative !== segment.rules.creative) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function resolveSegmentSlice(
+  descriptors: SliceDescriptor[],
+  segmentKey: DashboardSegmentKey,
+  savedSegments: SavedUserSegment[]
+) {
+  const behavior = getSegmentBehavior(segmentKey, savedSegments);
+  const scopedDescriptors = behavior.savedSegment
+    ? applySavedSegmentRules(descriptors, behavior.savedSegment)
+    : descriptors;
+
+  return {
+    descriptors: scopedDescriptors,
+    behavior,
+  };
+}
+
 function resolveLocalFilters(
   descriptors: SliceDescriptor[],
   filters: DashboardFilters,
-  rawLocal: AcquisitionLocalFilters
+  rawLocal: AcquisitionLocalFilters,
+  savedSegments: SavedUserSegment[]
 ) {
   const local: AcquisitionLocalFilters = { ...rawLocal };
 
@@ -643,7 +694,9 @@ function resolveLocalFilters(
 
   const compareCandidates =
     local.compareBy === "segment"
-      ? SEGMENT_VALUES.map((segment) => ({ value: segment.value, label: segment.label, count: descriptors.length }))
+      ? getSegmentOptions(savedSegments, filters.projectKey)
+          .filter((segment) => segment.key !== "all")
+          .map((segment) => ({ value: segment.key, label: segment.label, count: descriptors.length }))
       : buildOptions(
           applyDescriptorFilters(descriptors, filters, local, local.compareBy),
           (descriptor) => valueForDimension(descriptor, local.compareBy)
@@ -697,26 +750,26 @@ function buildCohortDates(filters: DashboardFilters) {
 function synthesizeCohortMetric(
   descriptor: SliceDescriptor,
   cohortDate: Date,
-  comparisonSegment: DashboardSegmentKey,
+  segmentBehavior: ReturnType<typeof getSegmentBehavior>,
   now: Date
 ): CohortSliceMetric {
   const cohortKey = `${descriptor.project}|${descriptor.country}|${descriptor.company}|${descriptor.source}|${descriptor.campaign}|${descriptor.creative}|${descriptor.platform}|${formatIsoDate(cohortDate)}`;
   const seed = normalizedSeed(cohortKey);
   const projectSeed = normalizedSeed(descriptor.project);
   const seasonality = 1 + Math.sin(cohortDate.getUTCDate() / 2 + seed * 5) * 0.06;
-  const segmentProfile = getSegmentProfile(comparisonSegment);
+  const segmentProfile = segmentBehavior;
   const platformFactor = descriptor.platform === "iOS" ? 1.08 : 0.93;
   const spend =
     (1700 + normalizedSeed(`${cohortKey}:spend`) * 4600 + descriptor.quality * 420) *
     seasonality *
-    segmentProfile.spend;
+    segmentProfile.spendMultiplier;
   const cpiBase = 1.78 + normalizedSeed(`${cohortKey}:cpi`) * 1.35 + (descriptor.platform === "iOS" ? 0.32 : 0);
-  const installs = Math.max(80, Math.round((spend / cpiBase) * segmentProfile.installs));
+  const installs = Math.max(80, Math.round((spend / cpiBase) * segmentProfile.installsMultiplier));
   const qualityIndex =
     descriptor.quality * 0.72 +
     platformFactor * 0.18 +
     (0.82 + projectSeed * 0.26) * 0.1 +
-    segmentProfile.roas * 0.12;
+    segmentProfile.roasMultiplier * 0.12;
   const d30 = clamp(36 + qualityIndex * 24 + seed * 10, 18, 120);
   const d60 = clamp(d30 + 16 + descriptor.quality * 10 + seed * 8, d30 + 4, 165);
   const d120 = clamp(d60 + 14 + descriptor.quality * 8 + seed * 7, d60 + 4, 210);
@@ -725,8 +778,8 @@ function synthesizeCohortMetric(
     0.38 +
       normalizedSeed(`${cohortKey}:adshare`) * 0.34 +
       (descriptor.platform === "Android" ? 0.08 : -0.04) +
-      (comparisonSegment === "payers" ? -0.07 : 0) +
-      (comparisonSegment === "high-value" ? -0.1 : 0),
+      (segmentBehavior.profileKey === "payers" ? -0.07 : 0) +
+      (segmentBehavior.profileKey === "high-value" ? -0.1 : 0),
     0.18,
     0.86
   );
@@ -737,8 +790,8 @@ function synthesizeCohortMetric(
     7.5 +
       descriptor.quality * 3.8 +
       normalizedSeed(`${cohortKey}:session`) * 4.5 +
-      (comparisonSegment === "returning" ? 1.9 : 0) +
-      (comparisonSegment === "high-value" ? 2.4 : 0),
+      (segmentBehavior.profileKey === "returning" ? 1.9 : 0) +
+      (segmentBehavior.profileKey === "high-value" ? 2.4 : 0),
     3.5,
     22
   );
@@ -749,7 +802,7 @@ function synthesizeCohortMetric(
   function envelope(target: number, predicted: number): MetricEnvelope {
     const intervalPct =
       (0.22 + target / 900 - Math.min(installs, 4800) / 32000 + (1 - descriptor.quality) * 0.09) *
-      segmentProfile.variance;
+      segmentProfile.varianceMultiplier;
     const boundedInterval = clamp(intervalPct, 0.08, 0.32);
     const actualAvailable = ageInDays >= target;
     const realized =
@@ -850,12 +903,14 @@ function getRevenueModeLabel(revenueMode: RevenueModeKey) {
 function aggregateMetrics(
   descriptors: SliceDescriptor[],
   cohortDates: Date[],
-  segment: DashboardSegmentKey,
+  segmentKey: DashboardSegmentKey,
+  savedSegments: SavedUserSegment[],
   now: Date
 ) {
+  const segmentBehavior = getSegmentBehavior(segmentKey, savedSegments);
   return cohortDates.map((cohortDate) => {
     const metrics = descriptors.map((descriptor) =>
-      synthesizeCohortMetric(descriptor, cohortDate, segment, now)
+      synthesizeCohortMetric(descriptor, cohortDate, segmentBehavior, now)
     );
     const spend = metrics.reduce((sum, metric) => sum + metric.spend, 0);
     const installs = metrics.reduce((sum, metric) => sum + metric.installs, 0);
@@ -1073,42 +1128,43 @@ function buildComparisonData(
   cohortDates: Date[],
   filters: DashboardFilters,
   localFilters: AcquisitionLocalFilters,
+  savedSegments: SavedUserSegment[],
   now: Date
 ) {
   const baseDescriptors = applyDescriptorFilters(descriptors, filters, localFilters, localFilters.compareBy);
   const leftLabel =
     localFilters.compareBy === "segment"
-      ? SEGMENT_VALUES.find((segment) => segment.value === localFilters.compareLeft)?.label ?? localFilters.compareLeft
+      ? getSegmentLabel(localFilters.compareLeft, savedSegments, filters.projectKey)
       : localFilters.compareLeft;
   const rightLabel =
     localFilters.compareBy === "segment"
-      ? SEGMENT_VALUES.find((segment) => segment.value === localFilters.compareRight)?.label ?? localFilters.compareRight
+      ? getSegmentLabel(localFilters.compareRight, savedSegments, filters.projectKey)
       : localFilters.compareRight;
 
   const leftDescriptors =
     localFilters.compareBy === "segment"
-      ? baseDescriptors
+      ? resolveSegmentSlice(baseDescriptors, localFilters.compareLeft, savedSegments).descriptors
       : baseDescriptors.filter(
           (descriptor) => valueForDimension(descriptor, localFilters.compareBy) === localFilters.compareLeft
         );
   const rightDescriptors =
     localFilters.compareBy === "segment"
-      ? baseDescriptors
+      ? resolveSegmentSlice(baseDescriptors, localFilters.compareRight, savedSegments).descriptors
       : baseDescriptors.filter(
           (descriptor) => valueForDimension(descriptor, localFilters.compareBy) === localFilters.compareRight
         );
 
   const leftSegment =
     localFilters.compareBy === "segment"
-      ? (localFilters.compareLeft as DashboardSegmentKey)
+      ? localFilters.compareLeft
       : filters.segment;
   const rightSegment =
     localFilters.compareBy === "segment"
-      ? (localFilters.compareRight as DashboardSegmentKey)
+      ? localFilters.compareRight
       : filters.segment;
 
-  const leftAggregates = aggregateMetrics(leftDescriptors, cohortDates, leftSegment, now);
-  const rightAggregates = aggregateMetrics(rightDescriptors, cohortDates, rightSegment, now);
+  const leftAggregates = aggregateMetrics(leftDescriptors, cohortDates, leftSegment, savedSegments, now);
+  const rightAggregates = aggregateMetrics(rightDescriptors, cohortDates, rightSegment, savedSegments, now);
   const revenueMode = localFilters.revenueMode;
 
   const horizonCharts = HORIZON_CHARTS.slice(1).map((chart, index) => ({
@@ -1426,9 +1482,14 @@ function buildBreakdownRows(
   cohortDates: Date[],
   filters: DashboardFilters,
   local: AcquisitionLocalFilters,
+  savedSegments: SavedUserSegment[],
   now: Date
 ) {
-  const filteredDescriptors = applyDescriptorFilters(descriptors, filters, local);
+  const filteredDescriptors = resolveSegmentSlice(
+    applyDescriptorFilters(descriptors, filters, local),
+    filters.segment,
+    savedSegments
+  ).descriptors;
   if (filteredDescriptors.length === 0) {
     return [] as AcquisitionBreakdownRow[];
   }
@@ -1445,7 +1506,7 @@ function buildBreakdownRows(
 
   return Array.from(groups.entries())
     .map(([label, groupDescriptors]) => {
-      const aggregates = aggregateMetrics(groupDescriptors, cohortDates, filters.segment, now);
+      const aggregates = aggregateMetrics(groupDescriptors, cohortDates, filters.segment, savedSegments, now);
       const summary = summarizeAggregate(
         getProjectLabel(filters.projectKey),
         aggregates,
@@ -1510,27 +1571,48 @@ function buildCohortMatrix(
 
 export async function getAcquisitionDashboardData(
   filters: DashboardFilters,
-  rawLocalFilters: AcquisitionLocalFilters
+  rawLocalFilters: AcquisitionLocalFilters,
+  savedSegments: SavedUserSegment[] = []
 ): Promise<AcquisitionDashboardData> {
   const project = getProjectLabel(filters.projectKey);
   const descriptors = buildSliceCatalog(project);
-  const { localFilters, options } = resolveLocalFilters(descriptors, filters, rawLocalFilters);
+  const { localFilters, options } = resolveLocalFilters(descriptors, filters, rawLocalFilters, savedSegments);
   const cohortDates = buildCohortDates(filters);
   const now = new Date();
-  const filteredDescriptors = applyDescriptorFilters(descriptors, filters, localFilters);
-  const aggregates = aggregateMetrics(filteredDescriptors, cohortDates, filters.segment, now);
-  const comparison = buildComparisonData(descriptors, cohortDates, filters, localFilters, now);
+  const selectedDescriptors = resolveSegmentSlice(
+    applyDescriptorFilters(descriptors, filters, localFilters),
+    filters.segment,
+    savedSegments
+  ).descriptors;
+  const aggregates = aggregateMetrics(selectedDescriptors, cohortDates, filters.segment, savedSegments, now);
+  const comparison = buildComparisonData(descriptors, cohortDates, filters, localFilters, savedSegments, now);
 
   return {
     localFilters,
     options,
-    summary: summarizeAggregate(project, aggregates, filteredDescriptors.length, localFilters.revenueMode),
+    summary: summarizeAggregate(project, aggregates, selectedDescriptors.length, localFilters.revenueMode),
     horizonCharts: buildHorizonCharts(aggregates, localFilters.revenueMode),
     paybackChart: buildPaybackChart(aggregates, localFilters.revenueMode),
     compareCharts: comparison.charts,
     comparisonSummary: comparison.summary,
     metricComparisonRows: comparison.metricRows,
-    breakdownRows: buildBreakdownRows(descriptors, cohortDates, filters, localFilters, now),
+    breakdownRows: buildBreakdownRows(descriptors, cohortDates, filters, localFilters, savedSegments, now),
     cohortMatrix: buildCohortMatrix(aggregates, localFilters.revenueMode),
+  };
+}
+
+export function getSegmentBuilderCatalog(projectKey: DashboardProjectKey): SegmentBuilderCatalog {
+  const projectNames =
+    projectKey === "all"
+      ? Object.keys(PROJECT_DEFINITIONS)
+      : [getProjectLabel(projectKey)].filter((value) => value in PROJECT_DEFINITIONS);
+  const descriptors = projectNames.flatMap((projectName) => buildSliceCatalog(projectName));
+
+  return {
+    countries: buildOptions(descriptors, (descriptor) => descriptor.country),
+    companies: buildOptions(descriptors, (descriptor) => descriptor.company),
+    sources: buildOptions(descriptors, (descriptor) => descriptor.source),
+    campaigns: buildOptions(descriptors, (descriptor) => descriptor.campaign),
+    creatives: buildOptions(descriptors, (descriptor) => descriptor.creative),
   };
 }
