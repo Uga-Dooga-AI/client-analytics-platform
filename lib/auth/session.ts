@@ -19,7 +19,10 @@ interface OAuthStatePayload extends JWTPayload {
 }
 
 function getAuthSecret() {
-  const secret = process.env.AUTH_SECRET;
+  const secret =
+    process.env.AUTH_SECRET ??
+    process.env.NEXTAUTH_SECRET ??
+    process.env.SUPERADMIN_BOOTSTRAP_KEY;
   if (!secret || secret.length < 32) {
     throw new Error("AUTH_SECRET must be configured and at least 32 characters long.");
   }
