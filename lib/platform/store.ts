@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import type { PoolClient } from "pg";
 import { MOCK_METRIC_CATALOG } from "@/lib/mock-data";
-import { getPostgresPool, hasPostgresDatabase } from "@/lib/db/postgres";
+import { getPostgresPool } from "@/lib/db/postgres";
 import { encryptSecret } from "./secrets";
 
 export type AnalyticsProjectStatus =
@@ -261,7 +261,7 @@ export const DEFAULT_ANALYTICS_PROJECT_SETTINGS: AnalyticsProjectSettings = {
     primaryPlatforms: ["all", "ios", "android"],
   },
 };
-const DEFAULT_PROJECT_OPTIONS = [
+const DEMO_PROJECT_OPTIONS = [
   {
     slug: "word-catcher",
     displayName: "Word Catcher",
@@ -308,7 +308,7 @@ declare global {
 }
 
 function useDemoStore() {
-  return DEMO_ACCESS_ENABLED && !hasPostgresDatabase();
+  return DEMO_ACCESS_ENABLED;
 }
 
 function getDemoStore() {
@@ -791,7 +791,7 @@ function seedDemoStore() {
   }
 
   const now = new Date();
-  store.projects = DEFAULT_PROJECT_OPTIONS.map((entry, index) => {
+  store.projects = DEMO_PROJECT_OPTIONS.map((entry, index) => {
     const projectId = randomUUID();
     const createdAt = new Date(now.getTime() - (index + 3) * 86400000);
     return {
@@ -823,7 +823,7 @@ function seedDemoStore() {
   });
 
   store.sources = store.projects.flatMap((project, index) => {
-    const template = DEFAULT_PROJECT_OPTIONS[index];
+    const template = DEMO_PROJECT_OPTIONS[index];
     const baseTime = new Date(now.getTime() - (index + 1) * 60 * 60 * 1000);
 
     return [

@@ -19,7 +19,7 @@
 | `WORKER_CONTROL_BASE_URL` | Yes (for live worker callbacks) | Base URL of the deployed control plane used by workers when calling `/api/internal/*` |
 | `ANALYTICS_PROJECT_ID` | Yes (for scheduled workers) | Project id or slug that tells a worker which project queue it should claim runs from |
 | `ANALYTICS_RUN_ID` | Optional | Binds a worker to one specific run instead of claiming the next queued run |
-| `DEMO_ACCESS_ENABLED` | Optional | Set to `true` to bypass auth in demo/review mode, inject demo admin claims, skip startup secret enforcement, and use an in-memory access store if `DATABASE_URL` is absent |
+| `DEMO_ACCESS_ENABLED` | Optional | Set to `true` to force the application into demo/review mode: bypass auth, inject demo admin claims, skip startup secret enforcement, and use the in-memory demo stores instead of the live database-backed control plane |
 | `NEXT_PUBLIC_DEMO_ACCESS_ENABLED` | Optional | Set to `true` to show demo-mode UI affordances like the login bypass button |
 
 ## Data Plane (GCP)

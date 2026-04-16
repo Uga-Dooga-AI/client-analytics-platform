@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import type { PoolClient } from "pg";
-import { getPostgresPool, hasPostgresDatabase } from "@/lib/db/postgres";
+import { getPostgresPool } from "@/lib/db/postgres";
 import type { AuthUser, UserRole } from "./types";
 
 export type AccessRequestStatus = "pending" | "approved" | "rejected";
@@ -194,7 +194,7 @@ function seedDemoStore() {
 }
 
 function useDemoStore() {
-  return DEMO_ACCESS_ENABLED && !hasPostgresDatabase();
+  return DEMO_ACCESS_ENABLED;
 }
 
 function getUserKey(user: Pick<StoredUserRecord, "id" | "authUid">) {

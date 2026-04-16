@@ -41,7 +41,7 @@ DEMO_ACCESS_ENABLED=true NEXT_PUBLIC_DEMO_ACCESS_ENABLED=true npm run dev
 
 This bypasses auth middleware locally and opens the full workspace in demo mode.
 It also skips the bootstrap-key and auth-secret startup checks so the shell can be reviewed before auth/bootstrap secrets are issued.
-When `DATABASE_URL` is absent in demo mode, admin/access APIs fall back to an in-memory review store so the interface still works end to end.
+When demo mode is enabled, admin/access APIs and analytics control-plane data switch to the in-memory demo stores instead of the live database-backed state.
 
 For production auto-approval of the primary operator account, set:
 
