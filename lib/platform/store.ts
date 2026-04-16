@@ -633,12 +633,12 @@ function buildPrimaryForecastCombinationInputs(
   return Array.from(combinations.values()).slice(0, MAX_PRIMARY_PREWARM_COMBINATIONS);
 }
 
-function buildForecastPrewarmPlan(settings: AnalyticsProjectSettings) {
-  const strategy = settings.forecastStrategy;
+function buildForecastPrewarmPlan(bundle: AnalyticsProjectBundle) {
+  const strategy = bundle.project.settings.forecastStrategy;
   const axes = {
     segments: strategy.primarySegments,
     countries: strategy.primaryCountries,
-    spendSources: strategy.primarySpendSources,
+    spendSources: primarySpendSourcesForBundle(bundle),
     platforms: strategy.primaryPlatforms,
   };
 
@@ -3376,7 +3376,7 @@ export function buildAnalyticsProjectConfig(bundle: AnalyticsProjectBundle) {
   const bounds = bundle.sources.find((source) => source.sourceType === "bounds_artifacts");
   const unityAds = bundle.sources.find((source) => source.sourceType === "unity_ads_spend");
   const googleAds = bundle.sources.find((source) => source.sourceType === "google_ads_spend");
-  const prewarmPlan = buildForecastPrewarmPlan(bundle.project.settings);
+  const prewarmPlan = buildForecastPrewarmPlan(bundle);
 
   const ingestionConfig = {
     provisioning: {

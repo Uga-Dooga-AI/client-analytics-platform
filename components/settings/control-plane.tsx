@@ -216,14 +216,14 @@ const DEFAULT_DRAFT: ProjectDraft = {
   bigquerySourceProjectId: "",
   bigquerySourceDataset: "",
   bigqueryServiceAccountJson: "",
-  unityAdsEnabled: true,
+  unityAdsEnabled: false,
   unityAdsMode: "bigquery",
   unityAdsSourceProjectId: "unity-ads-398711",
   unityAdsSourceDataset: "campaigns_days",
   unityAdsTablePattern: "day_*",
   unityAdsOrganizationId: "",
   unityAdsApiKey: "",
-  googleAdsEnabled: true,
+  googleAdsEnabled: false,
   googleAdsMode: "bigquery",
   googleAdsSourceProjectId: "civic-gate-406811",
   googleAdsSourceDataset: "google_ads_9377834221",
@@ -875,22 +875,28 @@ export function SettingsControlPlane({
                 onChange={(value) => updateDraft("unityAdsEnabled", value)}
                 description="Use BigQuery mirror if spends are already landed there. Switch to API mode only if they are not mirrored."
               />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <SelectField label="Unity mode" value={draft.unityAdsMode} onChange={(value) => updateDraft("unityAdsMode", value as ProjectDraft["unityAdsMode"])} options={[{ value: "bigquery", label: "BigQuery mirror" }, { value: "api", label: "Direct API" }]} />
-                {draft.unityAdsMode === "api" ? (
-                  <TextField label="Unity organization id" value={draft.unityAdsOrganizationId} onChange={(value) => updateDraft("unityAdsOrganizationId", value)} />
-                ) : (
-                  <TextField label="Unity source project" value={draft.unityAdsSourceProjectId} onChange={(value) => updateDraft("unityAdsSourceProjectId", value)} />
-                )}
-                {draft.unityAdsMode === "api" ? (
-                  <TextAreaField label="Unity API key" value={draft.unityAdsApiKey} onChange={(value) => updateDraft("unityAdsApiKey", value)} rows={3} />
-                ) : (
-                  <>
-                    <TextField label="Unity source dataset" value={draft.unityAdsSourceDataset} onChange={(value) => updateDraft("unityAdsSourceDataset", value)} />
-                    <TextField label="Unity table pattern" value={draft.unityAdsTablePattern} onChange={(value) => updateDraft("unityAdsTablePattern", value)} />
-                  </>
-                )}
-              </div>
+              {draft.unityAdsEnabled ? (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <SelectField label="Unity mode" value={draft.unityAdsMode} onChange={(value) => updateDraft("unityAdsMode", value as ProjectDraft["unityAdsMode"])} options={[{ value: "bigquery", label: "BigQuery mirror" }, { value: "api", label: "Direct API" }]} />
+                  {draft.unityAdsMode === "api" ? (
+                    <TextField label="Unity organization id" value={draft.unityAdsOrganizationId} onChange={(value) => updateDraft("unityAdsOrganizationId", value)} />
+                  ) : (
+                    <TextField label="Unity source project" value={draft.unityAdsSourceProjectId} onChange={(value) => updateDraft("unityAdsSourceProjectId", value)} />
+                  )}
+                  {draft.unityAdsMode === "api" ? (
+                    <TextAreaField label="Unity API key" value={draft.unityAdsApiKey} onChange={(value) => updateDraft("unityAdsApiKey", value)} rows={3} />
+                  ) : (
+                    <>
+                      <TextField label="Unity source dataset" value={draft.unityAdsSourceDataset} onChange={(value) => updateDraft("unityAdsSourceDataset", value)} />
+                      <TextField label="Unity table pattern" value={draft.unityAdsTablePattern} onChange={(value) => updateDraft("unityAdsTablePattern", value)} />
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--color-ink-500)", lineHeight: 1.6 }}>
+                  Unity Ads source is disabled. Spend and ROAS by Unity traffic will stay unavailable until you enable this connector.
+                </div>
+              )}
 
               <ToggleField
                 label="Google Ads spend connector"
@@ -898,33 +904,39 @@ export function SettingsControlPlane({
                 onChange={(value) => updateDraft("googleAdsEnabled", value)}
                 description="Recommended default is BigQuery mirror because the current notebooks already consume Google Ads spend from BigQuery exports."
               />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <SelectField label="Google Ads mode" value={draft.googleAdsMode} onChange={(value) => updateDraft("googleAdsMode", value as ProjectDraft["googleAdsMode"])} options={[{ value: "bigquery", label: "BigQuery mirror" }, { value: "api", label: "Direct API" }]} />
-                {draft.googleAdsMode === "api" ? (
-                  <TextField label="Google Ads customer id" value={draft.googleAdsCustomerId} onChange={(value) => updateDraft("googleAdsCustomerId", value)} />
-                ) : (
-                  <TextField label="Google Ads source project" value={draft.googleAdsSourceProjectId} onChange={(value) => updateDraft("googleAdsSourceProjectId", value)} />
-                )}
-                {draft.googleAdsMode === "api" ? (
-                  <TextField label="Google Ads login customer id" value={draft.googleAdsLoginCustomerId} onChange={(value) => updateDraft("googleAdsLoginCustomerId", value)} />
-                ) : (
-                  <TextField label="Google Ads source dataset" value={draft.googleAdsSourceDataset} onChange={(value) => updateDraft("googleAdsSourceDataset", value)} />
-                )}
-                {draft.googleAdsMode === "api" ? (
-                  <TextField label="Google Ads client id" value={draft.googleAdsClientId} onChange={(value) => updateDraft("googleAdsClientId", value)} />
-                ) : (
-                  <TextField label="Google Ads table pattern" value={draft.googleAdsTablePattern} onChange={(value) => updateDraft("googleAdsTablePattern", value)} />
-                )}
-                {draft.googleAdsMode === "api" ? (
-                  <TextAreaField label="Google Ads developer token" value={draft.googleAdsDeveloperToken} onChange={(value) => updateDraft("googleAdsDeveloperToken", value)} rows={3} />
-                ) : null}
-                {draft.googleAdsMode === "api" ? (
-                  <TextAreaField label="Google Ads client secret" value={draft.googleAdsClientSecret} onChange={(value) => updateDraft("googleAdsClientSecret", value)} rows={3} />
-                ) : null}
-                {draft.googleAdsMode === "api" ? (
-                  <TextAreaField label="Google Ads refresh token" value={draft.googleAdsRefreshToken} onChange={(value) => updateDraft("googleAdsRefreshToken", value)} rows={3} />
-                ) : null}
-              </div>
+              {draft.googleAdsEnabled ? (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <SelectField label="Google Ads mode" value={draft.googleAdsMode} onChange={(value) => updateDraft("googleAdsMode", value as ProjectDraft["googleAdsMode"])} options={[{ value: "bigquery", label: "BigQuery mirror" }, { value: "api", label: "Direct API" }]} />
+                  {draft.googleAdsMode === "api" ? (
+                    <TextField label="Google Ads customer id" value={draft.googleAdsCustomerId} onChange={(value) => updateDraft("googleAdsCustomerId", value)} />
+                  ) : (
+                    <TextField label="Google Ads source project" value={draft.googleAdsSourceProjectId} onChange={(value) => updateDraft("googleAdsSourceProjectId", value)} />
+                  )}
+                  {draft.googleAdsMode === "api" ? (
+                    <TextField label="Google Ads login customer id" value={draft.googleAdsLoginCustomerId} onChange={(value) => updateDraft("googleAdsLoginCustomerId", value)} />
+                  ) : (
+                    <TextField label="Google Ads source dataset" value={draft.googleAdsSourceDataset} onChange={(value) => updateDraft("googleAdsSourceDataset", value)} />
+                  )}
+                  {draft.googleAdsMode === "api" ? (
+                    <TextField label="Google Ads client id" value={draft.googleAdsClientId} onChange={(value) => updateDraft("googleAdsClientId", value)} />
+                  ) : (
+                    <TextField label="Google Ads table pattern" value={draft.googleAdsTablePattern} onChange={(value) => updateDraft("googleAdsTablePattern", value)} />
+                  )}
+                  {draft.googleAdsMode === "api" ? (
+                    <TextAreaField label="Google Ads developer token" value={draft.googleAdsDeveloperToken} onChange={(value) => updateDraft("googleAdsDeveloperToken", value)} rows={3} />
+                  ) : null}
+                  {draft.googleAdsMode === "api" ? (
+                    <TextAreaField label="Google Ads client secret" value={draft.googleAdsClientSecret} onChange={(value) => updateDraft("googleAdsClientSecret", value)} rows={3} />
+                  ) : null}
+                  {draft.googleAdsMode === "api" ? (
+                    <TextAreaField label="Google Ads refresh token" value={draft.googleAdsRefreshToken} onChange={(value) => updateDraft("googleAdsRefreshToken", value)} rows={3} />
+                  ) : null}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--color-ink-500)", lineHeight: 1.6 }}>
+                  Google Ads source is disabled. Google Ads spend and ROAS slices will stay unavailable until you enable this connector.
+                </div>
+              )}
             </Panel>
 
             <Panel title="Refresh and forecasting">
