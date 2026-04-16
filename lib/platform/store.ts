@@ -1585,7 +1585,7 @@ function ensureProjectPayload(input: AnalyticsProjectInput) {
 
   const settings = normalizeProjectSettings(input);
   const defaultBucket = deriveStorageBucket(
-    normalizeText(input.gcpProjectId, 120, "analytics-platform"),
+    normalizeText(input.gcpProjectId, 120, "analytics-platform-493522"),
     slug
   );
   const gcsBucket =
@@ -1603,7 +1603,7 @@ function ensureProjectPayload(input: AnalyticsProjectInput) {
     displayName,
     description: normalizeText(input.description, 220),
     ownerTeam: normalizeText(input.ownerTeam, 64, "Client Services"),
-    gcpProjectId: normalizeText(input.gcpProjectId, 120),
+    gcpProjectId: normalizeText(input.gcpProjectId, 120, "analytics-platform-493522"),
     gcsBucket,
     rawDataset,
     stgDataset,
@@ -2857,13 +2857,84 @@ function activeProjectRuns(bundle: AnalyticsProjectBundle) {
   return bundle.latestRuns.filter((run) => run.status === "queued" || run.status === "running");
 }
 
+function isPendingRunStatus(status: AnalyticsRunStatus) {
+  return (
+    status === "queued" ||
+    status === "running" ||
+    status === "blocked" ||
+    status === "waiting_credentials"
+  );
+}
+
+function stableRunSignatureValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stableRunSignatureValue(entry));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .reduce<Record<string, unknown>>((acc, [key, entryValue]) => {
+        acc[key] = stableRunSignatureValue(entryValue);
+        return acc;
+      }, {});
+  }
+
+  return value ?? null;
+}
+
+function buildRunSignature(
+  runType: AnalyticsRunType,
+  windowFrom: string | null,
+  windowTo: string | null,
+  payload: Record<string, unknown>
+) {
+  const forecastCombination =
+    payload.forecastCombination && typeof payload.forecastCombination === "object"
+      ? (payload.forecastCombination as Record<string, unknown>)
+      : null;
+
+  return JSON.stringify(
+    stableRunSignatureValue({
+      runType,
+      windowFrom: windowFrom ?? null,
+      windowTo: windowTo ?? null,
+      stage: typeof payload.stage === "string" ? payload.stage : null,
+      sequence: typeof payload.sequence === "string" ? payload.sequence : null,
+      forceReload: payload.forceReload === true,
+      forecastCombinationKey:
+        typeof forecastCombination?.key === "string" ? forecastCombination.key : null,
+      forecastFilters: forecastCombination?.filters ?? null,
+    })
+  );
+}
+
+function findEquivalentPendingRun(
+  runs: AnalyticsSyncRunRecord[],
+  candidate: AnalyticsSyncRunRecord
+) {
+  const candidateSignature = buildRunSignature(
+    candidate.runType,
+    candidate.windowFrom,
+    candidate.windowTo,
+    candidate.payload
+  );
+
+  return runs.find(
+    (run) =>
+      isPendingRunStatus(run.status) &&
+      buildRunSignature(run.runType, run.windowFrom, run.windowTo, run.payload) ===
+        candidateSignature
+  );
+}
+
 function hasSuccessfulDependency(bundle: AnalyticsProjectBundle, runType: AnalyticsRunType) {
   const dependencies = runDependencies(runType);
   if (dependencies.length === 0) {
     return true;
   }
 
-  return dependencies.some((dependency) =>
+  return dependencies.every((dependency) =>
     bundle.latestRuns.some((run) => run.runType === dependency && run.status === "succeeded")
   );
 }
@@ -3025,9 +3096,27 @@ export async function requestAnalyticsSync(
         ]
       : [buildRunRecord(input.runType)];
 
+  const existingBundleDuplicate = runs
+    .map((run) => findEquivalentPendingRun(bundle.latestRuns, run))
+    .find((run): run is AnalyticsSyncRunRecord => Boolean(run));
+  if (existingBundleDuplicate) {
+    return existingBundleDuplicate;
+  }
+
   if (useDemoStore()) {
     seedDemoStore();
     const store = getDemoStore();
+    const existingDemoDuplicate = runs
+      .map((run) =>
+        findEquivalentPendingRun(
+          store.runs.filter((entry) => entry.projectId === projectId),
+          run
+        )
+      )
+      .find((run): run is AnalyticsSyncRunRecord => Boolean(run));
+    if (existingDemoDuplicate) {
+      return existingDemoDuplicate;
+    }
     store.runs = [...[...runs].reverse(), ...store.runs];
     return runs[0];
   }
@@ -3037,55 +3126,75 @@ export async function requestAnalyticsSync(
     throw new Error("DATABASE_URL is not configured.");
   }
 
-  for (const run of runs) {
-    await pool.query(
-      `
-        INSERT INTO analytics_sync_runs (
-          id,
-          project_id,
-          run_type,
-          trigger_kind,
-          source_type,
-          status,
-          requested_by,
-          requested_at,
-          started_at,
-          finished_at,
-          window_from,
-          window_to,
-          message,
-          payload
-        )
-        VALUES (
-          $1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13::jsonb
-        )
-      `,
-      [
-        run.id,
-        run.projectId,
-        run.runType,
-        run.triggerKind,
-        run.sourceType,
-        run.status,
-        run.requestedBy,
-        run.startedAt,
-        run.finishedAt,
-        run.windowFrom,
-        run.windowTo,
-        run.message,
-        JSON.stringify(run.payload),
-      ]
-    );
-  }
+  const queuedRun = await withPgTransaction(async (client) => {
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [projectId]);
 
-  if (input.runType === "bootstrap" && bundle.project.settings.forecastStrategy.precomputePrimaryForecasts) {
+    const liveRuns = (await getPgProjectRuns(client, [projectId])).filter(
+      (run) => run.projectId === projectId
+    );
+    const existingPgDuplicate = runs
+      .map((run) => findEquivalentPendingRun(liveRuns, run))
+      .find((run): run is AnalyticsSyncRunRecord => Boolean(run));
+    if (existingPgDuplicate) {
+      return existingPgDuplicate;
+    }
+
+    for (const run of runs) {
+      await client.query(
+        `
+          INSERT INTO analytics_sync_runs (
+            id,
+            project_id,
+            run_type,
+            trigger_kind,
+            source_type,
+            status,
+            requested_by,
+            requested_at,
+            started_at,
+            finished_at,
+            window_from,
+            window_to,
+            message,
+            payload
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13::jsonb
+          )
+        `,
+        [
+          run.id,
+          run.projectId,
+          run.runType,
+          run.triggerKind,
+          run.sourceType,
+          run.status,
+          run.requestedBy,
+          run.startedAt,
+          run.finishedAt,
+          run.windowFrom,
+          run.windowTo,
+          run.message,
+          JSON.stringify(run.payload),
+        ]
+      );
+    }
+
+    return runs[0];
+  });
+
+  if (
+    queuedRun.id === runs[0].id &&
+    input.runType === "bootstrap" &&
+    bundle.project.settings.forecastStrategy.precomputePrimaryForecasts
+  ) {
     await seedPrimaryForecastCombinations(bundle.project.id, input.requestedBy, {
       queueRuns: true,
       triggerKind: input.triggerKind ?? "bootstrap",
     });
   }
 
-  return runs[0];
+  return queuedRun;
 }
 
 export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunUpdateInput) {

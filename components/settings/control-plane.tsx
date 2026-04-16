@@ -186,7 +186,7 @@ const DEFAULT_DRAFT: ProjectDraft = {
   displayName: "",
   description: "",
   ownerTeam: "Client Services",
-  gcpProjectId: "",
+  gcpProjectId: "analytics-platform-493522",
   gcsBucket: "",
   rawDataset: "raw",
   stgDataset: "stg",
@@ -343,7 +343,7 @@ function slugifyForInfra(value: string) {
 
 function deriveAutoInfrastructure(draft: ProjectDraft) {
   const slug = slugifyForInfra(draft.slug || draft.displayName || "analytics-project");
-  const gcpProjectId = slugifyForInfra(draft.gcpProjectId || "analytics-platform");
+  const gcpProjectId = slugifyForInfra(draft.gcpProjectId || "analytics-platform-493522");
   const bucket = `${gcpProjectId}-${slug}-analytics`.slice(0, 63).replace(/-+$/g, "");
   const boundsPrefix = `bounds/${slug || "project"}/`;
   return {

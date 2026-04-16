@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+_SUCCESSFUL_RUN_STATUSES = ("success", "skipped_existing")
 
 # DDL for the health-check table (created if it does not exist)
 _META_TABLE = "meta.pipeline_runs"
@@ -205,6 +206,40 @@ class BQLoader:
             logger.error("Failed to write meta.pipeline_runs: %s", errors)
         else:
             logger.info("meta.pipeline_runs: recorded run_id=%s status=%s", run_id, status)
+
+    def has_successful_slice(
+        self,
+        *,
+        job_name: str,
+        app_id: int,
+        partition_date: str,
+        resource: str,
+    ) -> bool:
+        if self._client is None:
+            return False
+
+        query = f"""
+            SELECT 1
+            FROM `{self.project_id}.meta.pipeline_runs`
+            WHERE job_name = @job_name
+              AND app_id = @app_id
+              AND partition_date = @partition_date
+              AND resource = @resource
+              AND status IN UNNEST(@statuses)
+            ORDER BY finished_at DESC
+            LIMIT 1
+        """
+        job_config = self._bq.QueryJobConfig(
+            query_parameters=[
+                self._bq.ScalarQueryParameter("job_name", "STRING", job_name),
+                self._bq.ScalarQueryParameter("app_id", "INT64", app_id),
+                self._bq.ScalarQueryParameter("partition_date", "DATE", partition_date),
+                self._bq.ScalarQueryParameter("resource", "STRING", resource),
+                self._bq.ArrayQueryParameter("statuses", "STRING", list(_SUCCESSFUL_RUN_STATUSES)),
+            ]
+        )
+        result = self._client.query(query, job_config=job_config).result()
+        return next(iter(result), None) is not None
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -8,7 +8,8 @@ Pipeline per app_id per resource:
   3. Load GCS blob into BigQuery raw table (date-partitioned)
   4. Record run in meta.pipeline_runs
 
-Idempotency: skips GCS upload if the blob already exists (re-runs are safe).
+Idempotency: skips already-successful app/date/resource slices using meta.pipeline_runs
+and skips GCS upload if the blob already exists.
 
 Required env vars:
   APPMETRICA_TOKEN              — AppMetrica OAuth token
@@ -98,6 +99,17 @@ def normalize_app_ids(raw_app_ids: list[object]) -> list[int]:
     return app_ids
 
 
+def should_force_reload(runtime_context) -> bool:
+    if runtime_context.mode != "attached" or not runtime_context.run:
+        return False
+
+    payload = runtime_context.run.get("payload")
+    if not isinstance(payload, dict):
+        return False
+
+    return payload.get("forceReload") is True
+
+
 def ensure_runtime_infrastructure(config: dict, uploader, loader) -> None:
     provisioning = config.get("provisioning", {})
     if not provisioning.get("auto_create_infrastructure", False):
@@ -125,13 +137,14 @@ def ingest_resource(
     bq_table: str,
     event_names: list[str] | None = None,
     run_id_prefix: str,
+    force_reload: bool = False,
 ) -> None:
     """
     Run the full extract → stage → load cycle for one app_id + resource.
 
-    Idempotency: if the GCS blob already exists, the upload is skipped
-    and the BQ load is re-attempted (BQ WRITE_APPEND is idempotent for
-    date-partitioned tables when the partition is first truncated — see notes).
+    Idempotency: if this app/date/resource slice was already recorded as successful,
+    fetch/upload/load is skipped entirely. If only the GCS blob exists, upload is
+    skipped and the BQ load is retried.
     """
     started_at = datetime.now(timezone.utc)
     run_id = f"{run_id_prefix}/{resource}/{app_id}/{ingest_date}"
@@ -143,6 +156,20 @@ def ingest_resource(
     error_message = None
 
     try:
+        if not force_reload and loader.has_successful_slice(
+            job_name="appmetrica_ingestion",
+            app_id=app_id,
+            partition_date=ingest_date,
+            resource=resource,
+        ):
+            status = "skipped_existing"
+            error_message = "Skipped reload because this slice already completed successfully."
+            logger.info(
+                "[%s] successful slice already recorded in meta.pipeline_runs — skipping fetch/load",
+                run_id,
+            )
+            return
+
         # --- 1. Fetch from AppMetrica ---
         logger.info("[%s] fetching %s for app_id=%s date=%s", run_id, resource, app_id, ingest_date)
 
@@ -252,6 +279,7 @@ def main() -> None:
         uploader = GCSUploader()
         loader = BQLoader()
         ensure_runtime_infrastructure(config, uploader, loader)
+        force_reload = should_force_reload(runtime_context)
 
         failed: list[str] = []
 
@@ -274,6 +302,7 @@ def main() -> None:
                             bq_table=bq_table,
                             event_names=event_names if resource == "events" else None,
                             run_id_prefix=run_id_prefix,
+                            force_reload=force_reload,
                         )
                     except Exception:
                         failed.append(f"{app_id}/{resource}/{ingest_date}")
