@@ -33,6 +33,8 @@ import yaml
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from src.control_plane import patch_run_status, prepare_job_runtime
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -54,8 +56,61 @@ def resolve_ingest_date(config: dict) -> str:
     override = os.environ.get("INGEST_DATE")
     if override:
         return override
-    lookback = config.get("schedule", {}).get("lookback_days", 1)
+    lookback = config.get("appmetrica", {}).get("lookback_days", 1)
     return (date.today() - timedelta(days=lookback)).isoformat()
+
+
+def resolve_ingest_dates(config: dict, runtime_context) -> list[str]:
+    if runtime_context.mode == "attached" and runtime_context.run:
+        run = runtime_context.run
+        run_type = str(run.get("runType", "ingestion"))
+        window_from = run.get("windowFrom")
+        window_to = run.get("windowTo")
+        if isinstance(window_from, str) and isinstance(window_to, str):
+            start = date.fromisoformat(window_from)
+            end = date.fromisoformat(window_to)
+        elif run_type == "backfill":
+            lookback_days = int(config.get("appmetrica", {}).get("lookback_days", 1))
+            backfill_days = int(config.get("schedule", {}).get("initial_backfill_days", 1))
+            end = date.today() - timedelta(days=lookback_days)
+            start = end - timedelta(days=max(backfill_days - 1, 0))
+        else:
+            return [resolve_ingest_date(config)]
+
+        if start > end:
+            start, end = end, start
+
+        return [
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        ]
+
+    return [resolve_ingest_date(config)]
+
+
+def normalize_app_ids(raw_app_ids: list[object]) -> list[int]:
+    app_ids: list[int] = []
+    for value in raw_app_ids:
+        try:
+            app_ids.append(int(value))
+        except (TypeError, ValueError):
+            logger.warning("skipping invalid AppMetrica app id from config: %s", value)
+    return app_ids
+
+
+def ensure_runtime_infrastructure(config: dict, uploader, loader) -> None:
+    provisioning = config.get("provisioning", {})
+    if not provisioning.get("auto_create_infrastructure", False):
+        return
+
+    region = str(provisioning.get("region", os.environ.get("BQ_LOCATION", "EU")))
+    datasets = provisioning.get("datasets", {})
+    uploader.ensure_bucket(location=region)
+    loader.ensure_datasets(
+        str(datasets.get("raw", "")),
+        str(datasets.get("stg", "")),
+        str(datasets.get("mart", "")),
+    )
 
 
 def ingest_resource(
@@ -143,56 +198,117 @@ def ingest_resource(
 def main() -> None:
     logger.info("=== AppMetrica ingestion job start ===")
 
-    config = load_config()
-    ingest_date = resolve_ingest_date(config)
-    run_id_prefix = str(uuid.uuid4())[:8]
+    runtime_context = prepare_job_runtime("ingestion", ("backfill", "ingestion"))
+    if runtime_context.mode == "idle":
+        logger.info("no queued ingestion/backfill runs were available")
+        return
 
-    app_ids: list[int] = config.get("appmetrica", {}).get("app_ids", [])
-    event_names: list[str] = config.get("appmetrica", {}).get("event_names", [])
-    gcs_prefix: str = config.get("gcs", {}).get("prefix", "raw/appmetrica")
-
-    logger.info(
-        "config: app_ids=%s ingest_date=%s gcs_prefix=%s",
-        app_ids, ingest_date, gcs_prefix,
+    patch_run_status(
+        runtime_context,
+        status="running",
+        message="Ingestion worker is preparing AppMetrica extraction.",
     )
 
-    from src.appmetrica_client import AppMetricaClient
-    from src.gcs_uploader import GCSUploader
-    from src.bq_loader import BQLoader
+    try:
+        config = load_config()
+        ingest_dates = resolve_ingest_dates(config, runtime_context)
+        run_id_prefix = (
+            str(runtime_context.run.get("id", ""))[:8]
+            if runtime_context.mode == "attached" and runtime_context.run
+            else str(uuid.uuid4())[:8]
+        )
 
-    client = AppMetricaClient()
-    uploader = GCSUploader()
-    loader = BQLoader()
+        app_ids = normalize_app_ids(config.get("appmetrica", {}).get("app_ids", []))
+        event_names: list[str] = config.get("appmetrica", {}).get("event_names", [])
+        gcs_prefix: str = config.get("gcs", {}).get("prefix", "raw/appmetrica")
+        bigquery_cfg = config.get("bigquery", {})
+        events_table = str(bigquery_cfg.get("events_table", "appmetrica_events"))
+        installs_table = str(bigquery_cfg.get("installs_table", "appmetrica_installs"))
+        sessions_table = str(bigquery_cfg.get("sessions_table", "appmetrica_sessions"))
 
-    failed: list[str] = []
+        logger.info(
+            "config: app_ids=%s ingest_dates=%s gcs_prefix=%s",
+            app_ids,
+            ingest_dates,
+            gcs_prefix,
+        )
 
-    for app_id in app_ids:
-        for resource, bq_table in [
-            ("events", "appmetrica_events"),
-            ("installations", "appmetrica_installs"),
-            ("sessions", "appmetrica_sessions"),
-        ]:
-            try:
-                ingest_resource(
-                    client=client,
-                    uploader=uploader,
-                    loader=loader,
-                    app_id=int(app_id),
-                    ingest_date=ingest_date,
-                    resource=resource,
-                    gcs_prefix=gcs_prefix,
-                    bq_table=bq_table,
-                    event_names=event_names if resource == "events" else None,
-                    run_id_prefix=run_id_prefix,
-                )
-            except Exception:
-                failed.append(f"{app_id}/{resource}")
+        if not app_ids:
+            message = "No valid AppMetrica app ids are configured; ingestion exited without work."
+            logger.info(message)
+            patch_run_status(
+                runtime_context,
+                status="succeeded",
+                message=message,
+                payload={"processedDates": ingest_dates, "appIds": []},
+            )
+            return
 
-    if failed:
-        logger.error("=== ingestion FAILED for: %s ===", failed)
-        sys.exit(1)
+        from src.appmetrica_client import AppMetricaClient
+        from src.gcs_uploader import GCSUploader
+        from src.bq_loader import BQLoader
 
-    logger.info("=== AppMetrica ingestion job complete: date=%s apps=%s ===", ingest_date, app_ids)
+        client = AppMetricaClient()
+        uploader = GCSUploader()
+        loader = BQLoader()
+        ensure_runtime_infrastructure(config, uploader, loader)
+
+        failed: list[str] = []
+
+        for ingest_date in ingest_dates:
+            for app_id in app_ids:
+                for resource, bq_table in [
+                    ("events", events_table),
+                    ("installations", installs_table),
+                    ("sessions", sessions_table),
+                ]:
+                    try:
+                        ingest_resource(
+                            client=client,
+                            uploader=uploader,
+                            loader=loader,
+                            app_id=app_id,
+                            ingest_date=ingest_date,
+                            resource=resource,
+                            gcs_prefix=gcs_prefix,
+                            bq_table=bq_table,
+                            event_names=event_names if resource == "events" else None,
+                            run_id_prefix=run_id_prefix,
+                        )
+                    except Exception:
+                        failed.append(f"{app_id}/{resource}/{ingest_date}")
+
+        if failed:
+            logger.error("=== ingestion FAILED for: %s ===", failed)
+            patch_run_status(
+                runtime_context,
+                status="failed",
+                message=f"Ingestion failed for {len(failed)} app/resource slices.",
+                payload={"processedDates": ingest_dates, "failedSlices": failed},
+                source_type="appmetrica_logs",
+                source_status="error",
+            )
+            sys.exit(1)
+
+        logger.info("=== AppMetrica ingestion job complete: dates=%s apps=%s ===", ingest_dates, app_ids)
+        patch_run_status(
+            runtime_context,
+            status="succeeded",
+            message=f"Ingestion completed for {len(ingest_dates)} date window(s).",
+            payload={"processedDates": ingest_dates, "appIds": app_ids, "gcsPrefix": gcs_prefix},
+            source_type="appmetrica_logs",
+            source_status="ready",
+        )
+    except Exception as exc:
+        patch_run_status(
+            runtime_context,
+            status="failed",
+            message=f"Ingestion worker crashed: {exc}",
+            payload={"error": str(exc)},
+            source_type="appmetrica_logs",
+            source_status="error",
+        )
+        raise
 
 
 if __name__ == "__main__":

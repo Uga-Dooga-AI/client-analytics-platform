@@ -52,7 +52,9 @@ models:
     description: >
       Дневная агрегация результатов A/B-экспериментов.
       Источник экспозиции — AppMetrica events с префиксом ab_* (Firebase Remote Config).
-      Grain: experiment_id × variant × date.
+      Источник экспозиции: fact_experiment_exposure; revenue и guardrails
+      считаются по post-exposure событиям за настраиваемое окно.
+      Grain: experiment_id × variant × date × app_id × os_name × country_code.
     columns:
       - name: experiment_id
         description: Идентификатор эксперимента (часть имени события после 'ab_')
@@ -66,12 +68,24 @@ models:
         description: Дата события (UTC)
         tests:
           - not_null
+      - name: app_id
+        description: ID приложения в AppMetrica
+        tests:
+          - not_null
+      - name: os_name
+        description: Операционная система экспонированной когорты
+        tests:
+          - not_null
+      - name: country_code
+        description: ISO-код страны экспонированной когорты
+        tests:
+          - not_null
       - name: exposures
         description: Количество уникальных устройств, получивших экспозицию в этот день
       - name: activations
         description: Количество уникальных устройств, совершивших целевое действие в день экспозиции
       - name: revenue
-        description: Выручка (заглушка; подключить после получения revenue source)
+        description: Выручка по post-exposure revenue events за окно атрибуции
       - name: guardrail_crashes
         description: Количество уникальных устройств с crash-событием в день экспозиции
       - name: guardrail_errors
@@ -109,8 +123,9 @@ models:
   - name: mart_cohort_daily
     description: >
       Дневные когорты удержания и LTV.
-      Когорта определяется первым днём активности устройства.
-      Grain: cohort_id × cohort_date × period_day.
+      Когорта определяется днём установки устройства из AppMetrica installs.
+      LTV строится как cumulative revenue per cohort user.
+      Grain: cohort_id × cohort_date × period_day × os_name × country_code × tracker_name.
     columns:
       - name: cohort_id
         description: Идентификатор когорты (сегмент; сейчас 'default')
@@ -131,14 +146,21 @@ models:
       - name: retention_rate
         description: Доля удержанных пользователей (retained / users)
       - name: ltv
-        description: LTV на period_day (заглушка; подключить после получения revenue source)
+        description: Накопленный LTV на period_day (cumulative revenue / users)
+      - name: os_name
+        description: Операционная система инсталляционной когорты
+      - name: country_code
+        description: ISO-код страны инсталляционной когорты
+      - name: tracker_name
+        description: Источник трафика / трекер инсталляции
 
   - name: mart_forecast_points
     description: >
       Результаты прогнозных моделей (p50/p10/p90).
-      Источник: Cloud Run Jobs → BigQuery stg.forecast_runs.
+      Источник: per-project forecast table, которую пишет worker
+      (`{project_slug}_forecast_points` в mart dataset), после чего dbt
+      собирает единый serving mart поверх этого соглашения по именованию.
       Grain: run_id × metric × date.
-      Сейчас — заглушка; активируется после подключения GCP credentials (UGAA-1167).
     columns:
       - name: run_id
         description: Идентификатор запуска forecast-модели
@@ -181,6 +203,10 @@ models:
         description: DAU из залогиненных пользователей (user_id != '')
       - name: total_events
         description: Общее количество событий за день
+      - name: wau_rolling_7d
+        description: Уникальные активные устройства за последние 7 дней включительно
+      - name: mau_rolling_30d
+        description: Уникальные активные устройства за последние 30 дней включительно
       - name: login_rate
         description: Доля залогиненных среди активных (dau_logged_in / dau)
 

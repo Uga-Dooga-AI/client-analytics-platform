@@ -1,20 +1,37 @@
--- mart_forecast_points: результаты forecast-моделей (p50/p10/p90)
+-- mart_forecast_points: serving mart for forecast worker output
 -- Grain: run_id × metric × date
--- Источник: Cloud Run Jobs (jobs/forecasts) → BigQuery staging table
--- Ноутбуки с текущей реализацией прогнозов: /Users/sergeymishustin/Projects/Analytics Dashboard
+-- Source table convention: {project_slug}_forecast_points in mart dataset
+
+{%- set mart_dataset = var('mart_dataset', target.schema) -%}
+{%- set source_identifier = var('project_slug') | replace('-', '_') ~ '_forecast_points' -%}
+{%- set source_relation = adapter.get_relation(
+    database=target.database,
+    schema=mart_dataset,
+    identifier=source_identifier
+) -%}
 
 with source as (
-    -- TODO: создать staging-таблицу stg.forecast_runs после подключения GCP credentials
-    -- Временная заглушка: пустой набор с правильной схемой
+    {% if source_relation %}
     select
-        cast(null as string)        as run_id,
-        cast(null as string)        as metric,
-        cast(null as date)          as date,
-        cast(null as float64)       as p50,
-        cast(null as float64)       as p10,
-        cast(null as float64)       as p90,
-        cast(null as timestamp)     as generated_at
-    where false  -- заглушка; убрать после подключения source
+        cast(run_id as string) as run_id,
+        cast(metric as string) as metric,
+        cast(date as date) as date,
+        cast(p50 as float64) as p50,
+        cast(p10 as float64) as p10,
+        cast(p90 as float64) as p90,
+        cast(generated_at as timestamp) as generated_at
+    from {{ source_relation }}
+    {% else %}
+    select
+        cast(null as string) as run_id,
+        cast(null as string) as metric,
+        cast(null as date) as date,
+        cast(null as float64) as p50,
+        cast(null as float64) as p10,
+        cast(null as float64) as p90,
+        cast(null as timestamp) as generated_at
+    where false
+    {% endif %}
 )
 
 select

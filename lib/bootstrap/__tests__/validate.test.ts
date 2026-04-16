@@ -13,16 +13,19 @@ describe("validateBootstrapConfig", () => {
   });
 
   it("does not throw when key is exactly 32 characters", () => {
+    process.env.AUTH_SECRET = "z".repeat(32);
     process.env.SUPERADMIN_BOOTSTRAP_KEY = "a".repeat(32);
     expect(() => validateBootstrapConfig()).not.toThrow();
   });
 
   it("does not throw when key is longer than 32 characters", () => {
+    process.env.AUTH_SECRET = "z".repeat(32);
     process.env.SUPERADMIN_BOOTSTRAP_KEY = "a".repeat(64);
     expect(() => validateBootstrapConfig()).not.toThrow();
   });
 
   it("throws when SUPERADMIN_BOOTSTRAP_KEY is not set", () => {
+    process.env.AUTH_SECRET = "z".repeat(32);
     delete process.env.SUPERADMIN_BOOTSTRAP_KEY;
     expect(() => validateBootstrapConfig()).toThrow(
       /SUPERADMIN_BOOTSTRAP_KEY is not set/
@@ -30,6 +33,7 @@ describe("validateBootstrapConfig", () => {
   });
 
   it("throws when key is shorter than 32 characters", () => {
+    process.env.AUTH_SECRET = "z".repeat(32);
     process.env.SUPERADMIN_BOOTSTRAP_KEY = "short";
     expect(() => validateBootstrapConfig()).toThrow(
       /must be >= 32 characters/
@@ -37,6 +41,7 @@ describe("validateBootstrapConfig", () => {
   });
 
   it("throws when key is exactly 31 characters", () => {
+    process.env.AUTH_SECRET = "z".repeat(32);
     process.env.SUPERADMIN_BOOTSTRAP_KEY = "a".repeat(31);
     expect(() => validateBootstrapConfig()).toThrow(
       /must be >= 32 characters/
@@ -44,6 +49,7 @@ describe("validateBootstrapConfig", () => {
   });
 
   it("error message includes actual key length", () => {
+    process.env.AUTH_SECRET = "z".repeat(32);
     process.env.SUPERADMIN_BOOTSTRAP_KEY = "abc";
     expect(() => validateBootstrapConfig()).toThrow(/Got 3/);
   });

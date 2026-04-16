@@ -2,13 +2,12 @@
 
 import { useMemo, useState, useTransition } from "react";
 import {
-  DASHBOARD_PROJECTS,
   PLATFORM_OPTIONS,
   TAG_OPTIONS,
   type DashboardProjectKey,
 } from "@/lib/dashboard-filters";
 import type { SegmentBuilderCatalog } from "@/lib/data/acquisition";
-import type { SavedUserSegment } from "@/lib/segments";
+import type { SavedSegmentEventRule, SavedUserSegment } from "@/lib/segments";
 
 type BuilderState = {
   label: string;
@@ -22,6 +21,7 @@ type BuilderState = {
   source: string;
   campaign: string;
   creative: string;
+  eventRules: SavedSegmentEventRule[];
 };
 
 const PROFILE_OPTIONS: Array<{ value: SavedUserSegment["profileKey"]; label: string }> = [
@@ -36,10 +36,12 @@ export function SegmentsWorkspace({
   initialSegments,
   projectKey,
   catalog,
+  projectOptions,
 }: {
   initialSegments: SavedUserSegment[];
   projectKey: DashboardProjectKey;
   catalog: SegmentBuilderCatalog;
+  projectOptions: Array<{ value: string; label: string }>;
 }) {
   const [segments, setSegments] = useState(initialSegments);
   const [builder, setBuilder] = useState<BuilderState>(() => ({
@@ -54,6 +56,7 @@ export function SegmentsWorkspace({
     source: "all",
     campaign: "all",
     creative: "all",
+    eventRules: [],
   }));
   const [error, setError] = useState("");
   const [isPending, startTransition] = useTransition();
@@ -81,6 +84,7 @@ export function SegmentsWorkspace({
       source: "all",
       campaign: "all",
       creative: "all",
+      eventRules: [],
     }));
   }
 
@@ -103,6 +107,7 @@ export function SegmentsWorkspace({
             source: builder.source,
             campaign: builder.campaign,
             creative: builder.creative,
+            eventRules: builder.eventRules,
           },
         }),
       });
@@ -186,7 +191,7 @@ export function SegmentsWorkspace({
             onChange={(value) => setBuilder((current) => ({ ...current, projectKey: value as DashboardProjectKey }))}
             options={[
               { value: "all", label: "Cross-project" },
-              ...DASHBOARD_PROJECTS.map((project) => ({ value: project.key, label: project.label })),
+              ...projectOptions,
             ]}
           />
           <SelectField
@@ -236,6 +241,113 @@ export function SegmentsWorkspace({
           onChange={(value) => setBuilder((current) => ({ ...current, creative: value }))}
           options={catalog.creatives.map((option) => ({ value: option.value, label: option.label }))}
         />
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-950)" }}>Event rules</div>
+              <div style={{ marginTop: 3, fontSize: 11.5, color: "var(--color-ink-500)", lineHeight: 1.5 }}>
+                Use notebook-style user behavior constraints on top of traffic, country, platform, and campaign filters.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                setBuilder((current) => ({
+                  ...current,
+                  eventRules: [
+                    ...current.eventRules,
+                    {
+                      eventName: catalog.events.find((option) => option.value !== "all")?.value ?? "session_start",
+                      operator: "did" as const,
+                      withinDays: 30,
+                      minCount: 1,
+                    },
+                  ].slice(0, 4),
+                }))
+              }
+              style={SECONDARY_BUTTON_STYLE}
+            >
+              Add event rule
+            </button>
+          </div>
+
+          {builder.eventRules.map((rule, index) => (
+            <div key={`${rule.eventName}-${index}`} style={{ display: "grid", gridTemplateColumns: "1.35fr 0.8fr 0.8fr 0.8fr auto", gap: 10, alignItems: "end" }}>
+              <SelectField
+                label={`Event ${index + 1}`}
+                value={rule.eventName}
+                onChange={(value) =>
+                  setBuilder((current) => ({
+                    ...current,
+                    eventRules: current.eventRules.map((eventRule, eventIndex) =>
+                      eventIndex === index ? { ...eventRule, eventName: value } : eventRule
+                    ),
+                  }))
+                }
+                options={catalog.events.filter((option) => option.value !== "all").map((option) => ({ value: option.value, label: option.label }))}
+              />
+              <SelectField
+                label="Operator"
+                value={rule.operator}
+                onChange={(value) =>
+                  setBuilder((current) => ({
+                    ...current,
+                    eventRules: current.eventRules.map((eventRule, eventIndex) =>
+                      eventIndex === index ? { ...eventRule, operator: value as SavedSegmentEventRule["operator"] } : eventRule
+                    ),
+                  }))
+                }
+                options={[
+                  { value: "did", label: "Did" },
+                  { value: "did_not", label: "Did not" },
+                ]}
+              />
+              <NumberField
+                label="Within days"
+                value={rule.withinDays}
+                onChange={(value) =>
+                  setBuilder((current) => ({
+                    ...current,
+                    eventRules: current.eventRules.map((eventRule, eventIndex) =>
+                      eventIndex === index ? { ...eventRule, withinDays: value } : eventRule
+                    ),
+                  }))
+                }
+              />
+              <NumberField
+                label="Min count"
+                value={rule.minCount}
+                onChange={(value) =>
+                  setBuilder((current) => ({
+                    ...current,
+                    eventRules: current.eventRules.map((eventRule, eventIndex) =>
+                      eventIndex === index ? { ...eventRule, minCount: value } : eventRule
+                    ),
+                  }))
+                }
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setBuilder((current) => ({
+                    ...current,
+                    eventRules: current.eventRules.filter((_, eventIndex) => eventIndex !== index),
+                  }))
+                }
+                style={{ ...SECONDARY_BUTTON_STYLE, padding: "10px 12px" }}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+
+          {builder.eventRules.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--color-ink-500)", padding: "10px 12px", borderRadius: 10, border: "1px dashed var(--color-border-strong)", background: "var(--color-panel-soft)" }}>
+              No event rules configured. This segment is based only on the selected filters and scope.
+            </div>
+          ) : null}
+        </div>
 
         {error ? (
           <div
@@ -333,7 +445,7 @@ export function SegmentsWorkspace({
                   label={
                     segment.rules.projectKey === "all"
                       ? "Cross-project"
-                      : DASHBOARD_PROJECTS.find((project) => project.key === segment.rules.projectKey)?.label ?? segment.rules.projectKey
+                      : projectOptions.find((project) => project.value === segment.rules.projectKey)?.label ?? segment.rules.projectKey
                   }
                 />
                 {summarizeRules(segment).map((rule) => (
@@ -357,6 +469,9 @@ function summarizeRules(segment: SavedUserSegment) {
   if (segment.rules.source !== "all") rules.push(segment.rules.source);
   if (segment.rules.campaign !== "all") rules.push(segment.rules.campaign);
   if (segment.rules.creative !== "all") rules.push(segment.rules.creative);
+  segment.rules.eventRules.forEach((rule) => {
+    rules.push(`${rule.operator === "did" ? "did" : "did not"} ${rule.eventName} in ${rule.withinDays}d`);
+  });
   return rules.length > 0 ? rules : ["No additional rules"];
 }
 
@@ -435,6 +550,23 @@ function SelectField({
           </option>
         ))}
       </select>
+    </label>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={FIELD_LABEL_STYLE}>{label}</span>
+      <input type="number" value={value} onChange={(event) => onChange(Number(event.target.value) || 0)} style={FIELD_STYLE} />
     </label>
   );
 }

@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { AcquisitionWorkbench } from "@/components/acquisition-workbench";
 import { CohortMatrixTable } from "@/components/cohort-matrix-table";
 import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
+import { ForecastCombinationTracker } from "@/components/forecast-combination-tracker";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import {
   getAcquisitionDashboardData,
@@ -47,10 +48,33 @@ export default async function AcquisitionPage({
           minWidth: 0,
         }}
       >
+        <ForecastCombinationTracker
+          projectKey={filters.projectKey}
+          label={`${selectedProject} · acquisition slice`}
+          sourcePage="/acquisition"
+          filters={{
+            from: filters.from,
+            to: filters.to,
+            platform: filters.platform,
+            segment: filters.segment,
+            groupBy: filters.groupBy,
+            tag: filters.tag,
+            granularityDays: filters.granularityDays,
+            revenueMode: data.localFilters.revenueMode,
+            country: data.localFilters.country,
+            company: data.localFilters.company,
+            source: data.localFilters.source,
+            campaign: data.localFilters.campaign,
+            creative: data.localFilters.creative,
+            compareLeft: data.localFilters.compareLeft,
+            compareRight: data.localFilters.compareRight,
+          }}
+        />
+
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
             gap: 1,
             background: "var(--color-border-soft)",
             border: "1px solid var(--color-border-soft)",
@@ -63,6 +87,11 @@ export default async function AcquisitionPage({
               label: "Selected project",
               value: selectedProject,
               sub: `Slice count ${data.summary.sliceCount.toLocaleString()}`,
+            },
+            {
+              label: "Day step",
+              value: `${filters.granularityDays}d`,
+              sub: `Notebook-style cohort grouping`,
             },
             {
               label: "Revenue view",
@@ -105,7 +134,7 @@ export default async function AcquisitionPage({
               sub: `${data.summary.confidence} interval · ${filters.platform === "all" ? "mixed platform" : filters.platform}`,
             },
           ].map((card) => (
-            <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
+            <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "14px 16px" }}>
               <div style={CARD_LABEL_STYLE}>{card.label}</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1.05 }}>
                 {card.value}
@@ -122,11 +151,14 @@ export default async function AcquisitionPage({
           options={data.options}
         />
 
-        <section style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 20 }}>
+        <section style={{ display: "grid", gridTemplateColumns: "1fr", gap: 20 }}>
           {data.horizonCharts.map((chart) => (
             <ComparisonConfidenceChart key={chart.id} chart={chart} />
           ))}
           <ComparisonConfidenceChart chart={data.paybackChart} />
+        </section>
+
+        <section style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", gap: 20 }}>
           <section
             style={{
               background: "var(--color-panel-base)",
@@ -152,6 +184,7 @@ export default async function AcquisitionPage({
                 value={selectedSegmentLabel}
               />
               <InfoStat label="Revenue view" value={capitalizeMode(data.localFilters.revenueMode)} />
+              <InfoStat label="Day step" value={`${filters.granularityDays}d`} />
               <InfoStat label="Grouping" value={filters.groupBy === "none" ? "Ungrouped" : filters.groupBy} />
               <InfoStat label="Tag focus" value={filters.tag === "all" ? "All tags" : filters.tag} />
               <InfoStat label="Date range" value={`${filters.from} to ${filters.to}`} />

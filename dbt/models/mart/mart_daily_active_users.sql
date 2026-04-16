@@ -1,5 +1,5 @@
 -- mart_daily_active_users: Daily Active Users по app_id
--- Grain: app_id × date
+-- Grain: app_id × os_name × date
 -- Активный пользователь = device_id с хотя бы одним событием за день
 -- Партиционирование: по полю date
 
@@ -13,47 +13,71 @@
     cluster_by=["app_id", "os_name"]
 ) }}
 
-with daily_activity as (
+with activity as (
     select
         app_id,
         event_date                                  as date,
+        os_name,
+        device_id,
+        user_id
+    from {{ ref('stg_appmetrica__events') }}
+),
+
+daily_activity as (
+    select
+        app_id,
+        date,
         os_name,
         count(distinct device_id)                   as dau,
         count(distinct case
             when user_id != '' then user_id
         end)                                        as dau_logged_in,
         count(*)                                    as total_events
-    from {{ ref('stg_appmetrica__events') }}
+    from activity
     group by 1, 2, 3
 ),
 
-weekly_rolling as (
+wau_rolling as (
     select
-        app_id,
-        date,
-        os_name,
-        dau,
-        dau_logged_in,
-        total_events,
-        -- WAU: скользящее окно 7 дней
-        count(distinct device_id) over (
-            partition by app_id, os_name
-            order by date
-            range between interval 6 day preceding and current row
-        )                                           as wau_rolling_7d
-    from daily_activity
-    -- примечание: wau_rolling_7d — оценка на уровне агрегата, не точный WAU
-    -- для точного WAU использовать отдельную mart_weekly_active_users модель
+        d.app_id,
+        d.date,
+        d.os_name,
+        count(distinct a.device_id)                 as wau_rolling_7d
+    from daily_activity d
+    inner join activity a
+        on  a.app_id = d.app_id
+        and a.os_name = d.os_name
+        and a.date between date_sub(d.date, interval 6 day) and d.date
+    group by 1, 2, 3
+),
+
+mau_rolling as (
+    select
+        d.app_id,
+        d.date,
+        d.os_name,
+        count(distinct a.device_id)                 as mau_rolling_30d
+    from daily_activity d
+    inner join activity a
+        on  a.app_id = d.app_id
+        and a.os_name = d.os_name
+        and a.date between date_sub(d.date, interval 29 day) and d.date
+    group by 1, 2, 3
 )
 
 select
-    app_id,
-    date,
-    os_name,
-    dau,
-    dau_logged_in,
-    total_events,
-    -- соотношение залогиненных пользователей
-    safe_divide(dau_logged_in, dau)                 as login_rate
-from daily_activity
-order by date desc, app_id
+    da.app_id,
+    da.date,
+    da.os_name,
+    da.dau,
+    da.dau_logged_in,
+    da.total_events,
+    coalesce(wr.wau_rolling_7d, da.dau)             as wau_rolling_7d,
+    coalesce(mr.mau_rolling_30d, da.dau)            as mau_rolling_30d,
+    safe_divide(da.dau_logged_in, da.dau)           as login_rate
+from daily_activity da
+left join wau_rolling wr
+    using (app_id, date, os_name)
+left join mau_rolling mr
+    using (app_id, date, os_name)
+order by da.date desc, da.app_id

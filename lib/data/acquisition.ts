@@ -10,6 +10,7 @@ import {
   getSegmentBehavior,
   getSegmentLabel,
   getSegmentOptions,
+  type SavedSegmentEventRule,
   type SavedUserSegment,
 } from "@/lib/segments";
 
@@ -157,6 +158,7 @@ export type SegmentBuilderCatalog = {
   sources: AcquisitionOption[];
   campaigns: AcquisitionOption[];
   creatives: AcquisitionOption[];
+  events: AcquisitionOption[];
 };
 
 export type AcquisitionDashboardData = {
@@ -250,6 +252,16 @@ const REVENUE_MODE_OPTIONS: Array<{ value: RevenueModeKey; label: string }> = [
   { value: "total", label: "Total revenue" },
   { value: "ads", label: "Ad revenue" },
   { value: "iap", label: "IAP revenue" },
+];
+
+const SEGMENT_EVENT_OPTIONS = [
+  "session_start",
+  "tutorial_complete",
+  "level_complete",
+  "paywall_view",
+  "purchase",
+  "subscription_start",
+  "ad_impression",
 ];
 
 const PROJECT_DEFINITIONS: Record<string, ProjectDefinition> = {
@@ -624,7 +636,29 @@ function applySavedSegmentRules(
       return false;
     }
 
+    return matchesSavedSegmentEventRules(descriptor, segment.rules.eventRules);
+  });
+}
+
+function matchesSavedSegmentEventRules(
+  descriptor: SliceDescriptor,
+  eventRules: SavedSegmentEventRule[]
+) {
+  if (eventRules.length === 0) {
     return true;
+  }
+
+  return eventRules.every((rule) => {
+    const seed = normalizedSeed(
+      `${descriptor.project}|${descriptor.platform}|${descriptor.country}|${descriptor.source}|${descriptor.creative}|${rule.eventName}|${rule.withinDays}`
+    );
+    const windowFactor = clamp(rule.withinDays / 90, 0.25, 1.6);
+    const inferredCount = Math.max(
+      0,
+      Math.round(seed * 5 * descriptor.quality * windowFactor + (descriptor.platform === "iOS" ? 1 : 0))
+    );
+    const didEvent = inferredCount >= rule.minCount;
+    return rule.operator === "did" ? didEvent : !didEvent;
   });
 }
 
@@ -732,8 +766,7 @@ function buildCohortDates(filters: DashboardFilters) {
   const from = parseIsoDate(filters.from);
   const to = parseIsoDate(filters.to);
   const spanDays = Math.max(diffInDays(to, from), 14);
-  const targetPoints = 8;
-  const stepDays = Math.max(3, Math.floor(spanDays / targetPoints));
+  const stepDays = Math.max(1, filters.granularityDays || 7);
   const dates: Date[] = [];
 
   for (let cursor = new Date(from); cursor <= to; cursor = new Date(cursor.getTime() + stepDays * 86400000)) {
@@ -744,7 +777,11 @@ function buildCohortDates(filters: DashboardFilters) {
     dates.push(to);
   }
 
-  return dates.slice(-10);
+  if (dates.length > 28) {
+    return dates.slice(-28);
+  }
+
+  return dates;
 }
 
 function synthesizeCohortMetric(
@@ -1614,5 +1651,13 @@ export function getSegmentBuilderCatalog(projectKey: DashboardProjectKey): Segme
     sources: buildOptions(descriptors, (descriptor) => descriptor.source),
     campaigns: buildOptions(descriptors, (descriptor) => descriptor.campaign),
     creatives: buildOptions(descriptors, (descriptor) => descriptor.creative),
+    events: [
+      { value: ALL_VALUE, label: "All", count: descriptors.length },
+      ...SEGMENT_EVENT_OPTIONS.map((eventName, index) => ({
+        value: eventName,
+        label: eventName,
+        count: Math.max(8, descriptors.length - index * 4),
+      })),
+    ],
   };
 }

@@ -20,6 +20,10 @@ No credentials required for the UI shell. Data-connected sections show placehold
 
 The current build mode is `mock-first`: interface delivery proceeds independently from BigQuery, Google Cloud, and AppMetrica setup.
 
+Admin onboarding is now implemented in `Settings`: projects, connector credentials, refresh cadence, run history, and manual backfill / pull-now / bounds / forecast actions live there.
+
+`Settings` now also generates per-project runtime bundles for ingestion and forecast workers, along with callback endpoints for updating run status back into the control plane.
+
 Auth/runtime path is now:
 
 - Google OAuth on the server
@@ -95,11 +99,25 @@ railway logs     # tail deployment logs
 
 Environment variables are documented in `docs/env.md`.
 
+Worker runtimes should use `WORKER_CONTROL_SECRET` to call:
+
+- `GET /api/internal/projects/:projectId/runtime-bundle`
+- `POST /api/internal/projects/:projectId/claim-run`
+- `GET /api/internal/runs/:runId`
+- `PATCH /api/internal/runs/:runId`
+
+The intended flow is:
+
+1. Admin queues `ingestion`, `backfill`, `forecast`, or `bounds_refresh` from `Settings`.
+2. A per-project worker starts with `ANALYTICS_PROJECT_ID`, `WORKER_CONTROL_BASE_URL`, and `WORKER_CONTROL_SECRET`.
+3. The worker claims the oldest queued run, materializes the generated YAML config into `/tmp/analytics-runtime`, executes the job, and PATCHes final status back into the control plane.
+
 ---
 
 ## Project Context
 
 - Architecture decision: `../docs/platform-decision-railway-gcp-vercel.md`
 - API contract (data plane): `../docs/serving-marts-api-contract.md`
+- Project onboarding plan: `docs/project-onboarding-plan.md`
 - Stitch-first workflow: `docs/stitch-first-workflow.md`
 - Founder blockers: UGAA-1166, UGAA-1167, UGAA-1169, UGAA-1170

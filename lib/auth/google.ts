@@ -1,4 +1,5 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet } from "jose/jwks/remote";
+import { jwtVerify } from "jose/jwt/verify";
 import { randomBytes } from "crypto";
 import type { NextRequest } from "next/server";
 import { sanitizeCallbackUrl } from "./session";

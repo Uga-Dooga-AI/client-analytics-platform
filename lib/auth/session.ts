@@ -1,4 +1,5 @@
-import { jwtVerify, SignJWT } from "jose";
+import { SignJWT } from "jose/jwt/sign";
+import { jwtVerify } from "jose/jwt/verify";
 import type { JWTPayload } from "jose";
 import { NextRequest, NextResponse } from "next/server";
 import type { AuthClaims } from "./types";
@@ -84,7 +85,18 @@ export function clearSessionCookie(response: NextResponse) {
 }
 
 export function readSessionCookie(request: NextRequest) {
-  return request.cookies.get(SESSION_COOKIE)?.value ?? null;
+  const cookies =
+    request &&
+    typeof request === "object" &&
+    "cookies" in request &&
+    request.cookies &&
+    typeof request.cookies === "object" &&
+    "get" in request.cookies &&
+    typeof request.cookies.get === "function"
+      ? request.cookies
+      : null;
+
+  return cookies?.get(SESSION_COOKIE)?.value ?? null;
 }
 
 export async function readSessionFromRequest(request: NextRequest) {

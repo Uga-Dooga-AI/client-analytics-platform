@@ -1,5 +1,6 @@
-export type DashboardProjectKey = "all" | "word-catcher" | "words-in-word" | "2pg";
+export type DashboardProjectKey = string;
 export type DashboardRangeKey = "7d" | "30d" | "90d" | "mtd" | "custom";
+export type DashboardGranularityKey = "1" | "7" | "14" | "30";
 export type DashboardPlatformKey = "all" | "ios" | "android" | "web";
 export type DashboardSegmentPresetKey =
   | "all"
@@ -28,6 +29,8 @@ export type DashboardTagKey =
 export interface DashboardFilters {
   projectKey: DashboardProjectKey;
   rangeKey: DashboardRangeKey;
+  granularityKey: DashboardGranularityKey;
+  granularityDays: number;
   from: string;
   to: string;
   platform: DashboardPlatformKey;
@@ -37,7 +40,7 @@ export interface DashboardFilters {
 }
 
 export const DASHBOARD_PROJECTS: Array<{
-  key: Exclude<DashboardProjectKey, "all">;
+  key: string;
   label: string;
   shortLabel: string;
 }> = [
@@ -52,6 +55,13 @@ export const RANGE_OPTIONS: Array<{ key: DashboardRangeKey; label: string }> = [
   { key: "90d", label: "Last 90 days" },
   { key: "mtd", label: "Month to date" },
   { key: "custom", label: "Custom range" },
+];
+
+export const GRANULARITY_OPTIONS: Array<{ key: DashboardGranularityKey; label: string; days: number }> = [
+  { key: "1", label: "Daily", days: 1 },
+  { key: "7", label: "Weekly", days: 7 },
+  { key: "14", label: "14 days", days: 14 },
+  { key: "30", label: "30 days", days: 30 },
 ];
 
 export const PLATFORM_OPTIONS: Array<{ key: DashboardPlatformKey; label: string }> = [
@@ -89,7 +99,7 @@ export const TAG_OPTIONS: Array<{ key: DashboardTagKey; label: string }> = [
   { key: "experiments", label: "Experiments" },
 ];
 
-const PROJECT_NAME_TO_KEY: Record<string, Exclude<DashboardProjectKey, "all">> = {
+const PROJECT_NAME_TO_KEY: Record<string, string> = {
   "Word Catcher": "word-catcher",
   "Words in Word": "words-in-word",
   "2PG": "2pg",
@@ -150,11 +160,20 @@ export function getProjectLabel(projectKey: DashboardProjectKey) {
     return "Cross-project overview";
   }
 
-  return DASHBOARD_PROJECTS.find((project) => project.key === projectKey)?.label ?? "Unknown project";
+  const staticMatch = DASHBOARD_PROJECTS.find((project) => project.key === projectKey)?.label;
+  if (staticMatch) {
+    return staticMatch;
+  }
+
+  return projectKey
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 export function projectNameToKey(projectName: string): DashboardProjectKey {
-  return PROJECT_NAME_TO_KEY[projectName] ?? "all";
+  return PROJECT_NAME_TO_KEY[projectName] ?? projectName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
 export function matchesProject(projectName: string, projectKey: DashboardProjectKey) {
@@ -186,7 +205,11 @@ function isAllowedProjectForPath(projectKey: string | undefined, pathname: strin
     return false;
   }
 
-  return getProjectOptions(pathname).some((project) => project.key === projectKey);
+  if (projectKey === "all") {
+    return getProjectOptions(pathname).some((project) => project.key === "all");
+  }
+
+  return projectKey.trim().length > 0;
 }
 
 export function parseDashboardSearchParams(
@@ -195,6 +218,8 @@ export function parseDashboardSearchParams(
 ): DashboardFilters {
   const rangeKey = (readSingleParam(raw, "range") as DashboardRangeKey | undefined) ?? "30d";
   const normalizedRangeKey = RANGE_OPTIONS.some((option) => option.key === rangeKey) ? rangeKey : "30d";
+  const granularityRaw = (readSingleParam(raw, "granularity") as DashboardGranularityKey | undefined) ?? "7";
+  const granularity = GRANULARITY_OPTIONS.find((option) => option.key === granularityRaw) ?? GRANULARITY_OPTIONS[1];
   const defaultRange = getRangeDates(normalizedRangeKey);
 
   const projectKeyRaw = readSingleParam(raw, "project");
@@ -210,6 +235,8 @@ export function parseDashboardSearchParams(
   return {
     projectKey,
     rangeKey: normalizedRangeKey,
+    granularityKey: granularity.key,
+    granularityDays: granularity.days,
     from: readSingleParam(raw, "from") ?? defaultRange.from,
     to: readSingleParam(raw, "to") ?? defaultRange.to,
     platform: PLATFORM_OPTIONS.some((option) => option.key === platform) ? platform : "all",
@@ -223,6 +250,7 @@ export function serializeDashboardFilters(filters: DashboardFilters) {
   const params = new URLSearchParams();
   params.set("project", filters.projectKey);
   params.set("range", filters.rangeKey);
+  params.set("granularity", filters.granularityKey);
   params.set("from", filters.from);
   params.set("to", filters.to);
   params.set("platform", filters.platform);

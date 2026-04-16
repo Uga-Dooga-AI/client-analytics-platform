@@ -82,6 +82,16 @@ class BQLoader:
     # Public API
     # ------------------------------------------------------------------
 
+    def ensure_datasets(self, *dataset_names: str) -> None:
+        if self._client is None:
+            logger.info("stub ensure_datasets: %s (no credentials)", dataset_names)
+            return
+
+        for dataset_name in dataset_names:
+            if not dataset_name:
+                continue
+            self._ensure_dataset(dataset_name)
+
     def load_from_gcs(
         self,
         gcs_uri: str,
@@ -202,17 +212,20 @@ class BQLoader:
 
     def _ensure_meta_dataset(self) -> None:
         """Create the meta dataset and pipeline_runs table if they don't exist."""
-        from google.cloud.exceptions import NotFound  # type: ignore[import-untyped]
-
-        meta_dataset = f"{self.project_id}.meta"
-        try:
-            self._client.get_dataset(meta_dataset)
-        except NotFound:
-            dataset = self._bq.Dataset(meta_dataset)
-            dataset.location = os.environ.get("BQ_LOCATION", "EU")
-            self._client.create_dataset(dataset, exists_ok=True)
-            logger.info("Created BQ dataset: %s", meta_dataset)
+        self._ensure_dataset("meta")
 
         ddl = _META_DDL.format(project=self.project_id)
         self._client.query(ddl).result()
         logger.info("Ensured meta.pipeline_runs table exists")
+
+    def _ensure_dataset(self, dataset_name: str) -> None:
+        from google.cloud.exceptions import NotFound  # type: ignore[import-untyped]
+
+        dataset_ref = f"{self.project_id}.{dataset_name}"
+        try:
+            self._client.get_dataset(dataset_ref)
+        except NotFound:
+            dataset = self._bq.Dataset(dataset_ref)
+            dataset.location = os.environ.get("BQ_LOCATION", "EU")
+            self._client.create_dataset(dataset, exists_ok=True)
+            logger.info("Created BQ dataset: %s", dataset_ref)

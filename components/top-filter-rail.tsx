@@ -4,6 +4,7 @@ import { Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getStitchRoute, getStitchStatusMeta } from "@/lib/stitch";
 import {
+  GRANULARITY_OPTIONS,
   getProjectOptions,
   getRangePatch,
   GROUP_BY_OPTIONS,
@@ -33,6 +34,9 @@ function TopFilterRailContent({ title }: { title: string }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [savedSegments, setSavedSegments] = useState<SavedUserSegment[]>([]);
+  const [dynamicProjects, setDynamicProjects] = useState<
+    Array<{ key: string; label: string; shortLabel: string }>
+  >([]);
 
   const filters = useMemo(
     () => normalizeFiltersForPath(parseDashboardSearchParams(searchParams, pathname), pathname),
@@ -40,7 +44,13 @@ function TopFilterRailContent({ title }: { title: string }) {
   );
   const stitchRoute = getStitchRoute(pathname);
   const stitchStatus = stitchRoute ? getStitchStatusMeta(stitchRoute.status) : null;
-  const projectOptions = getProjectOptions(pathname);
+  const projectOptions = useMemo(() => {
+    const base = getProjectOptions(pathname);
+    const extras = dynamicProjects.filter(
+      (project) => !base.some((baseProject) => baseProject.key === project.key)
+    );
+    return [...base, ...extras];
+  }, [dynamicProjects, pathname]);
   const segmentOptions = useMemo(() => {
     const options = getSegmentOptions(savedSegments, filters.projectKey).map((option) => ({
       value: option.key,
@@ -72,7 +82,20 @@ function TopFilterRailContent({ title }: { title: string }) {
       }
     }
 
+    async function loadProjects() {
+      const response = await fetch("/api/projects", { cache: "no-store" }).catch(() => null);
+      if (!response || !response.ok) {
+        return;
+      }
+
+      const payload = await response.json().catch(() => null);
+      if (!cancelled) {
+        setDynamicProjects(payload?.projects ?? []);
+      }
+    }
+
     void loadSavedSegments();
+    void loadProjects();
 
     return () => {
       cancelled = true;
@@ -101,7 +124,7 @@ function TopFilterRailContent({ title }: { title: string }) {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "minmax(180px, 1.2fr) repeat(4, minmax(132px, 0.8fr)) minmax(196px, 1fr)",
+              gridTemplateColumns: "minmax(180px, 1.2fr) repeat(5, minmax(124px, 0.78fr)) minmax(196px, 1fr)",
               gap: 10,
               alignItems: "end",
             }}
@@ -117,6 +140,15 @@ function TopFilterRailContent({ title }: { title: string }) {
               value={filters.rangeKey}
               onChange={(value) => handleRangeChange(value as DashboardRangeKey)}
               options={RANGE_OPTIONS.map((option) => ({ value: option.key, label: option.label }))}
+            />
+            <FilterField
+              label="Day step"
+              value={filters.granularityKey}
+              onChange={(value) => {
+                const option = GRANULARITY_OPTIONS.find((item) => item.key === value) ?? GRANULARITY_OPTIONS[1];
+                commitFilters({ granularityKey: option.key, granularityDays: option.days });
+              }}
+              options={GRANULARITY_OPTIONS.map((option) => ({ value: option.key, label: option.label }))}
             />
             <FilterField
               label="Platform"
@@ -187,6 +219,7 @@ function TopFilterRailContent({ title }: { title: string }) {
                 <SlicePill label={projectOptions.find((project) => project.key === filters.projectKey)?.shortLabel ?? "NA"} />
                 <SlicePill label={filters.platform === "all" ? "All platforms" : filters.platform.toUpperCase()} />
                 <SlicePill label={getSegmentLabel(filters.segment, savedSegments, filters.projectKey)} />
+                <SlicePill label={`step ${filters.granularityDays}d`} />
                 <SlicePill label={filters.groupBy === "none" ? "Ungrouped" : filters.groupBy} />
               </div>
             </div>
@@ -357,7 +390,7 @@ function TopFilterRailFrame({
             alignItems: "flex-end",
           }}
         >
-          <div>Project-first filtering, custom date window, segmentation, and grouping are active in the shell.</div>
+          <div>Project-first filtering, custom date window, day-step grouping, segmentation, and compare surfaces are active in the shell.</div>
           {onManageSegments ? (
             <button type="button" onClick={onManageSegments} style={MANAGE_BUTTON_STYLE}>
               Manage segments

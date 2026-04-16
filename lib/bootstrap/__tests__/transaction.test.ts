@@ -1,174 +1,133 @@
-/**
- * Unit tests for the atomicity mechanism:
- * Verifies that the bootstrap Firestore transaction sets both
- * `users/{uid}` and `config/bootstrap.bootstrapComplete` together,
- * and re-checks inside the transaction to prevent race conditions.
- */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// ── Mocks (all factories must be self-contained — no top-level variable refs) ─
-
-vi.mock("@/lib/firebase/admin", () => ({
-  adminDb: {
-    runTransaction: vi.fn(),
-    collection: vi.fn((col: string) => ({
-      doc: vi.fn((id: string) => ({ path: `${col}/${id}` })),
-    })),
-  },
-  adminAuth: {
-    getUser: vi.fn(),
-  },
-}));
-
-vi.mock("firebase-admin/firestore", () => ({
-  FieldValue: { serverTimestamp: () => "MOCK_TIMESTAMP" },
-  Timestamp: { now: () => "MOCK_NOW" },
-}));
-
-vi.mock("@/lib/auth/claims", () => ({
-  setCustomClaims: vi.fn().mockResolvedValue(undefined),
+const mocks = vi.hoisted(() => ({
+  isBootstrapComplete: vi.fn(),
+  checkRateLimit: vi.fn(),
+  logBootstrapEvent: vi.fn(),
+  bootstrapSuperAdmin: vi.fn(),
+  readSessionFromRequest: vi.fn(),
 }));
 
 vi.mock("@/lib/bootstrap/guard", () => ({
-  isBootstrapComplete: vi.fn().mockResolvedValue(false),
-  _resetBootstrapCache: vi.fn(),
+  isBootstrapComplete: mocks.isBootstrapComplete,
 }));
 
 vi.mock("@/lib/bootstrap/rateLimiter", () => ({
-  checkRateLimit: vi.fn().mockReturnValue(true),
-  _resetStore: vi.fn(),
+  checkRateLimit: mocks.checkRateLimit,
 }));
 
 vi.mock("@/lib/bootstrap/audit", () => ({
-  logBootstrapEvent: vi.fn().mockResolvedValue(undefined),
+  logBootstrapEvent: mocks.logBootstrapEvent,
 }));
 
-// ── Imports after mocks ───────────────────────────────────────────────────────
+vi.mock("@/lib/auth/store", () => ({
+  bootstrapSuperAdmin: mocks.bootstrapSuperAdmin,
+}));
 
-import { adminAuth, adminDb } from "@/lib/firebase/admin";
-import { isBootstrapComplete } from "@/lib/bootstrap/guard";
-import { checkRateLimit } from "@/lib/bootstrap/rateLimiter";
-import { logBootstrapEvent } from "@/lib/bootstrap/audit";
+vi.mock("@/lib/auth/session", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/auth/session")>("@/lib/auth/session");
+  return {
+    ...actual,
+    readSessionFromRequest: mocks.readSessionFromRequest,
+  };
+});
+
 import { POST } from "@/app/api/admin/bootstrap/route";
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function makeRequest(body: Record<string, unknown>, ip = "1.2.3.4") {
   return {
-    headers: { get: (h: string) => (h === "x-forwarded-for" ? ip : null) },
+    headers: {
+      get: (header: string) => {
+        if (header === "x-forwarded-for") return ip;
+        return null;
+      },
+    },
+    cookies: {
+      get: vi.fn().mockReturnValue(undefined),
+    },
     json: async () => body,
   } as unknown as import("next/server").NextRequest;
 }
 
-type TxFn = (tx: {
-  get: (ref: { path: string }) => Promise<{ exists: boolean; data: () => Record<string, unknown> }>;
-  set: (ref: { path: string }, data: Record<string, unknown>) => void;
-}) => Promise<void>;
-
-function setupTransaction(
-  bootstrapDoc: { exists: boolean; data: () => Record<string, unknown> }
-) {
-  const txSetCalls: Array<{ path: string; data: Record<string, unknown> }> = [];
-
-  vi.mocked(adminDb.runTransaction).mockImplementation(async (fn: TxFn) => {
-    const tx = {
-      get: vi.fn().mockResolvedValue(bootstrapDoc),
-      set: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
-        txSetCalls.push({ path: ref.path, data });
-      }),
-    };
-    await fn(tx);
-  });
-
-  return txSetCalls;
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-describe("Bootstrap atomicity — Firestore transaction", () => {
+describe("bootstrap route", () => {
   beforeEach(() => {
-    vi.mocked(adminAuth.getUser).mockReset();
-    vi.mocked(adminDb.runTransaction).mockReset();
-    vi.mocked(isBootstrapComplete).mockResolvedValue(false);
-    vi.mocked(checkRateLimit).mockReturnValue(true);
-    vi.mocked(logBootstrapEvent).mockResolvedValue(undefined);
+    mocks.isBootstrapComplete.mockReset();
+    mocks.checkRateLimit.mockReset();
+    mocks.logBootstrapEvent.mockReset();
+    mocks.bootstrapSuperAdmin.mockReset();
+    mocks.readSessionFromRequest.mockReset();
+
+    mocks.isBootstrapComplete.mockResolvedValue(false);
+    mocks.checkRateLimit.mockReturnValue(true);
+    mocks.logBootstrapEvent.mockResolvedValue(undefined);
 
     process.env.SUPERADMIN_BOOTSTRAP_KEY =
       "test-bootstrap-key-that-is-long-enough-1234";
   });
 
-  it("runs a Firestore transaction on a valid request", async () => {
-    setupTransaction({ exists: false, data: () => ({}) });
-    vi.mocked(adminAuth.getUser).mockResolvedValueOnce({
+  it("returns 200 and bootstraps the current session user", async () => {
+    mocks.readSessionFromRequest.mockResolvedValueOnce({
       uid: "uid-1",
       email: "admin@example.com",
       displayName: "Admin",
-    } as never);
-
-    const req = makeRequest({
-      uid: "uid-1",
-      bootstrapKey: process.env.SUPERADMIN_BOOTSTRAP_KEY,
+      avatarUrl: null,
     });
-    const res = await POST(req);
-    expect(res.status).toBe(200);
-    expect(adminDb.runTransaction).toHaveBeenCalledTimes(1);
+    mocks.bootstrapSuperAdmin.mockResolvedValueOnce(undefined);
+
+    const response = await POST(
+      makeRequest({
+        bootstrapKey: process.env.SUPERADMIN_BOOTSTRAP_KEY,
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.bootstrapSuperAdmin).toHaveBeenCalledWith({
+      authUid: "uid-1",
+      email: "admin@example.com",
+      displayName: "Admin",
+      avatarUrl: null,
+    });
   });
 
-  it("transaction sets users/{uid} and config/bootstrap atomically", async () => {
-    const txSetCalls = setupTransaction({ exists: false, data: () => ({}) });
-    vi.mocked(adminAuth.getUser).mockResolvedValueOnce({
+  it("returns 401 when there is no authenticated session", async () => {
+    mocks.readSessionFromRequest.mockResolvedValueOnce(null);
+
+    const response = await POST(
+      makeRequest({
+        bootstrapKey: process.env.SUPERADMIN_BOOTSTRAP_KEY,
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(mocks.bootstrapSuperAdmin).not.toHaveBeenCalled();
+  });
+
+  it("returns 403 for invalid bootstrap key", async () => {
+    const response = await POST(
+      makeRequest({
+        bootstrapKey: "wrong-key",
+      })
+    );
+
+    expect(response.status).toBe(403);
+    expect(mocks.readSessionFromRequest).not.toHaveBeenCalled();
+  });
+
+  it("returns 410 when bootstrap was completed by a race", async () => {
+    mocks.readSessionFromRequest.mockResolvedValueOnce({
       uid: "uid-2",
-      email: "admin@test.com",
+      email: "admin@example.com",
       displayName: null,
-    } as never);
-
-    const req = makeRequest({
-      uid: "uid-2",
-      bootstrapKey: process.env.SUPERADMIN_BOOTSTRAP_KEY,
+      avatarUrl: null,
     });
-    await POST(req);
+    mocks.bootstrapSuperAdmin.mockRejectedValueOnce(new Error("BOOTSTRAP_COMPLETE"));
 
-    const paths = txSetCalls.map((c) => c.path);
-    expect(paths).toContain("users/uid-2");
-    expect(paths).toContain("config/bootstrap");
-  });
+    const response = await POST(
+      makeRequest({
+        bootstrapKey: process.env.SUPERADMIN_BOOTSTRAP_KEY,
+      })
+    );
 
-  it("config/bootstrap document has bootstrapComplete: true", async () => {
-    const txSetCalls = setupTransaction({ exists: false, data: () => ({}) });
-    vi.mocked(adminAuth.getUser).mockResolvedValueOnce({
-      uid: "uid-3",
-      email: "a@b.com",
-      displayName: null,
-    } as never);
-
-    const req = makeRequest({
-      uid: "uid-3",
-      bootstrapKey: process.env.SUPERADMIN_BOOTSTRAP_KEY,
-    });
-    await POST(req);
-
-    const bootstrapSet = txSetCalls.find((c) => c.path === "config/bootstrap");
-    expect(bootstrapSet?.data.bootstrapComplete).toBe(true);
-  });
-
-  it("transaction re-checks bootstrapComplete and returns 410 on race", async () => {
-    // Guard passes (race), but inside the transaction flag is already true.
-    setupTransaction({
-      exists: true,
-      data: () => ({ bootstrapComplete: true }),
-    });
-
-    vi.mocked(adminAuth.getUser).mockResolvedValueOnce({
-      uid: "uid-4",
-      email: "admin@race.com",
-      displayName: null,
-    } as never);
-
-    const req = makeRequest({
-      uid: "uid-4",
-      bootstrapKey: process.env.SUPERADMIN_BOOTSTRAP_KEY,
-    });
-    const res = await POST(req);
-    expect(res.status).toBe(410);
+    expect(response.status).toBe(410);
   });
 });

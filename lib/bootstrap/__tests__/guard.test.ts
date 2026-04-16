@@ -1,74 +1,51 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mock adminDb before importing guard.
-const mockGet = vi.fn();
-vi.mock("@/lib/firebase/admin", () => ({
-  adminDb: {
-    collection: () => ({
-      doc: () => ({
-        get: mockGet,
-      }),
-    }),
-  },
+const mockReadBootstrapComplete = vi.fn();
+
+vi.mock("@/lib/auth/store", () => ({
+  isBootstrapComplete: mockReadBootstrapComplete,
 }));
 
-// Dynamic import AFTER mocks are set up.
 const { isBootstrapComplete, _resetBootstrapCache } = await import("../guard");
-
-function mockDoc(exists: boolean, data?: Record<string, unknown>) {
-  return { exists, data: () => data };
-}
 
 describe("isBootstrapComplete", () => {
   beforeEach(() => {
     _resetBootstrapCache();
-    mockGet.mockReset();
+    mockReadBootstrapComplete.mockReset();
   });
 
-  it("returns false when config/bootstrap does not exist", async () => {
-    mockGet.mockResolvedValueOnce(mockDoc(false));
-    expect(await isBootstrapComplete()).toBe(false);
+  it("returns false when the store says bootstrap is incomplete", async () => {
+    mockReadBootstrapComplete.mockResolvedValueOnce(false);
+    await expect(isBootstrapComplete()).resolves.toBe(false);
   });
 
-  it("returns false when bootstrapComplete is false", async () => {
-    mockGet.mockResolvedValueOnce(
-      mockDoc(true, { bootstrapComplete: false })
-    );
-    expect(await isBootstrapComplete()).toBe(false);
+  it("returns true when the store says bootstrap is complete", async () => {
+    mockReadBootstrapComplete.mockResolvedValueOnce(true);
+    await expect(isBootstrapComplete()).resolves.toBe(true);
   });
 
-  it("returns true when bootstrapComplete is true", async () => {
-    mockGet.mockResolvedValueOnce(
-      mockDoc(true, { bootstrapComplete: true })
-    );
-    expect(await isBootstrapComplete()).toBe(true);
-  });
-
-  it("caches true result — does not call Firestore again", async () => {
-    mockGet.mockResolvedValueOnce(
-      mockDoc(true, { bootstrapComplete: true })
-    );
-    await isBootstrapComplete(); // first call — hits Firestore
-    await isBootstrapComplete(); // second call — should use cache
-    expect(mockGet).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not cache false result — calls Firestore each time", async () => {
-    mockGet.mockResolvedValue(mockDoc(true, { bootstrapComplete: false }));
+  it("caches only confirmed true results", async () => {
+    mockReadBootstrapComplete.mockResolvedValueOnce(true);
     await isBootstrapComplete();
     await isBootstrapComplete();
-    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockReadBootstrapComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache false results", async () => {
+    mockReadBootstrapComplete.mockResolvedValue(false);
+    await isBootstrapComplete();
+    await isBootstrapComplete();
+    expect(mockReadBootstrapComplete).toHaveBeenCalledTimes(2);
   });
 
   it("cache resets after _resetBootstrapCache()", async () => {
-    mockGet.mockResolvedValue(mockDoc(true, { bootstrapComplete: true }));
-    await isBootstrapComplete(); // populates cache
+    mockReadBootstrapComplete.mockResolvedValueOnce(true);
+    await isBootstrapComplete();
 
     _resetBootstrapCache();
 
-    mockGet.mockResolvedValue(mockDoc(false)); // now returns false
-    const result = await isBootstrapComplete();
-    expect(result).toBe(false);
-    expect(mockGet).toHaveBeenCalledTimes(2);
+    mockReadBootstrapComplete.mockResolvedValueOnce(false);
+    await expect(isBootstrapComplete()).resolves.toBe(false);
+    expect(mockReadBootstrapComplete).toHaveBeenCalledTimes(2);
   });
 });

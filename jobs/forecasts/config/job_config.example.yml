@@ -30,6 +30,16 @@ forecast:
   # Confidence interval width (0.0–1.0)
   confidence_interval: 0.8
 
+  # Metric set to forecast from mart_experiment_daily
+  metrics:
+    - revenue
+    - exposures
+    - activations
+
+  # Bounds manifest location
+  bounds_bucket: REPLACE_WITH_BUCKET_NAME
+  bounds_prefix: bounds/word-catcher/
+
 schedule:
   # UTC hour at which the daily forecast run is triggered
   # Runs after ingestion completes (ingestion: 04:00 UTC, forecasts: 05:00 UTC)

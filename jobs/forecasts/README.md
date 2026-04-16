@@ -15,10 +15,13 @@ BigQuery mart.mart_experiment_daily
 
 ## Status
 
-**Stub mode** — real I/O is not implemented yet. Blocked on:
-- GCP project access + BigQuery datasets (UGAA-1167)
+The forecast worker is now functional in two modes:
 
-The scaffold is ready for Cloud Run deployment configuration by CTO.
+- control-plane mode: claim the next queued `forecast` / `bounds_refresh` run, materialize generated YAML, execute, PATCH status back
+- control-plane mode also reads the current hot forecast-combination list from the internal API so the worker can keep recent UI selections visible in run metadata and future prewarm flows
+- local mode: read static config and optionally use `FORECAST_INPUT_PATH` as a CSV fallback
+
+Live BigQuery / GCS writes still depend on real GCP credentials.
 
 ## Environment variables
 
@@ -28,6 +31,12 @@ The scaffold is ready for Cloud Run deployment configuration by CTO.
 | `BQ_MART_DATASET` | No | Mart dataset name (default: `mart`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | Path to service account JSON (* or Workload Identity) |
 | `JOB_CONFIG_PATH` | No | Path to config file (default: `config/job_config.example.yml`) |
+| `FORECAST_INPUT_PATH` | No | CSV fallback with `date,metric,value` or `date,<metric columns...>` when BigQuery is unavailable |
+| `FORECAST_OUTPUT_DIR` | No | Local output directory for CSV + bounds manifest fallback |
+| `WORKER_CONTROL_BASE_URL` | No | Enable control-plane mode and call back into `/api/internal/*` |
+| `WORKER_CONTROL_SECRET` | No | Shared secret for internal worker auth |
+| `ANALYTICS_PROJECT_ID` | No | Project queue to claim from when running in control-plane mode |
+| `ANALYTICS_RUN_ID` | No | Directly attach to one run instead of claiming the next queued run |
 
 ## Local run
 

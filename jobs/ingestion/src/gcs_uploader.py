@@ -45,6 +45,23 @@ class GCSUploader:
             logger.error("google-cloud-storage not installed")
             raise
 
+    def ensure_bucket(self, *, location: str = "EU", storage_class: str = "STANDARD") -> None:
+        if self._client is None:
+            logger.info("stub ensure_bucket: gs://%s (no credentials)", self.bucket)
+            return
+
+        if self._bucket_obj.exists():
+            return
+
+        self._bucket_obj.storage_class = storage_class
+        self._client.create_bucket(self._bucket_obj, location=location)
+        logger.info(
+            "created GCS bucket: gs://%s (location=%s storage_class=%s)",
+            self.bucket,
+            location,
+            storage_class,
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

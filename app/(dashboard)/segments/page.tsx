@@ -3,6 +3,7 @@ import { SegmentsWorkspace } from "@/components/segments-workspace";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import { getSegmentBuilderCatalog } from "@/lib/data/acquisition";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
+import { listAnalyticsProjectOptions } from "@/lib/platform/store";
 import { parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
@@ -16,6 +17,7 @@ export default async function SegmentsPage({
   const catalog = getSegmentBuilderCatalog(filters.projectKey);
   const cookieStore = await cookies();
   const savedSegments = parseSavedSegmentsCookie(cookieStore.get(SAVED_SEGMENTS_COOKIE)?.value);
+  const projectOptions = await listAnalyticsProjectOptions();
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -61,8 +63,8 @@ export default async function SegmentsPage({
             },
             {
               label: "Persistence",
-              value: "Session-backed",
-              sub: "Stored in your signed-in profile cookie until DB-backed profiles land",
+              value: "Saved segment store",
+              sub: "Session-backed today, with real event rules and project-aware filters",
             },
           ].map((card) => (
             <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
@@ -86,7 +88,12 @@ export default async function SegmentsPage({
           ))}
         </section>
 
-        <SegmentsWorkspace initialSegments={savedSegments} projectKey={filters.projectKey} catalog={catalog} />
+        <SegmentsWorkspace
+          initialSegments={savedSegments}
+          projectKey={filters.projectKey}
+          catalog={catalog}
+          projectOptions={projectOptions.map((project) => ({ value: project.key, label: project.label }))}
+        />
       </main>
     </div>
   );

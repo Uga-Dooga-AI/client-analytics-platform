@@ -14,11 +14,14 @@ AppMetrica Logs API
 
 ## Status
 
-**Stub mode** — real I/O is not implemented yet. Blocked on:
-- AppMetrica credentials + app_ids (UGAA-1166)
-- GCP project access + BigQuery datasets (UGAA-1167)
+Runtime mode is now wired:
 
-The scaffold is ready for Cloud Run deployment configuration by CTO.
+- the worker can claim the next queued `ingestion` / `backfill` run from the control plane
+- generated YAML is materialized locally before execution
+- final run/source status is PATCHed back into the control plane
+- when `provisioning.auto_create_infrastructure=true`, the worker preflights and creates the GCS bucket plus `raw` / `stg` / `mart` datasets before ingestion starts
+
+Live extraction still depends on real AppMetrica and GCP credentials.
 
 ## Environment variables
 
@@ -29,6 +32,10 @@ The scaffold is ready for Cloud Run deployment configuration by CTO.
 | `GCS_BUCKET` | Yes | GCS bucket for raw data |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | Path to service account JSON (* or Workload Identity) |
 | `JOB_CONFIG_PATH` | No | Path to config file (default: `config/job_config.example.yml`) |
+| `WORKER_CONTROL_BASE_URL` | No | Enable control-plane mode and call back into `/api/internal/*` |
+| `WORKER_CONTROL_SECRET` | No | Shared secret for internal worker auth |
+| `ANALYTICS_PROJECT_ID` | No | Project queue to claim from when running in control-plane mode |
+| `ANALYTICS_RUN_ID` | No | Directly attach to one run instead of claiming the next queued run |
 
 ## Local run
 

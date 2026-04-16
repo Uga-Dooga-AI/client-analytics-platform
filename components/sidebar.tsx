@@ -9,7 +9,7 @@ import {
   serializeDashboardFilters,
 } from "@/lib/dashboard-filters";
 
-const NAV_ITEMS = [
+const ANALYZE_ITEMS = [
   {
     label: "Overview",
     href: "/overview",
@@ -23,21 +23,13 @@ const NAV_ITEMS = [
     ),
   },
   {
-    label: "Experiments",
-    href: "/experiments",
+    label: "Acquisition",
+    href: "/acquisition",
     icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M6 2V7L2 13h12L10 7V2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M5 2h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    label: "Funnels",
-    href: "/funnels",
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M2 3h12l-4 5v5l-4-2V8L2 3z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+        <path d="M2 12.5V3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M2 12.5H13.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M4.5 10l2.5-2.5 2 1.5L13 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     ),
   },
@@ -63,14 +55,25 @@ const NAV_ITEMS = [
       </svg>
     ),
   },
+];
+
+const COMPARE_ITEMS = [
   {
-    label: "Acquisition",
-    href: "/acquisition",
+    label: "Experiments",
+    href: "/experiments",
     icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M2 12.5V3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        <path d="M2 12.5H13.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        <path d="M4.5 10l2.5-2.5 2 1.5L13 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M6 2V7L2 13h12L10 7V2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M5 2h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
+    label: "Funnels",
+    href: "/funnels",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2 3h12l-4 5v5l-4-2V8L2 3z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
       </svg>
     ),
   },
@@ -87,7 +90,7 @@ const NAV_ITEMS = [
   },
 ];
 
-const BOTTOM_ITEMS = [
+const OPERATE_ITEMS = [
   {
     label: "Access",
     href: "/access",
@@ -190,61 +193,12 @@ function SidebarFrame({
       </div>
 
       <nav style={{ flex: 1, padding: "12px 8px" }}>
-        {NAV_ITEMS.map((item) => {
-          const active = isActive?.(item.href) ?? false;
-          return (
-            <Link
-              key={item.href}
-              href={renderLinks?.(item.href) ?? item.href}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "8px 12px",
-                borderRadius: 8,
-                marginBottom: 2,
-                textDecoration: "none",
-                fontSize: 14,
-                fontWeight: active ? 600 : 400,
-                color: active ? "var(--color-signal-blue)" : "var(--color-ink-700)",
-                backgroundColor: active ? "var(--color-signal-blue-surface)" : "transparent",
-                transition: "background-color 160ms ease, color 160ms ease",
-              }}
-            >
-              <span style={{ opacity: active ? 1 : 0.65 }}>{item.icon}</span>
-              {item.label}
-            </Link>
-          );
-        })}
+        <NavGroup label="Analyze" items={ANALYZE_ITEMS} renderLinks={renderLinks} isActive={isActive} />
+        <NavGroup label="Compare" items={COMPARE_ITEMS} renderLinks={renderLinks} isActive={isActive} />
       </nav>
 
       <div style={{ padding: "12px 8px", borderTop: "1px solid var(--color-border-soft)" }}>
-        {BOTTOM_ITEMS.map((item) => {
-          const active = isActive?.(item.href) ?? false;
-          return (
-            <Link
-              key={item.href}
-              href={renderLinks?.(item.href) ?? item.href}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "8px 12px",
-                borderRadius: 8,
-                marginBottom: 2,
-                textDecoration: "none",
-                fontSize: 14,
-                fontWeight: active ? 600 : 400,
-                color: active ? "var(--color-signal-blue)" : "var(--color-ink-700)",
-                backgroundColor: active ? "var(--color-signal-blue-surface)" : "transparent",
-                transition: "background-color 160ms ease, color 160ms ease",
-              }}
-            >
-              <span style={{ opacity: active ? 1 : 0.65 }}>{item.icon}</span>
-              {item.label}
-            </Link>
-          );
-        })}
+        <NavGroup label="Operate" items={OPERATE_ITEMS} renderLinks={renderLinks} isActive={isActive} />
 
         <div
           style={{
@@ -280,5 +234,60 @@ function SidebarFrame({
         </div>
       </div>
     </aside>
+  );
+}
+
+function NavGroup({
+  label,
+  items,
+  renderLinks,
+  isActive,
+}: {
+  label: string;
+  items: typeof ANALYZE_ITEMS;
+  renderLinks?: (href: string) => string;
+  isActive?: (href: string) => boolean;
+}) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div
+        style={{
+          padding: "6px 12px 8px",
+          fontSize: 10.5,
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          color: "var(--color-ink-500)",
+        }}
+      >
+        {label}
+      </div>
+      {items.map((item) => {
+        const active = isActive?.(item.href) ?? false;
+        return (
+          <Link
+            key={item.href}
+            href={renderLinks?.(item.href) ?? item.href}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "8px 12px",
+              borderRadius: 8,
+              marginBottom: 2,
+              textDecoration: "none",
+              fontSize: 14,
+              fontWeight: active ? 600 : 400,
+              color: active ? "var(--color-signal-blue)" : "var(--color-ink-700)",
+              backgroundColor: active ? "var(--color-signal-blue-surface)" : "transparent",
+              transition: "background-color 160ms ease, color 160ms ease",
+            }}
+          >
+            <span style={{ opacity: active ? 1 : 0.65 }}>{item.icon}</span>
+            {item.label}
+          </Link>
+        );
+      })}
+    </div>
   );
 }

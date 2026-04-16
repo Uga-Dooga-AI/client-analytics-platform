@@ -1,4 +1,5 @@
 import { ConfidenceBandChart } from "@/components/confidence-band-chart";
+import { ForecastCombinationTracker } from "@/components/forecast-combination-tracker";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
 import { getForecastRuns, getForecastCards, getForecastTrajectories } from "@/lib/data/forecasts";
@@ -46,6 +47,21 @@ export default async function ForecastsPage({
             minWidth: 0,
           }}
         >
+          <ForecastCombinationTracker
+            projectKey={filters.projectKey}
+            label={`${selectedProject} · forecast surface`}
+            sourcePage="/forecasts"
+            filters={{
+              from: filters.from,
+              to: filters.to,
+              platform: filters.platform,
+              segment: filters.segment,
+              groupBy: filters.groupBy,
+              tag: filters.tag,
+              granularityDays: filters.granularityDays,
+            }}
+          />
+
           <section
             style={{
               display: "grid",
@@ -61,6 +77,7 @@ export default async function ForecastsPage({
               { label: "Selected project", value: selectedProject, sub: "Forecast outputs scoped to one product" },
               { label: "Latest model", value: "v1.2.0", sub: "Revenue and paywall forecasts" },
               { label: "Visible runs", value: `${visibleRuns.length}`, sub: `Range ${filters.from} to ${filters.to}` },
+              { label: "Day step", value: `${filters.granularityDays}d`, sub: "Forecast charts follow dashboard cohort grouping" },
               { label: "Mode", value: "Chart + table", sub: "Confidence intervals shown directly on chart" },
             ].map((card) => (
               <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "18px 22px" }}>

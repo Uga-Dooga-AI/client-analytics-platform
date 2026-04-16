@@ -10,6 +10,15 @@ import {
 export const SAVED_SEGMENTS_COOKIE = "cap_saved_segments";
 const MAX_SAVED_SEGMENTS = 18;
 
+export type SavedSegmentEventOperator = "did" | "did_not";
+
+export type SavedSegmentEventRule = {
+  eventName: string;
+  operator: SavedSegmentEventOperator;
+  withinDays: number;
+  minCount: number;
+};
+
 export type SavedUserSegmentRules = {
   projectKey: DashboardProjectKey;
   platform: DashboardPlatformKey;
@@ -19,6 +28,7 @@ export type SavedUserSegmentRules = {
   campaign: string;
   creative: string;
   tag: DashboardTagKey;
+  eventRules: SavedSegmentEventRule[];
 };
 
 export type SavedUserSegment = {
@@ -65,6 +75,7 @@ const DEFAULT_RULES: SavedUserSegmentRules = {
   campaign: "all",
   creative: "all",
   tag: "all",
+  eventRules: [],
 };
 
 const PROFILE_BEHAVIOR: Record<DashboardSegmentPresetKey, Omit<SegmentBehavior, "label" | "kind" | "savedSegment">> = {
@@ -216,8 +227,8 @@ export function getSegmentBehavior(
   }
 
   const activeRulesCount = Object.entries(savedSegment.rules).filter(
-    ([key, value]) => key !== "projectKey" && value !== "all"
-  ).length + (savedSegment.rules.projectKey !== "all" ? 1 : 0);
+    ([key, value]) => key !== "projectKey" && key !== "eventRules" && value !== "all"
+  ).length + (savedSegment.rules.projectKey !== "all" ? 1 : 0) + savedSegment.rules.eventRules.length;
 
   return {
     label: savedSegment.label,
@@ -296,7 +307,31 @@ function normalizeRules(rules?: Partial<SavedUserSegmentRules>): SavedUserSegmen
     campaign: normalizeFilterValue(rules?.campaign),
     creative: normalizeFilterValue(rules?.creative),
     tag: isAllowedTagKey(rules?.tag) ? rules?.tag : DEFAULT_RULES.tag,
+    eventRules: normalizeEventRules(rules?.eventRules),
   };
+}
+
+function normalizeEventRules(rules?: SavedSegmentEventRule[]) {
+  if (!Array.isArray(rules)) {
+    return [];
+  }
+
+  return rules
+    .map((rule) => {
+      const eventName = normalizeFilterValue(rule?.eventName);
+      if (eventName === "all") {
+        return null;
+      }
+
+      return {
+        eventName,
+        operator: rule?.operator === "did_not" ? "did_not" : "did",
+        withinDays: clamp(Number(rule?.withinDays) || 30, 1, 365),
+        minCount: clamp(Number(rule?.minCount) || 1, 1, 99),
+      } satisfies SavedSegmentEventRule;
+    })
+    .filter((rule): rule is SavedSegmentEventRule => Boolean(rule))
+    .slice(0, 4);
 }
 
 function normalizeLabel(value?: string) {
@@ -324,7 +359,7 @@ function normalizeFilterValue(value?: string) {
 }
 
 function isAllowedProjectKey(value?: string): value is DashboardProjectKey {
-  return ["all", "word-catcher", "words-in-word", "2pg"].includes(value ?? "");
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function isAllowedPlatformKey(value?: string): value is DashboardPlatformKey {

@@ -16,6 +16,7 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
   "/access": ["admin", "super_admin"],
   "/admin": ["admin", "super_admin"],
   "/api/segments": ["analyst", "ab_analyst", "admin", "super_admin"],
+  "/api/projects": ["viewer", "analyst", "ab_analyst", "admin", "super_admin"],
   "/api/data/refresh": ["analyst", "admin", "super_admin"],
   "/api/admin": ["admin", "super_admin"],
 };
@@ -28,6 +29,7 @@ export const PUBLIC_ROUTES: string[] = [
   "/sign-in",
   "/access-request",
   "/api/auth",
+  "/api/internal",
   "/api/admin/bootstrap",
   "/api/test/seed",
   "/_next",

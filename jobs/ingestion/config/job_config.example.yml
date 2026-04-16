@@ -38,6 +38,12 @@ bigquery:
   # Table name for AppMetrica events
   events_table: appmetrica_events
 
+  # Table name for AppMetrica installations
+  installs_table: appmetrica_installs
+
+  # Table name for AppMetrica sessions
+  sessions_table: appmetrica_sessions
+
 schedule:
   # UTC hour at which the daily run is triggered by Cloud Scheduler
   # Default: 04:00 UTC = 07:00 MSK (UTC+3)
