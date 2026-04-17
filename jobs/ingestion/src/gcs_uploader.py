@@ -12,10 +12,10 @@ Required env vars:
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import os
+import tempfile
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
@@ -89,17 +89,18 @@ class GCSUploader:
             logger.info("stub upload_ndjson: %s (no credentials)", uri)
             return uri
 
-        buffer = io.BytesIO()
         row_count = 0
-        for row in rows:
-            buffer.write((json.dumps(row, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
-            row_count += 1
+        with tempfile.TemporaryFile(mode="w+b") as buffer:
+            for row in rows:
+                buffer.write((json.dumps(row, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+                row_count += 1
 
-        buffer.seek(0)
-        blob = self._bucket_obj.blob(blob_path)
-        blob.upload_from_file(buffer, content_type="application/x-ndjson")
+            size_bytes = buffer.tell()
+            buffer.seek(0)
+            blob = self._bucket_obj.blob(blob_path)
+            blob.upload_from_file(buffer, content_type="application/x-ndjson")
 
-        size_kb = buffer.tell() / 1024
+        size_kb = size_bytes / 1024
         logger.info(
             "uploaded: %s  rows=%d  size=%.1f KB",
             uri, row_count, size_kb,

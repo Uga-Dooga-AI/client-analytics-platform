@@ -18,6 +18,7 @@ import os
 import time
 from typing import Iterator
 
+import ijson
 import requests
 
 logger = logging.getLogger(__name__)
@@ -173,11 +174,11 @@ class AppMetricaClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _export_with_poll(self, endpoint: str, params: dict) -> list[dict]:
+    def _export_with_poll(self, endpoint: str, params: dict) -> Iterator[dict]:
         """
         Call the Logs API export endpoint, polling until data is ready.
 
-        Returns parsed rows from the JSON response payload.
+        Streams parsed rows from the JSON response payload.
 
         Raises:
             RuntimeError: if the export fails or max attempts exceeded.
@@ -187,43 +188,49 @@ class AppMetricaClient:
 
         wait = _INITIAL_WAIT_S
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            resp = requests.get(url, params=params, headers=headers, timeout=60)
+            with requests.get(url, params=params, headers=headers, timeout=60, stream=True) as resp:
+                if resp.status_code == 200:
+                    yield from self._iter_export_rows(resp, endpoint)
+                    return
 
-            if resp.status_code == 200:
-                payload = resp.json()
-                rows = payload.get("data")
-                if not isinstance(rows, list):
-                    raise RuntimeError(f"Unexpected AppMetrica payload for {endpoint}: missing data list")
+                if resp.status_code == 202:
+                    logger.info(
+                        "export not ready (202), attempt %d/%d — waiting %ds",
+                        attempt, _MAX_ATTEMPTS, wait,
+                    )
+                    time.sleep(wait)
+                    wait = min(wait * 2, _MAX_WAIT_S)
+                    continue
 
-                logger.info("export ready: endpoint=%s rows=%d", endpoint, len(rows))
-                return rows
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", wait))
+                    logger.warning("rate limited (429), waiting %ds", retry_after)
+                    time.sleep(retry_after)
+                    continue
 
-            if resp.status_code == 202:
-                logger.info(
-                    "export not ready (202), attempt %d/%d — waiting %ds",
-                    attempt, _MAX_ATTEMPTS, wait,
+                body_preview = resp.text[:400]
+                logger.error(
+                    "AppMetrica export request failed: endpoint=%s status=%s body=%s",
+                    endpoint,
+                    resp.status_code,
+                    body_preview,
                 )
-                time.sleep(wait)
-                wait = min(wait * 2, _MAX_WAIT_S)
-                continue
-
-            if resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", wait))
-                logger.warning("rate limited (429), waiting %ds", retry_after)
-                time.sleep(retry_after)
-                continue
-
-            logger.error(
-                "AppMetrica export request failed: endpoint=%s status=%s body=%s",
-                endpoint,
-                resp.status_code,
-                resp.text[:400],
-            )
-            resp.raise_for_status()
+                resp.raise_for_status()
 
         raise RuntimeError(
             f"AppMetrica export did not complete after {_MAX_ATTEMPTS} attempts: {endpoint}"
         )
+
+    @staticmethod
+    def _iter_export_rows(response: requests.Response, endpoint: str) -> Iterator[dict]:
+        response.raw.decode_content = True
+        row_count = 0
+
+        for row in ijson.items(response.raw, "data.item"):
+            row_count += 1
+            yield row
+
+        logger.info("export ready: endpoint=%s rows=%d", endpoint, row_count)
 
     @staticmethod
     def _normalize_row(row: dict) -> dict:

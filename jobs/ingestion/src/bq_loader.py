@@ -131,6 +131,9 @@ class BQLoader:
             job_config.autodetect = True
 
         if partition_date:
+            job_config.time_partitioning = self._bq.TimePartitioning(
+                type_=self._bq.TimePartitioningType.DAY
+            )
             destination = f"{destination}${partition_date.replace('-', '')}"
 
         dest_ref = self._bq.TableReference.from_string(destination)
