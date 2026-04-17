@@ -77,7 +77,9 @@ models:
 
   - name: stg_appmetrica__sessions
     description: >
-      Сессии пользователей из AppMetrica с длительностью и bucket-классификацией.
+      Старты сессий пользователей из AppMetrica Logs API.
+      Длительность может отсутствовать, потому что Logs API отдаёт session starts,
+      а не завершённые сессии с guaranteed duration.
       Grain: одна строка = одна сессия (session_id уникален).
     columns:
       - name: device_id
@@ -102,15 +104,13 @@ models:
         tests:
           - not_null
       - name: duration_seconds
-        description: Длительность сессии в секундах (>= 0)
-        tests:
-          - not_null
+        description: Длительность сессии в секундах (если доступна в downstream enrichment)
       - name: session_length_bucket
         description: >
-          Категория длительности: short (<60s), medium (60-299s), long (>=300s)
+          Категория длительности: short (<60s), medium (60-299s), long (>=300s), unknown
         tests:
           - accepted_values:
-              values: ['short', 'medium', 'long']
+              values: ['short', 'medium', 'long', 'unknown']
       - name: os_name
         description: Операционная система в нижнем регистре
 

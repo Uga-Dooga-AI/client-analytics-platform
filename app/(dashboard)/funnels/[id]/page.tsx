@@ -25,7 +25,13 @@ export default async function FunnelDetailPage({
   if (!funnel) {
     return (
       <div style={{ padding: 32 }}>
-        <p style={{ color: "var(--color-danger)" }}>Funnel not found: {id}</p>
+        <p style={{ color: "var(--color-ink-900)", fontWeight: 600 }}>
+          Live funnel detail is not published yet for: {id}
+        </p>
+        <p style={{ color: "var(--color-ink-500)", marginTop: 8, maxWidth: 720, lineHeight: 1.6 }}>
+          The dashboard no longer returns mock funnel payloads. This route will populate after live funnel
+          definitions and step metrics are materialized into the warehouse-backed serving layer.
+        </p>
         <Link href="/funnels" style={{ color: "var(--color-signal-blue)" }}>
           Back to funnels
         </Link>

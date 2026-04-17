@@ -1,34 +1,60 @@
-import { cookies } from "next/headers";
-import { AcquisitionWorkbench } from "@/components/acquisition-workbench";
-import { CohortMatrixTable } from "@/components/cohort-matrix-table";
-import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
-import { RetentionTrendChart } from "@/components/retention-trend-chart";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import {
-  getAcquisitionDashboardData,
-  parseAcquisitionSearchParams,
-} from "@/lib/data/acquisition";
+  findLatestRun,
+  flattenRuns,
+  formatDateTime,
+  formatRelativeTime,
+  runStatusTone,
+  scopeBundles,
+  sourceStatusTone,
+} from "@/lib/dashboard-live";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
-import { getCohortDefinitions, getCohortGrid, getCohortTrends } from "@/lib/data/cohorts";
-import { parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
-
-const PERIOD_LABELS = ["D0", "D1", "D3", "D7", "D14", "D30"];
-const COHORT_COMPARE_CHART_IDS = [
-  "compare-payback",
-  "compare-retention-d7",
-  "compare-retention-d30",
-  "compare-session-minutes",
-];
+import { getLiveCohortRows } from "@/lib/live-warehouse";
+import { listAnalyticsProjects } from "@/lib/platform/store";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
-function heatColor(value: number) {
-  if (value === 0) {
-    return "var(--color-panel-soft)";
-  }
+function SectionHeader({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, color: "var(--color-ink-950)" }}>{title}</div>
+      <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-500)" }}>{subtitle}</div>
+    </div>
+  );
+}
 
-  const alpha = Math.max(0.12, Math.min(0.88, value / 100));
-  return `rgba(37, 99, 235, ${alpha.toFixed(2)})`;
+function InfoCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+}) {
+  return (
+    <div style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
+      <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-ink-500)", marginBottom: 8 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1 }}>{value}</div>
+      <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{sub}</div>
+    </div>
+  );
+}
+
+function formatInteger(value: number) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatPercent(value: number) {
+  return `${(value * 100).toFixed(1)}%`;
 }
 
 export default async function CohortsPage({
@@ -36,548 +62,359 @@ export default async function CohortsPage({
 }: {
   searchParams: SearchParamsInput;
 }) {
-  const rawSearchParams = await searchParams;
-  const filters = parseDashboardSearchParams(rawSearchParams, "/cohorts");
-  const localFilters = parseAcquisitionSearchParams(rawSearchParams);
-  const selectedProject = getProjectLabel(filters.projectKey);
-  const cookieStore = await cookies();
-  const savedSegments = parseSavedSegmentsCookie(cookieStore.get(SAVED_SEGMENTS_COOKIE)?.value);
-
-  const [visibleDefinitions, cohortGrid, cohortTrends, compareData] = await Promise.all([
-    getCohortDefinitions({ projectKey: filters.projectKey }),
-    getCohortGrid(),
-    getCohortTrends(),
-    getAcquisitionDashboardData(filters, localFilters, savedSegments),
-  ]);
-
-  const cohortCompareCharts = COHORT_COMPARE_CHART_IDS.map((chartId) =>
-    compareData.compareCharts.find((chart) => chart.id === chartId)
-  ).filter((chart): chart is NonNullable<typeof chart> => Boolean(chart));
+  const filters = parseDashboardSearchParams(await searchParams, "/cohorts");
+  const bundles = await listAnalyticsProjects();
+  const scopedBundles = scopeBundles(bundles, filters.projectKey);
+  const cohortRows = await getLiveCohortRows(scopedBundles);
+  const selectedBundle = scopedBundles[0] ?? null;
+  const selectedProjectLabel = getProjectLabel(filters.projectKey);
+  const relevantRuns = flattenRuns(scopedBundles).filter(({ run }) =>
+    run.runType === "backfill" || run.runType === "ingestion" || run.runType === "serving_refresh"
+  );
+  const latestDataRun = selectedBundle ? findLatestRun(selectedBundle, ["backfill", "ingestion"]) : null;
+  const latestServing = selectedBundle ? findLatestRun(selectedBundle, ["serving_refresh"]) : null;
+  const publishReady =
+    selectedBundle &&
+    selectedBundle.sources.some((source) => source.sourceType === "appmetrica_logs" && source.status === "ready") &&
+    latestDataRun?.status === "succeeded" &&
+    latestServing?.status === "succeeded";
+  const latestLiveCohort = cohortRows[0] ?? null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <TopFilterRail title="Cohorts" />
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        <main
+      <main
+        style={{
+          padding: 32,
+          display: "flex",
+          flexDirection: "column",
+          gap: 24,
+          overflowY: "auto",
+          minWidth: 0,
+          flex: 1,
+        }}
+      >
+        <section
           style={{
-            flex: 1,
-            padding: 32,
-            display: "flex",
-            flexDirection: "column",
-            gap: 24,
-            overflowY: "auto",
-            minWidth: 0,
+            display: "grid",
+            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+            gap: 1,
+            background: "var(--color-border-soft)",
+            border: "1px solid var(--color-border-soft)",
+            borderRadius: 10,
+            overflow: "hidden",
           }}
         >
-          <section
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-              gap: 1,
-              background: "var(--color-border-soft)",
-              border: "1px solid var(--color-border-soft)",
-              borderRadius: 10,
-              overflow: "hidden",
-            }}
-          >
-            {[
-              {
-                label: "Selected project",
-                value: selectedProject,
-                sub: `${compareData.summary.cohortCount} cohort dates`,
-              },
-              {
-                label: "Compare workspace",
-                value: `${compareData.comparisonSummary.leftLabel} vs ${compareData.comparisonSummary.rightLabel}`,
-                sub: "Same compare engine as acquisition and experiments",
-              },
-              {
-                label: "Revenue view",
-                value: capitalizeMode(compareData.summary.revenueMode),
-                sub: `Ad share ${compareData.summary.adShare.toFixed(0)}%`,
-              },
-              {
-                label: "D7 retention",
-                value: `${compareData.summary.d7Retention.toFixed(1)}%`,
-                sub: `D1 ${compareData.summary.d1Retention.toFixed(1)}%`,
-              },
-              {
-                label: "D30 retention",
-                value: `${compareData.summary.d30Retention.toFixed(1)}%`,
-                sub: "Long-tail cohort quality",
-              },
-              {
-                label: "Session length",
-                value: `${compareData.summary.sessionMinutes.toFixed(1)}m`,
-                sub: "Average first-week session duration",
-              },
-              {
-                label: "D60 ROAS",
-                value: `${compareData.summary.d60Roas.toFixed(0)}%`,
-                sub: `Revenue / user $${compareData.summary.totalRevenuePerUser.toFixed(2)}`,
-              },
-              {
-                label: "Payback",
-                value: `${compareData.summary.paybackDays}d`,
-                sub: `${compareData.summary.confidence} confidence band`,
-              },
-            ].map((card) => (
-              <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
-                <div style={CARD_LABEL_STYLE}>{card.label}</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1.1 }}>
-                  {card.value}
-                </div>
-                <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{card.sub}</div>
-              </div>
-            ))}
-          </section>
+          <InfoCard label="Selected project" value={selectedProjectLabel} sub="Current cohort pipeline scope" />
+          <InfoCard label="Granularity" value={`${selectedBundle?.project.defaultGranularityDays ?? filters.granularityDays}d`} sub="Default cohort step in project settings" />
+          <InfoCard label="Lookback" value={`${selectedBundle?.project.lookbackDays ?? 0}d`} sub="D+1 extraction offset for raw data" />
+          <InfoCard label="Backfill window" value={`${selectedBundle?.project.initialBackfillDays ?? 0}d`} sub="Configured initial catch-up window" />
+          <InfoCard label="Publish state" value={publishReady ? "Ready" : "Pending"} sub={publishReady ? "Serving refresh completed successfully" : "Cohort facts are not published yet"} />
+        </section>
 
-          <AcquisitionWorkbench
-            title="Cohort comparison workspace"
-            caption="Pick the parent slice first, then compare two cohort segments by platform, country, company, source, campaign, creative, or saved user segment. Retention, session quality, and payback stay on the same statistical surface."
-            filters={compareData.localFilters}
-            options={compareData.options}
+        <section
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: 1,
+            background: "var(--color-border-soft)",
+            border: "1px solid var(--color-border-soft)",
+            borderRadius: 10,
+            overflow: "hidden",
+          }}
+        >
+          <InfoCard
+            label="Latest live cohort"
+            value={latestLiveCohort?.cohortDate ?? "No data"}
+            sub="Newest install cohort visible from raw installs + sessions"
           />
+          <InfoCard
+            label="Cohort installs"
+            value={formatInteger(latestLiveCohort?.installs ?? 0)}
+            sub="Installs in the latest visible cohort"
+          />
+          <InfoCard
+            label="D1 retention"
+            value={formatPercent(latestLiveCohort?.d1RetentionRate ?? 0)}
+            sub="Directly derived from session starts after install"
+          />
+          <InfoCard
+            label="D7 retention"
+            value={formatPercent(latestLiveCohort?.d7RetentionRate ?? 0)}
+            sub="Live cohort return rate at day 7"
+          />
+        </section>
 
-          <section
-            style={{
-              display: "grid",
-              gridTemplateColumns: "0.85fr 1.15fr",
-              gap: 20,
-            }}
-          >
-            <div
-              style={{
-                background: "var(--color-panel-base)",
-                border: "1px solid var(--color-border-soft)",
-                borderRadius: 10,
-                overflow: "hidden",
-              }}
-            >
-              <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border-soft)" }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>
-                  Saved cohort definitions
-                </div>
-                <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>
-                  Mock-backed cohort presets for {selectedProject}
-                </div>
-              </div>
-
-              <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-                {visibleDefinitions.map((cohort, index) => (
-                  <div
-                    key={cohort.id}
-                    style={{
-                      padding: "14px 14px 12px",
-                      borderRadius: 8,
-                      border:
-                        index === 0
-                          ? "1px solid var(--color-signal-blue)"
-                          : "1px solid var(--color-border-soft)",
-                      background:
-                        index === 0 ? "var(--color-signal-blue-surface)" : "var(--color-panel-base)",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 10,
-                      }}
-                    >
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
-                        {cohort.name}
-                      </div>
-                      <span
-                        style={{
-                          padding: "2px 8px",
-                          borderRadius: 999,
-                          background: "var(--color-panel-base)",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: "var(--color-ink-700)",
-                        }}
-                      >
-                        {cohort.platform}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 5 }}>
-                      {cohort.project}
-                    </div>
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr",
-                        gap: 10,
-                        marginTop: 12,
-                        fontSize: 11.5,
-                      }}
-                    >
-                      <div>
-                        <div style={{ color: "var(--color-ink-500)" }}>Trigger</div>
-                        <div style={{ fontWeight: 600, color: "var(--color-ink-900)", marginTop: 2 }}>
-                          {cohort.trigger}
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{ color: "var(--color-ink-500)" }}>Population</div>
-                        <div style={{ fontWeight: 600, color: "var(--color-ink-900)", marginTop: 2 }}>
-                          {cohort.population.toLocaleString()}
-                        </div>
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 10 }}>
-                      {cohort.window}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div
-              style={{
-                background: "var(--color-panel-base)",
-                border: "1px solid var(--color-border-soft)",
-                borderRadius: 10,
-                overflow: "hidden",
-              }}
-            >
-              <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border-soft)" }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>
-                  Retention grid
-                </div>
-                <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>
-                  Weekly cohorts for {selectedProject}. This stays useful as a fast heatmap even before live data is
-                  wired.
-                </div>
-              </div>
-
-              <div style={{ padding: 16 }}>
-                <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 4 }}>
-                  <thead>
-                    <tr>
-                      <th style={HEATMAP_HEADER_STYLE}>Cohort</th>
-                      <th style={{ ...HEATMAP_HEADER_STYLE, textAlign: "right" }}>Users</th>
-                      {PERIOD_LABELS.map((label) => (
-                        <th key={label} style={{ ...HEATMAP_HEADER_STYLE, textAlign: "center" }}>
-                          {label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {cohortGrid.map((row) => (
-                      <tr key={row.cohortLabel}>
-                        <td style={{ padding: "8px 8px", fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-900)" }}>
-                          {row.cohortLabel}
-                        </td>
-                        <td style={{ padding: "8px 8px", textAlign: "right", fontSize: 12, color: "var(--color-ink-500)" }}>
-                          {row.population.toLocaleString()}
-                        </td>
-                        {row.values.map((value, index) => (
-                          <td key={`${row.cohortLabel}-${PERIOD_LABELS[index]}`} style={{ padding: 0 }}>
-                            <div
-                              style={{
-                                minWidth: 48,
-                                padding: "9px 0",
-                                borderRadius: 8,
-                                background: heatColor(value),
-                                color: value >= 45 ? "#fff" : "var(--color-ink-900)",
-                                textAlign: "center",
-                                fontSize: 12,
-                                fontWeight: 600,
-                              }}
-                            >
-                              {value === 0 ? "—" : `${value}%`}
-                            </div>
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
-
-          <section style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 20 }}>
-            {cohortCompareCharts.map((chart) => (
-              <ComparisonConfidenceChart key={chart.id} chart={chart} />
-            ))}
-          </section>
-
-          <section style={{ display: "grid", gridTemplateColumns: "1.05fr 0.95fr", gap: 20 }}>
-            <section
-              style={{
-                background: "var(--color-panel-base)",
-                border: "1px solid var(--color-border-soft)",
-                borderRadius: 10,
-                overflow: "hidden",
-              }}
-            >
-              <div
+        {selectedBundle ? (
+          <>
+            {cohortRows.length > 0 ? (
+              <section
                 style={{
-                  padding: "16px 20px",
-                  borderBottom: "1px solid var(--color-border-soft)",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 16,
-                  alignItems: "flex-start",
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  overflow: "hidden",
                 }}
               >
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>
-                    Cohort metric comparison
-                  </div>
-                  <div style={{ marginTop: 3, fontSize: 12, color: "var(--color-ink-500)", lineHeight: 1.5 }}>
-                    Same filtered parent slice, two compared segments, and one compact table for revenue, retention,
-                    and engagement.
-                  </div>
+                <div style={{ padding: 18 }}>
+                  <SectionHeader
+                    title="Live cohort retention"
+                    subtitle="Direct warehouse query over installs and session starts for recent cohorts."
+                  />
                 </div>
-                <div style={{ fontSize: 12, color: "var(--color-ink-500)", textAlign: "right", lineHeight: 1.55 }}>
-                  Left:{" "}
-                  <strong style={{ color: "var(--color-ink-900)" }}>
-                    {compareData.comparisonSummary.leftLabel}
-                  </strong>
-                  <br />
-                  Right:{" "}
-                  <strong style={{ color: "var(--color-ink-900)" }}>
-                    {compareData.comparisonSummary.rightLabel}
-                  </strong>
-                </div>
-              </div>
 
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 780 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
-                    <tr
-                      style={{
-                        background: "var(--color-panel-soft)",
-                        borderBottom: "1px solid var(--color-border-soft)",
-                      }}
-                    >
-                      {[
-                        "Category",
-                        "Metric",
-                        compareData.comparisonSummary.leftLabel,
-                        compareData.comparisonSummary.rightLabel,
-                        "Delta",
-                        "Direction",
-                      ].map((column) => (
-                        <th key={column} style={TABLE_HEADER_STYLE}>
+                    <tr>
+                      {["Project", "Cohort date", "Installs", "First session", "D1", "D7"].map((column) => (
+                        <th
+                          key={column}
+                          style={{
+                            padding: "10px 18px",
+                            textAlign: "left",
+                            fontSize: 10.5,
+                            fontWeight: 600,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            color: "var(--color-ink-500)",
+                            background: "var(--color-panel-soft)",
+                            borderBottom: "1px solid var(--color-border-soft)",
+                          }}
+                        >
                           {column}
                         </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {compareData.metricComparisonRows.map((row, index) => {
-                      const positive = row.delta > 0;
-                      const favorable =
-                        row.preferredDirection === "higher" ? row.delta >= 0 : row.delta <= 0;
-
-                      return (
-                        <tr
-                          key={`${row.category}-${row.label}`}
-                          style={{
-                            borderBottom:
-                              index < compareData.metricComparisonRows.length - 1
-                                ? "1px solid var(--color-border-soft)"
-                                : "none",
-                          }}
-                        >
-                          <td style={TABLE_BODY_STYLE}>
-                            <span style={{ textTransform: "capitalize", color: "var(--color-ink-500)" }}>
-                              {row.category}
-                            </span>
-                          </td>
-                          <td style={{ ...TABLE_BODY_STYLE, fontWeight: 600, color: "var(--color-ink-950)" }}>
-                            {row.label}
-                          </td>
-                          <td style={TABLE_BODY_STYLE}>{formatMetricValue(row.leftValue, row.unit)}</td>
-                          <td style={TABLE_BODY_STYLE}>{formatMetricValue(row.rightValue, row.unit)}</td>
-                          <td
-                            style={{
-                              ...TABLE_BODY_STYLE,
-                              fontWeight: 600,
-                              color: favorable
-                                ? "var(--color-success)"
-                                : positive
-                                  ? "var(--color-danger)"
-                                  : "var(--color-warning)",
-                            }}
-                          >
-                            {formatMetricDelta(row.delta, row.unit)}
-                          </td>
-                          <td style={TABLE_BODY_STYLE}>
-                            {row.preferredDirection === "higher" ? "Higher is better" : "Lower is better"}
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {cohortRows.map((row, index) => (
+                      <tr
+                        key={`${row.projectId}-${row.cohortDate}`}
+                        style={{
+                          borderBottom:
+                            index < cohortRows.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                        }}
+                      >
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {row.projectName}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {row.cohortDate}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatInteger(row.installs)}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatPercent(row.installToFirstSessionRate)}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatPercent(row.d1RetentionRate)}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatPercent(row.d7RetentionRate)}
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
-              </div>
-            </section>
+              </section>
+            ) : null}
 
-            <div
-              style={{
-                background: "var(--color-panel-base)",
-                border: "1px solid var(--color-border-soft)",
-                borderRadius: 10,
-                padding: 20,
-              }}
-            >
-              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Retention trend</div>
-              <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>
-                D7 and D30 retention by cohort date. This complements the left-vs-right comparison with a top-level
-                platform trend read.
-              </div>
+            <section style={{ display: "grid", gridTemplateColumns: "0.9fr 1.1fr", gap: 20 }}>
+              <div
+                style={{
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  padding: 18,
+                }}
+              >
+                <SectionHeader
+                  title="Cohort publishing prerequisites"
+                  subtitle="Live configuration and source state for the current product."
+                />
 
-              <RetentionTrendChart trend={cohortTrends} />
+                <div style={{ display: "grid", gap: 12 }}>
+                  {selectedBundle.sources.map((source) => {
+                    const tone = sourceStatusTone(source.status);
+                    return (
+                      <div
+                        key={source.id}
+                        style={{
+                          border: "1px solid var(--color-border-soft)",
+                          borderRadius: 8,
+                          padding: "12px 14px",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                            {source.label}
+                          </div>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              padding: "3px 8px",
+                              borderRadius: 999,
+                              background: tone.background,
+                              color: tone.color,
+                              fontSize: 11.5,
+                              fontWeight: 600,
+                            }}
+                          >
+                            {tone.label}
+                          </span>
+                        </div>
+                        <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                          {source.sourceType} · {source.deliveryMode}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
 
-              <div style={{ display: "flex", gap: 14, marginTop: 12, flexWrap: "wrap" }}>
-                {[
-                  ["iOS D7", "var(--color-signal-blue)"],
-                  ["Android D7", "rgba(37, 99, 235, 0.45)"],
-                  ["iOS D30", "var(--color-success)"],
-                  ["Android D30", "rgba(22, 163, 74, 0.45)"],
-                ].map(([label, color]) => (
-                  <div
-                    key={label}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 11.5,
-                      color: "var(--color-ink-500)",
-                    }}
-                  >
-                    <span style={{ width: 10, height: 10, borderRadius: 999, background: color }} />
-                    {label}
-                  </div>
-                ))}
+                <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  {[
+                    ["Raw dataset", selectedBundle.project.rawDataset],
+                    ["Staging dataset", selectedBundle.project.stgDataset],
+                    ["Mart dataset", selectedBundle.project.martDataset],
+                    ["Bucket", selectedBundle.project.gcsBucket || "Not set"],
+                    ["Bounds path", selectedBundle.project.boundsPath || "Not set"],
+                    ["Provisioning region", selectedBundle.project.settings.provisioningRegion],
+                  ].map(([label, value]) => (
+                    <div
+                      key={label}
+                      style={{
+                        border: "1px solid var(--color-border-soft)",
+                        borderRadius: 8,
+                        padding: "10px 12px",
+                      }}
+                    >
+                      <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)" }}>
+                        {label}
+                      </div>
+                      <div style={{ marginTop: 6, fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                        {value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div
                 style={{
-                  marginTop: 18,
-                  display: "grid",
-                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                  gap: 10,
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  overflow: "hidden",
                 }}
               >
-                <InfoStat
-                  label="Revenue split"
-                  value={`Ads $${compareData.summary.adRevenuePerUser.toFixed(2)} · IAP $${compareData.summary.iapRevenuePerUser.toFixed(2)}`}
-                />
-                <InfoStat
-                  label="Compare axis"
-                  value={
-                    compareData.localFilters.compareBy === "segment"
-                      ? "Saved user segment"
-                      : compareData.localFilters.compareBy
-                  }
-                />
+                <div style={{ padding: 18 }}>
+                  <SectionHeader
+                    title="Cohort-related run history"
+                    subtitle="Data ingestion and serving publish attempts that affect cohort facts."
+                  />
+                </div>
+
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      {["Run", "Status", "Window", "Updated", "Message"].map((column) => (
+                        <th
+                          key={column}
+                          style={{
+                            padding: "10px 18px",
+                            textAlign: "left",
+                            fontSize: 10.5,
+                            fontWeight: 600,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            color: "var(--color-ink-500)",
+                            background: "var(--color-panel-soft)",
+                            borderBottom: "1px solid var(--color-border-soft)",
+                          }}
+                        >
+                          {column}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {relevantRuns.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} style={{ padding: 18, fontSize: 13, color: "var(--color-ink-500)" }}>
+                          No cohort-related runs recorded yet.
+                        </td>
+                      </tr>
+                    ) : (
+                      relevantRuns.slice(0, 12).map(({ run }, index) => {
+                        const tone = runStatusTone(run.status);
+                        const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
+                        return (
+                          <tr
+                            key={run.id}
+                            style={{
+                              borderBottom:
+                                index < Math.min(relevantRuns.length, 12) - 1 ? "1px solid var(--color-border-soft)" : "none",
+                            }}
+                          >
+                            <td style={{ padding: "14px 18px" }}>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                                {run.runType}
+                              </div>
+                              <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                                {run.id.slice(0, 8)}
+                              </div>
+                            </td>
+                            <td style={{ padding: "14px 18px" }}>
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  padding: "3px 8px",
+                                  borderRadius: 999,
+                                  background: tone.background,
+                                  color: tone.color,
+                                  fontSize: 11.5,
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {tone.label}
+                              </span>
+                            </td>
+                            <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                              {run.windowFrom && run.windowTo ? `${run.windowFrom} → ${run.windowTo}` : "No explicit window"}
+                            </td>
+                            <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
+                              <div>{formatDateTime(updatedAt)}</div>
+                              <div style={{ marginTop: 2 }}>{formatRelativeTime(updatedAt)}</div>
+                            </td>
+                            <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                              {run.message ?? "No worker message"}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
               </div>
-            </div>
+            </section>
+          </>
+        ) : (
+          <section
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              padding: 20,
+              fontSize: 13,
+              color: "var(--color-ink-500)",
+            }}
+          >
+            No live project matched the selected cohort scope. Open Settings and create a project first.
           </section>
-
-          <CohortMatrixTable rows={compareData.cohortMatrix} />
-        </main>
-      </div>
+        )}
+      </main>
     </div>
   );
 }
-
-function InfoStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div
-      style={{
-        border: "1px solid var(--color-border-soft)",
-        background: "var(--color-panel-soft)",
-        borderRadius: 8,
-        padding: "12px 13px",
-      }}
-    >
-      <div style={CARD_LABEL_STYLE}>{label}</div>
-      <div style={{ marginTop: 6, fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)", lineHeight: 1.45 }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function capitalizeMode(value: string) {
-  return value === "iap" ? "IAP revenue" : `${value.charAt(0).toUpperCase()}${value.slice(1)} revenue`;
-}
-
-function formatMetricValue(value: number, unit: string) {
-  if (unit === "$") {
-    return `$${value.toFixed(2)}`;
-  }
-
-  if (unit === "%") {
-    return `${value.toFixed(1)}%`;
-  }
-
-  if (unit === "d") {
-    return `${value.toFixed(0)}d`;
-  }
-
-  return `${value.toFixed(1)}${unit}`;
-}
-
-function formatMetricDelta(value: number, unit: string) {
-  const prefix = value > 0 ? "+" : "";
-  if (unit === "$") {
-    return `${prefix}$${value.toFixed(2)}`;
-  }
-
-  if (unit === "%") {
-    return `${prefix}${value.toFixed(1)}%`;
-  }
-
-  if (unit === "d") {
-    return `${prefix}${value.toFixed(0)}d`;
-  }
-
-  return `${prefix}${value.toFixed(1)}${unit}`;
-}
-
-const CARD_LABEL_STYLE = {
-  fontSize: 10.5,
-  fontWeight: 600,
-  letterSpacing: "0.07em",
-  textTransform: "uppercase" as const,
-  color: "var(--color-ink-500)",
-  marginBottom: 8,
-};
-
-const HEATMAP_HEADER_STYLE = {
-  padding: "6px 8px",
-  textAlign: "left" as const,
-  fontSize: 10.5,
-  textTransform: "uppercase" as const,
-  letterSpacing: "0.06em",
-  color: "var(--color-ink-500)",
-};
-
-const TABLE_HEADER_STYLE = {
-  padding: "10px 16px",
-  textAlign: "left" as const,
-  fontSize: 10.5,
-  fontWeight: 600,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase" as const,
-  color: "var(--color-ink-500)",
-};
-
-const TABLE_BODY_STYLE = {
-  padding: "12px 16px",
-  fontSize: 13,
-  color: "var(--color-ink-700)",
-  verticalAlign: "top" as const,
-};

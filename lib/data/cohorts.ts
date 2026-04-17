@@ -1,25 +1,32 @@
-import {
-  MOCK_COHORT_DEFINITIONS,
-  MOCK_COHORT_GRID,
-  MOCK_COHORT_TRENDS,
-  type CohortDefinition,
-  type CohortHeatmapRow,
-} from "@/lib/mock-data";
-import { matchesProject, type DashboardProjectKey } from "@/lib/dashboard-filters";
+import type { CohortDefinition, CohortHeatmapRow } from "@/lib/mock-data";
+import type { DashboardProjectKey } from "@/lib/dashboard-filters";
 
 export type CohortsFilter = {
   projectKey?: DashboardProjectKey;
 };
 
-export async function getCohortDefinitions(filters?: CohortsFilter): Promise<CohortDefinition[]> {
-  if (!filters?.projectKey) return MOCK_COHORT_DEFINITIONS;
-  return MOCK_COHORT_DEFINITIONS.filter((c) => matchesProject(c.project, filters.projectKey!));
+export type CohortTrends = {
+  labels: string[];
+  iosD7: number[];
+  androidD7: number[];
+  iosD30: number[];
+  androidD30: number[];
+};
+
+export async function getCohortDefinitions(_filters?: CohortsFilter): Promise<CohortDefinition[]> {
+  return [];
 }
 
 export async function getCohortGrid(): Promise<CohortHeatmapRow[]> {
-  return MOCK_COHORT_GRID;
+  return [];
 }
 
-export async function getCohortTrends(): Promise<typeof MOCK_COHORT_TRENDS> {
-  return MOCK_COHORT_TRENDS;
+export async function getCohortTrends(): Promise<CohortTrends> {
+  return {
+    labels: [],
+    iosD7: [],
+    androidD7: [],
+    iosD30: [],
+    androidD30: [],
+  };
 }

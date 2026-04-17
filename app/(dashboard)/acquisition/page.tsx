@@ -1,37 +1,120 @@
-import { cookies } from "next/headers";
-import { AcquisitionWorkbench } from "@/components/acquisition-workbench";
-import { CohortMatrixTable } from "@/components/cohort-matrix-table";
-import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
-import { ForecastCombinationTracker } from "@/components/forecast-combination-tracker";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import {
-  getAcquisitionDashboardData,
-  parseAcquisitionSearchParams,
-} from "@/lib/data/acquisition";
+  findLatestRun,
+  flattenRuns,
+  formatDateTime,
+  formatRelativeTime,
+  runStatusTone,
+  scopeBundles,
+  sourceStatusTone,
+  summarizeSourceConfig,
+} from "@/lib/dashboard-live";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
-import { getSegmentLabel, parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
+import { getLiveTrackerRows } from "@/lib/live-warehouse";
+import { listAnalyticsProjects } from "@/lib/platform/store";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
-const CONFIDENCE_TONE: Record<string, { color: string; background: string }> = {
-  Tight: { color: "var(--color-success)", background: "#dcfce7" },
-  Medium: { color: "var(--color-signal-blue)", background: "var(--color-signal-blue-surface)" },
-  Wide: { color: "var(--color-warning)", background: "#fef3c7" },
-};
+function SectionHeader({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, color: "var(--color-ink-950)" }}>{title}</div>
+      <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-500)" }}>{subtitle}</div>
+    </div>
+  );
+}
+
+function InfoCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+}) {
+  return (
+    <div style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
+      <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-ink-500)", marginBottom: 8 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1 }}>{value}</div>
+      <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{sub}</div>
+    </div>
+  );
+}
+
+function formatInteger(value: number) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatPercent(value: number) {
+  return `${(value * 100).toFixed(1)}%`;
+}
 
 export default async function AcquisitionPage({
   searchParams,
 }: {
   searchParams: SearchParamsInput;
 }) {
-  const rawSearchParams = await searchParams;
-  const filters = parseDashboardSearchParams(rawSearchParams, "/acquisition");
-  const localFilters = parseAcquisitionSearchParams(rawSearchParams);
-  const cookieStore = await cookies();
-  const savedSegments = parseSavedSegmentsCookie(cookieStore.get(SAVED_SEGMENTS_COOKIE)?.value);
-  const data = await getAcquisitionDashboardData(filters, localFilters, savedSegments);
-  const selectedProject = getProjectLabel(filters.projectKey);
-  const selectedSegmentLabel = getSegmentLabel(filters.segment, savedSegments, filters.projectKey);
+  const filters = parseDashboardSearchParams(await searchParams, "/acquisition");
+  const bundles = await listAnalyticsProjects();
+  const scopedBundles = scopeBundles(bundles, filters.projectKey);
+  const trackerRows = await getLiveTrackerRows(scopedBundles);
+  const selectedProjectLabel = getProjectLabel(filters.projectKey);
+  const selectedBundle = scopedBundles[0] ?? null;
+  const dataRuns = flattenRuns(scopedBundles).filter(({ run }) =>
+    run.runType === "backfill" || run.runType === "ingestion"
+  );
+  const latestSuccess = dataRuns.find(({ run }) => run.status === "succeeded")?.run ?? null;
+  const latestFailure = dataRuns.find(({ run }) => run.status === "failed")?.run ?? null;
+  const appMetricaSource = selectedBundle?.sources.find((source) => source.sourceType === "appmetrica_logs") ?? null;
+  const trackedEvents = Array.isArray(appMetricaSource?.config.eventNames)
+    ? appMetricaSource?.config.eventNames.filter((value): value is string => typeof value === "string")
+    : [];
+  const appIds = Array.isArray(appMetricaSource?.config.appIds)
+    ? appMetricaSource?.config.appIds.filter((value): value is string => typeof value === "string")
+    : [];
+  const spendSourcesEnabled = selectedBundle
+    ? selectedBundle.sources.filter(
+        (source) =>
+          (source.sourceType === "unity_ads_spend" || source.sourceType === "google_ads_spend") &&
+          source.config.enabled === true
+      ).length
+    : 0;
+  const installs7d = trackerRows
+    .filter((row) => new Date(`${row.installDate}T00:00:00Z`).getTime() >= Date.now() - 7 * 24 * 60 * 60 * 1000)
+    .reduce((sum, row) => sum + row.installs, 0);
+  const organicInstalls7d = trackerRows
+    .filter(
+      (row) =>
+        new Date(`${row.installDate}T00:00:00Z`).getTime() >= Date.now() - 7 * 24 * 60 * 60 * 1000 &&
+        row.trackerName.toLowerCase() === "organic"
+    )
+    .reduce((sum, row) => sum + row.installs, 0);
+  const topTrackers = Array.from(
+    trackerRows.reduce((acc, row) => {
+      const current = acc.get(row.trackerName) ?? { installs: 0, projectNames: new Set<string>() };
+      current.installs += row.installs;
+      current.projectNames.add(row.projectName);
+      acc.set(row.trackerName, current);
+      return acc;
+    }, new Map<string, { installs: number; projectNames: Set<string> }>())
+  )
+    .map(([trackerName, value]) => ({
+      trackerName,
+      installs: value.installs,
+      projectNames: Array.from(value.projectNames).join(", "),
+      share: installs7d > 0 ? value.installs / installs7d : 0,
+    }))
+    .sort((left, right) => right.installs - left.installs)
+    .slice(0, 8);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -48,29 +131,6 @@ export default async function AcquisitionPage({
           minWidth: 0,
         }}
       >
-        <ForecastCombinationTracker
-          projectKey={filters.projectKey}
-          label={`${selectedProject} · acquisition slice`}
-          sourcePage="/acquisition"
-          filters={{
-            from: filters.from,
-            to: filters.to,
-            platform: filters.platform,
-            segment: filters.segment,
-            groupBy: filters.groupBy,
-            tag: filters.tag,
-            granularityDays: filters.granularityDays,
-            revenueMode: data.localFilters.revenueMode,
-            country: data.localFilters.country,
-            company: data.localFilters.company,
-            source: data.localFilters.source,
-            campaign: data.localFilters.campaign,
-            creative: data.localFilters.creative,
-            compareLeft: data.localFilters.compareLeft,
-            compareRight: data.localFilters.compareRight,
-          }}
-        />
-
         <section
           style={{
             display: "grid",
@@ -82,120 +142,21 @@ export default async function AcquisitionPage({
             overflow: "hidden",
           }}
         >
-          {[
-            {
-              label: "Selected project",
-              value: selectedProject,
-              sub: `Slice count ${data.summary.sliceCount.toLocaleString()}`,
-            },
-            {
-              label: "Day step",
-              value: `${filters.granularityDays}d`,
-              sub: `Notebook-style cohort grouping`,
-            },
-            {
-              label: "Revenue view",
-              value: capitalizeMode(data.summary.revenueMode),
-              sub: `Ad share ${data.summary.adShare.toFixed(0)}%`,
-            },
-            {
-              label: "Spend",
-              value: `$${data.summary.spend.toLocaleString()}`,
-              sub: `${data.summary.cohortCount} cohort dates`,
-            },
-            {
-              label: "Installs",
-              value: data.summary.installs.toLocaleString(),
-              sub: `CPI ${data.summary.cpi.toFixed(2)}`,
-            },
-            {
-              label: "D60 ROAS",
-              value: `${data.summary.d60Roas.toFixed(0)}%`,
-              sub: `D30 ${data.summary.d30Roas.toFixed(0)}%`,
-            },
-            {
-              label: "D7 retention",
-              value: `${data.summary.d7Retention.toFixed(1)}%`,
-              sub: `D30 ${data.summary.d30Retention.toFixed(1)}%`,
-            },
-            {
-              label: "Session length",
-              value: `${data.summary.sessionMinutes.toFixed(1)}m`,
-              sub: "Average first-week session duration",
-            },
-            {
-              label: "Revenue / user",
-              value: `$${data.summary.totalRevenuePerUser.toFixed(2)}`,
-              sub: `Ads $${data.summary.adRevenuePerUser.toFixed(2)} · IAP $${data.summary.iapRevenuePerUser.toFixed(2)}`,
-            },
-            {
-              label: "Payback",
-              value: `${data.summary.paybackDays}d`,
-              sub: `${data.summary.confidence} interval · ${filters.platform === "all" ? "mixed platform" : filters.platform}`,
-            },
-          ].map((card) => (
-            <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "14px 16px" }}>
-              <div style={CARD_LABEL_STYLE}>{card.label}</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1.05 }}>
-                {card.value}
-              </div>
-              <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{card.sub}</div>
-            </div>
-          ))}
-        </section>
-
-        <AcquisitionWorkbench
-          title="User acquisition workbench"
-          caption="The logic mirrors the notebooks: pick a cohort slice by country, company, traffic source, campaign, or creative; then compare any two segments or acquisition cells on the same confidence-band charts."
-          filters={data.localFilters}
-          options={data.options}
-        />
-
-        <section style={{ display: "grid", gridTemplateColumns: "1fr", gap: 20 }}>
-          {data.horizonCharts.map((chart) => (
-            <ComparisonConfidenceChart key={chart.id} chart={chart} />
-          ))}
-          <ComparisonConfidenceChart chart={data.paybackChart} />
-        </section>
-
-        <section style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", gap: 20 }}>
-          <section
-            style={{
-              background: "var(--color-panel-base)",
-              border: "1px solid var(--color-border-soft)",
-              borderRadius: 10,
-              padding: 18,
-              display: "flex",
-              flexDirection: "column",
-              gap: 16,
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Notebook parity</div>
-              <div style={{ marginTop: 4, fontSize: 12.5, color: "var(--color-ink-500)", lineHeight: 1.6 }}>
-                The synthetic serving layer now follows the same shape as the notebooks: cohort-date aggregation,
-                lifetime checkpoints, confidence bands, and realized values when a cohort is old enough.
-              </div>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
-              <InfoStat
-                label="Selected segment"
-                value={selectedSegmentLabel}
-              />
-              <InfoStat label="Revenue view" value={capitalizeMode(data.localFilters.revenueMode)} />
-              <InfoStat label="Day step" value={`${filters.granularityDays}d`} />
-              <InfoStat label="Grouping" value={filters.groupBy === "none" ? "Ungrouped" : filters.groupBy} />
-              <InfoStat label="Tag focus" value={filters.tag === "all" ? "All tags" : filters.tag} />
-              <InfoStat label="Date range" value={`${filters.from} to ${filters.to}`} />
-            </div>
-          </section>
+          <InfoCard label="Selected project" value={selectedProjectLabel} sub="Current acquisition slice" />
+          <InfoCard label="AppMetrica apps" value={appIds.length.toString()} sub={appIds.length ? appIds.join(", ") : "No app ids configured"} />
+          <InfoCard label="Tracked events" value={trackedEvents.length.toString()} sub={trackedEvents.length ? trackedEvents.join(", ") : "No explicit event catalog"} />
+          <InfoCard label="Spend mirrors enabled" value={spendSourcesEnabled.toString()} sub="Unity Ads + Google Ads connectors in enabled mode" />
+          <InfoCard
+            label="Latest ingestion"
+            value={latestSuccess ? formatRelativeTime(latestSuccess.finishedAt) : "Never"}
+            sub={latestFailure ? `Latest failure: ${formatRelativeTime(latestFailure.finishedAt)}` : "No failed ingestion runs in scope"}
+          />
         </section>
 
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
             gap: 1,
             background: "var(--color-border-soft)",
             border: "1px solid var(--color-border-soft)",
@@ -203,316 +164,389 @@ export default async function AcquisitionPage({
             overflow: "hidden",
           }}
         >
-          {[
-            {
-              label: `${data.comparisonSummary.leftLabel} vs ${data.comparisonSummary.rightLabel}`,
-              value: `${data.comparisonSummary.d60Lift > 0 ? "+" : ""}${data.comparisonSummary.d60Lift}%`,
-              sub: "D60 ROAS delta",
-            },
-            {
-              label: "Payback delta",
-              value: `${data.comparisonSummary.paybackDeltaDays > 0 ? "+" : ""}${data.comparisonSummary.paybackDeltaDays}d`,
-              sub: "Positive means left side pays back slower",
-            },
-            {
-              label: "Spend delta",
-              value: `${data.comparisonSummary.spendDelta > 0 ? "+" : ""}$${Math.abs(data.comparisonSummary.spendDelta).toLocaleString()}`,
-              sub: "Budget footprint between compared slices",
-            },
-          ].map((card) => (
-            <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
-              <div style={CARD_LABEL_STYLE}>{card.label}</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1.05 }}>
-                {card.value}
-              </div>
-              <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{card.sub}</div>
-            </div>
-          ))}
+          <InfoCard
+            label="Live installs · 7d"
+            value={formatInteger(installs7d)}
+            sub={trackerRows.length > 0 ? "Distinct AppMetrica installs grouped by tracker" : "No live install rows yet"}
+          />
+          <InfoCard
+            label="Organic share · 7d"
+            value={installs7d > 0 ? formatPercent(organicInstalls7d / installs7d) : "0.0%"}
+            sub="Share of installs where tracker_name is empty / organic"
+          />
+          <InfoCard
+            label="Trackers with volume"
+            value={topTrackers.length.toString()}
+            sub="Top install sources seen in the last 14 days"
+          />
+          <InfoCard
+            label="Latest install day"
+            value={trackerRows[0]?.installDate ?? "No data"}
+            sub="Newest install date visible in warehouse raw tables"
+          />
         </section>
 
-        <section style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 20 }}>
-          {data.compareCharts.map((chart) => (
-            <ComparisonConfidenceChart key={chart.id} chart={chart} />
-          ))}
-        </section>
+        {selectedBundle ? (
+          <>
+            {topTrackers.length > 0 ? (
+              <section
+                style={{
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ padding: 18 }}>
+                  <SectionHeader
+                    title="Live installs by tracker"
+                    subtitle="Direct BigQuery read from AppMetrica raw installs for the last 14 days."
+                  />
+                </div>
 
-        <section
-          style={{
-            background: "var(--color-panel-base)",
-            border: "1px solid var(--color-border-soft)",
-            borderRadius: 10,
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              padding: "16px 20px",
-              borderBottom: "1px solid var(--color-border-soft)",
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 16,
-              alignItems: "flex-start",
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Metric comparison table</div>
-              <div style={{ marginTop: 3, fontSize: 12, color: "var(--color-ink-500)", lineHeight: 1.5 }}>
-                One place to compare monetization, retention, and engagement metrics across any two chosen slices.
-              </div>
-            </div>
-            <div style={{ fontSize: 12, color: "var(--color-ink-500)", textAlign: "right", lineHeight: 1.55 }}>
-              Left: <strong style={{ color: "var(--color-ink-900)" }}>{data.comparisonSummary.leftLabel}</strong>
-              <br />
-              Right: <strong style={{ color: "var(--color-ink-900)" }}>{data.comparisonSummary.rightLabel}</strong>
-            </div>
-          </div>
-
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: "var(--color-panel-soft)", borderBottom: "1px solid var(--color-border-soft)" }}>
-                {["Category", "Metric", data.comparisonSummary.leftLabel, data.comparisonSummary.rightLabel, "Delta", "Direction"].map((column) => (
-                  <th key={column} style={HEADER_CELL_STYLE}>
-                    {column}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {data.metricComparisonRows.map((row, index) => {
-                const positive = row.delta > 0;
-                const favorable =
-                  row.preferredDirection === "higher" ? row.delta >= 0 : row.delta <= 0;
-                return (
-                  <tr
-                    key={`${row.category}-${row.label}`}
-                    style={{ borderBottom: index < data.metricComparisonRows.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}
-                  >
-                    <td style={BODY_CELL_STYLE}>
-                      <span style={{ textTransform: "capitalize", color: "var(--color-ink-500)" }}>{row.category}</span>
-                    </td>
-                    <td style={{ ...BODY_CELL_STYLE, fontWeight: 600, color: "var(--color-ink-950)" }}>{row.label}</td>
-                    <td style={BODY_CELL_STYLE}>{formatMetricValue(row.leftValue, row.unit)}</td>
-                    <td style={BODY_CELL_STYLE}>{formatMetricValue(row.rightValue, row.unit)}</td>
-                    <td
-                      style={{
-                        ...BODY_CELL_STYLE,
-                        fontWeight: 600,
-                        color: favorable
-                          ? "var(--color-success)"
-                          : positive
-                            ? "var(--color-danger)"
-                            : "var(--color-warning)",
-                      }}
-                    >
-                      {formatMetricDelta(row.delta, row.unit)}
-                    </td>
-                    <td style={BODY_CELL_STYLE}>{row.preferredDirection === "higher" ? "Higher is better" : "Lower is better"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </section>
-
-        <CohortMatrixTable rows={data.cohortMatrix} />
-
-        <section
-          style={{
-            background: "var(--color-panel-base)",
-            border: "1px solid var(--color-border-soft)",
-            borderRadius: 10,
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              padding: "16px 20px",
-              borderBottom: "1px solid var(--color-border-soft)",
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 16,
-              alignItems: "flex-start",
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Breakdown table</div>
-              <div style={{ marginTop: 3, fontSize: 12, color: "var(--color-ink-500)", lineHeight: 1.5 }}>
-                Works like a proper analytics surface: selection filters stay on top, and grouped rows reflect
-                monetization, retention, and session quality for the chosen slice instead of querying every raw
-                combination separately.
-              </div>
-            </div>
-            <div style={{ fontSize: 12, color: "var(--color-ink-500)", textAlign: "right", lineHeight: 1.55 }}>
-              Grouping:{" "}
-              <strong style={{ color: "var(--color-ink-900)" }}>
-                {filters.groupBy === "none" ? "none" : filters.groupBy}
-              </strong>
-              <br />
-              Compare:{" "}
-              <strong style={{ color: "var(--color-ink-900)" }}>
-                {data.localFilters.compareLeft} vs {data.localFilters.compareRight}
-              </strong>
-            </div>
-          </div>
-
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1380 }}>
-              <thead>
-                <tr style={{ background: "var(--color-panel-soft)", borderBottom: "1px solid var(--color-border-soft)" }}>
-                  {[
-                    "Group",
-                    "Platform",
-                    "Spend",
-                    "Installs",
-                    "Cohorts",
-                    "CPI",
-                    "Rev/user",
-                    "D30",
-                    "D60",
-                    "D120",
-                    "D7 retention",
-                    "D30 retention",
-                    "Session",
-                    "Ad share",
-                    "Payback",
-                    "Confidence",
-                  ].map((column) => (
-                    <th key={column} style={HEADER_CELL_STYLE}>
-                      {column}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data.breakdownRows.map((row, index) => {
-                  const confidence = CONFIDENCE_TONE[row.confidence];
-                  return (
-                    <tr
-                      key={`${row.dimension}-${row.label}`}
-                      style={{ borderBottom: index < data.breakdownRows.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}
-                    >
-                      <td style={BODY_CELL_STYLE}>
-                        <div style={{ fontWeight: 600, color: "var(--color-ink-950)" }}>{row.label}</div>
-                        <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>{row.dimension}</div>
-                      </td>
-                      <td style={BODY_CELL_STYLE}>{row.platform}</td>
-                      <td style={BODY_CELL_STYLE}>${row.spend.toLocaleString()}</td>
-                      <td style={BODY_CELL_STYLE}>{row.installs.toLocaleString()}</td>
-                      <td style={BODY_CELL_STYLE}>{row.cohorts}</td>
-                      <td style={BODY_CELL_STYLE}>{row.cpi.toFixed(2)}</td>
-                      <td style={{ ...BODY_CELL_STYLE, fontWeight: 600, color: "var(--color-ink-900)" }}>
-                        ${row.revenuePerUser.toFixed(2)}
-                      </td>
-                      <td style={{ ...BODY_CELL_STYLE, fontWeight: 600, color: "var(--color-ink-900)" }}>{row.d30Roas.toFixed(0)}%</td>
-                      <td style={{ ...BODY_CELL_STYLE, fontWeight: 600, color: "var(--color-ink-900)" }}>{row.d60Roas.toFixed(0)}%</td>
-                      <td style={{ ...BODY_CELL_STYLE, fontWeight: 600, color: "var(--color-ink-900)" }}>{row.d120Roas.toFixed(0)}%</td>
-                      <td style={BODY_CELL_STYLE}>{row.d7Retention.toFixed(1)}%</td>
-                      <td style={BODY_CELL_STYLE}>{row.d30Retention.toFixed(1)}%</td>
-                      <td style={BODY_CELL_STYLE}>{row.sessionMinutes.toFixed(1)}m</td>
-                      <td style={BODY_CELL_STYLE}>{row.adShare.toFixed(0)}%</td>
-                      <td style={BODY_CELL_STYLE}>{row.paybackDays}d</td>
-                      <td style={BODY_CELL_STYLE}>
-                        <span
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      {["Tracker", "Installs · 14d", "Share", "Projects"].map((column) => (
+                        <th
+                          key={column}
                           style={{
-                            display: "inline-flex",
-                            padding: "3px 8px",
-                            borderRadius: 999,
-                            background: confidence.background,
-                            color: confidence.color,
-                            fontSize: 11.5,
+                            padding: "10px 18px",
+                            textAlign: "left",
+                            fontSize: 10.5,
                             fontWeight: 600,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            color: "var(--color-ink-500)",
+                            background: "var(--color-panel-soft)",
+                            borderBottom: "1px solid var(--color-border-soft)",
                           }}
                         >
-                          {row.confidence}
+                          {column}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {topTrackers.map((row, index) => (
+                      <tr
+                        key={row.trackerName}
+                        style={{
+                          borderBottom:
+                            index < topTrackers.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                        }}
+                      >
+                        <td style={{ padding: "14px 18px", fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                          {row.trackerName}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatInteger(row.installs)}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatPercent(row.share)}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
+                          {row.projectNames}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            ) : null}
+
+            <section
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1.1fr 0.9fr",
+                gap: 20,
+              }}
+            >
+              <div
+                style={{
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ padding: 18 }}>
+                  <SectionHeader
+                    title="Connector state"
+                    subtitle="Live source configuration that feeds acquisition and spend coverage."
+                  />
+                </div>
+
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      {["Source", "Mode", "Config", "Status", "Last sync"].map((column) => (
+                        <th
+                          key={column}
+                          style={{
+                            padding: "10px 18px",
+                            textAlign: "left",
+                            fontSize: 10.5,
+                            fontWeight: 600,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            color: "var(--color-ink-500)",
+                            background: "var(--color-panel-soft)",
+                            borderBottom: "1px solid var(--color-border-soft)",
+                          }}
+                        >
+                          {column}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedBundle.sources.map((source, index) => {
+                      const tone = sourceStatusTone(source.status);
+                      return (
+                        <tr
+                          key={source.id}
+                          style={{
+                            borderBottom:
+                              index < selectedBundle.sources.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                          }}
+                        >
+                          <td style={{ padding: "14px 18px" }}>
+                            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                              {source.label}
+                            </div>
+                            <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                              {source.sourceType}
+                            </div>
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                            {source.deliveryMode}
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                            {summarizeSourceConfig(source)}
+                          </td>
+                          <td style={{ padding: "14px 18px" }}>
+                            <span
+                              style={{
+                                display: "inline-flex",
+                                padding: "3px 8px",
+                                borderRadius: 999,
+                                background: tone.background,
+                                color: tone.color,
+                                fontSize: 11.5,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {tone.label}
+                            </span>
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
+                            <div>{formatDateTime(source.lastSyncAt)}</div>
+                            <div style={{ marginTop: 2 }}>{formatRelativeTime(source.lastSyncAt)}</div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div style={{ display: "grid", gap: 20 }}>
+                <div
+                  style={{
+                    background: "var(--color-panel-base)",
+                    border: "1px solid var(--color-border-soft)",
+                    borderRadius: 10,
+                    padding: 18,
+                  }}
+                >
+                  <SectionHeader
+                    title="AppMetrica event catalog"
+                    subtitle="Real event names currently configured for this product."
+                  />
+
+                  {trackedEvents.length === 0 ? (
+                    <div style={{ fontSize: 13, color: "var(--color-ink-500)" }}>
+                      No explicit event names are configured. The connector is currently set to fetch all events.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {trackedEvents.map((eventName) => (
+                        <span
+                          key={eventName}
+                          style={{
+                            display: "inline-flex",
+                            padding: "5px 9px",
+                            borderRadius: 999,
+                            background: "var(--color-panel-soft)",
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            color: "var(--color-ink-700)",
+                          }}
+                        >
+                          {eventName}
                         </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div
+                  style={{
+                    background: "var(--color-panel-base)",
+                    border: "1px solid var(--color-border-soft)",
+                    borderRadius: 10,
+                    padding: 18,
+                  }}
+                >
+                  <SectionHeader
+                    title="Acquisition runtime"
+                    subtitle="Operational settings that currently control live backfills."
+                  />
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    {[
+                      ["GCP project", selectedBundle.project.gcpProjectId || "Not set"],
+                      ["Bucket", selectedBundle.project.gcsBucket || "Not set"],
+                      ["Raw dataset", selectedBundle.project.rawDataset],
+                      ["Lookback days", selectedBundle.project.lookbackDays.toString()],
+                      ["Initial backfill days", selectedBundle.project.initialBackfillDays.toString()],
+                      ["Refresh interval", `${selectedBundle.project.refreshIntervalHours}h`],
+                    ].map(([label, value]) => (
+                      <div
+                        key={label}
+                        style={{
+                          border: "1px solid var(--color-border-soft)",
+                          borderRadius: 8,
+                          padding: "10px 12px",
+                        }}
+                      >
+                        <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)" }}>
+                          {label}
+                        </div>
+                        <div style={{ marginTop: 6, fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                          {value}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section
+              style={{
+                background: "var(--color-panel-base)",
+                border: "1px solid var(--color-border-soft)",
+                borderRadius: 10,
+                overflow: "hidden",
+              }}
+            >
+              <div style={{ padding: 18 }}>
+                <SectionHeader
+                  title="Recent data-plane runs"
+                  subtitle="Live backfill and ingestion attempts scoped to the current project filter."
+                />
+              </div>
+
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    {["Run", "Status", "Window", "Updated", "Message"].map((column) => (
+                      <th
+                        key={column}
+                        style={{
+                          padding: "10px 18px",
+                          textAlign: "left",
+                          fontSize: 10.5,
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.06em",
+                          color: "var(--color-ink-500)",
+                          background: "var(--color-panel-soft)",
+                          borderBottom: "1px solid var(--color-border-soft)",
+                        }}
+                      >
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {dataRuns.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} style={{ padding: 18, fontSize: 13, color: "var(--color-ink-500)" }}>
+                        No ingestion runs recorded for this slice yet.
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
+                  ) : (
+                    dataRuns.slice(0, 12).map(({ run }, index) => {
+                      const tone = runStatusTone(run.status);
+                      const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
+                      return (
+                        <tr
+                          key={run.id}
+                          style={{
+                            borderBottom:
+                              index < Math.min(dataRuns.length, 12) - 1 ? "1px solid var(--color-border-soft)" : "none",
+                          }}
+                        >
+                          <td style={{ padding: "14px 18px" }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                              {run.runType}
+                            </div>
+                            <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                              {run.id.slice(0, 8)} · {run.sourceType ?? "platform"}
+                            </div>
+                          </td>
+                          <td style={{ padding: "14px 18px" }}>
+                            <span
+                              style={{
+                                display: "inline-flex",
+                                padding: "3px 8px",
+                                borderRadius: 999,
+                                background: tone.background,
+                                color: tone.color,
+                                fontSize: 11.5,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {tone.label}
+                            </span>
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                            {run.windowFrom && run.windowTo ? `${run.windowFrom} → ${run.windowTo}` : "No explicit window"}
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
+                            <div>{formatDateTime(updatedAt)}</div>
+                            <div style={{ marginTop: 2 }}>{formatRelativeTime(updatedAt)}</div>
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                            {run.message ?? "No worker message"}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </section>
+          </>
+        ) : (
+          <section
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              padding: 20,
+              fontSize: 13,
+              color: "var(--color-ink-500)",
+            }}
+          >
+            No live acquisition project matched the selected filter. Open Settings and create a project first.
+          </section>
+        )}
       </main>
     </div>
   );
-}
-
-function InfoStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div
-      style={{
-        border: "1px solid var(--color-border-soft)",
-        background: "var(--color-panel-soft)",
-        borderRadius: 8,
-        padding: "12px 13px",
-      }}
-    >
-      <div style={CARD_LABEL_STYLE}>{label}</div>
-      <div style={{ marginTop: 6, fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>{value}</div>
-    </div>
-  );
-}
-
-const CARD_LABEL_STYLE = {
-  fontSize: 10.5,
-  fontWeight: 600,
-  letterSpacing: "0.07em",
-  textTransform: "uppercase" as const,
-  color: "var(--color-ink-500)",
-  marginBottom: 8,
-};
-
-const HEADER_CELL_STYLE = {
-  padding: "10px 16px",
-  textAlign: "left" as const,
-  fontSize: 10.5,
-  fontWeight: 600,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase" as const,
-  color: "var(--color-ink-500)",
-};
-
-const BODY_CELL_STYLE = {
-  padding: "12px 16px",
-  fontSize: 13,
-  color: "var(--color-ink-700)",
-  verticalAlign: "top" as const,
-};
-
-function capitalizeMode(value: string) {
-  return value === "iap" ? "IAP revenue" : `${value.charAt(0).toUpperCase()}${value.slice(1)} revenue`;
-}
-
-function formatMetricValue(value: number, unit: string) {
-  if (unit === "$") {
-    return `$${value.toFixed(2)}`;
-  }
-
-  if (unit === "%") {
-    return `${value.toFixed(1)}%`;
-  }
-
-  if (unit === "d") {
-    return `${value.toFixed(0)}d`;
-  }
-
-  return `${value.toFixed(1)}${unit}`;
-}
-
-function formatMetricDelta(value: number, unit: string) {
-  const prefix = value > 0 ? "+" : "";
-  if (unit === "$") {
-    return `${prefix}$${value.toFixed(2)}`;
-  }
-
-  if (unit === "%") {
-    return `${prefix}${value.toFixed(1)}%`;
-  }
-
-  if (unit === "d") {
-    return `${prefix}${value.toFixed(0)}d`;
-  }
-
-  return `${prefix}${value.toFixed(1)}${unit}`;
 }

@@ -1,4 +1,4 @@
--- stg_appmetrica__sessions: сессии пользователей с длительностью
+-- stg_appmetrica__sessions: старты сессий пользователей из AppMetrica Logs API
 -- Источник: {{ source('appmetrica_raw', 'sessions') }}
 -- Grain: одна строка = одна сессия (session_id уникален)
 -- Стратегия: view
@@ -21,6 +21,7 @@ cleaned as (
         -- metrics
         cast(duration_seconds           as int64)           as duration_seconds,
         case
+            when cast(duration_seconds as int64) is null then 'unknown'
             when cast(duration_seconds as int64) < 60   then 'short'
             when cast(duration_seconds as int64) < 300  then 'medium'
             else 'long'
@@ -32,7 +33,10 @@ cleaned as (
     from source
     where session_start_datetime is not null
       and appmetrica_device_id is not null
-      and cast(duration_seconds as int64) >= 0
+      and (
+          duration_seconds is null
+          or cast(duration_seconds as int64) >= 0
+      )
 )
 
 select * from cleaned

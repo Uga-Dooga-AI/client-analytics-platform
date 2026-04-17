@@ -2,19 +2,17 @@
 AppMetrica Logs API client.
 
 Auth: APPMETRICA_TOKEN env var (OAuth token).
-Docs: https://appmetrica.yandex.ru/docs/logs-api/
+Docs: https://appmetrica.yandex.com/docs/en/mobile-api/logs/ref/
 
 Behavior:
-  - Requests the previous day's events for each app_id.
+  - Requests AppMetrica Logs API exports in JSON mode.
   - Polls for 202 Accepted (export being prepared) with exponential back-off.
-  - Streams CSV response rows as dicts.
+  - Normalizes empty strings to None for cleaner NDJSON → BigQuery loads.
   - Returns an empty iterator when APPMETRICA_TOKEN is not set (stub mode).
 """
 
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import os
 import time
@@ -39,7 +37,7 @@ _EVENT_FIELDS = [
     "application_id",
 ]
 
-_BASE_URL = "https://api.appmetrica.yandex.ru/logs/v1/export"
+_BASE_URL = "https://api.appmetrica.yandex.com/logs/v1/export"
 
 # Polling config
 _INITIAL_WAIT_S = 10
@@ -87,13 +85,20 @@ class AppMetricaClient:
             "date_dimension": "default",
             "fields": ",".join(_EVENT_FIELDS),
         }
-        if event_names:
-            params["event_name"] = ",".join(event_names)
-
         logger.info("fetch_events: app_id=%s %s → %s", app_id, date_from, date_to)
+        # AppMetrica field filters use equality semantics; passing multiple values as a
+        # comma-separated string does not create an OR filter. When multiple event names
+        # are configured, fetch the slice and filter locally.
+        if event_names and len(event_names) == 1:
+            params["event_name"] = event_names[0]
 
-        data = self._export_with_poll(resource="events", params=params)
-        yield from self._parse_csv(data)
+        rows = self._export_with_poll(endpoint="events.json", params=params)
+        allowed_names = {name for name in (event_names or []) if name}
+        for row in rows:
+            normalized = self._normalize_row(row)
+            if allowed_names and normalized.get("event_name") not in allowed_names:
+                continue
+            yield normalized
 
     def fetch_installs(
         self,
@@ -124,8 +129,9 @@ class AppMetricaClient:
         }
 
         logger.info("fetch_installs: app_id=%s %s → %s", app_id, date_from, date_to)
-        data = self._export_with_poll(resource="installations", params=params)
-        yield from self._parse_csv(data)
+        rows = self._export_with_poll(endpoint="installations.json", params=params)
+        for row in rows:
+            yield self._normalize_row(row)
 
     def fetch_sessions(
         self,
@@ -143,8 +149,8 @@ class AppMetricaClient:
             "appmetrica_device_id",
             "profile_id",
             "session_id",
-            "duration_seconds",
             "os_name",
+            "application_id",
         ]
         params = {
             "application_id": app_id,
@@ -155,23 +161,28 @@ class AppMetricaClient:
         }
 
         logger.info("fetch_sessions: app_id=%s %s → %s", app_id, date_from, date_to)
-        data = self._export_with_poll(resource="sessions", params=params)
-        yield from self._parse_csv(data)
+        rows = self._export_with_poll(endpoint="sessions_starts.json", params=params)
+        for row in rows:
+            normalized = self._normalize_row(row)
+            # AppMetrica Logs API exposes session starts, not completed session duration.
+            # Keep the column present for downstream schema compatibility.
+            normalized.setdefault("duration_seconds", None)
+            yield normalized
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _export_with_poll(self, resource: str, params: dict) -> str:
+    def _export_with_poll(self, endpoint: str, params: dict) -> list[dict]:
         """
         Call the Logs API export endpoint, polling until data is ready.
 
-        Returns the response body as a UTF-8 string (CSV).
+        Returns parsed rows from the JSON response payload.
 
         Raises:
             RuntimeError: if the export fails or max attempts exceeded.
         """
-        url = f"{_BASE_URL}/{resource}"
+        url = f"{_BASE_URL}/{endpoint}"
         headers = {"Authorization": f"OAuth {self.token}"}
 
         wait = _INITIAL_WAIT_S
@@ -179,8 +190,13 @@ class AppMetricaClient:
             resp = requests.get(url, params=params, headers=headers, timeout=60)
 
             if resp.status_code == 200:
-                logger.info("export ready: resource=%s rows≈%d bytes", resource, len(resp.content))
-                return resp.text
+                payload = resp.json()
+                rows = payload.get("data")
+                if not isinstance(rows, list):
+                    raise RuntimeError(f"Unexpected AppMetrica payload for {endpoint}: missing data list")
+
+                logger.info("export ready: endpoint=%s rows=%d", endpoint, len(rows))
+                return rows
 
             if resp.status_code == 202:
                 logger.info(
@@ -197,16 +213,19 @@ class AppMetricaClient:
                 time.sleep(retry_after)
                 continue
 
+            logger.error(
+                "AppMetrica export request failed: endpoint=%s status=%s body=%s",
+                endpoint,
+                resp.status_code,
+                resp.text[:400],
+            )
             resp.raise_for_status()
 
         raise RuntimeError(
-            f"AppMetrica export did not complete after {_MAX_ATTEMPTS} attempts: {resource}"
+            f"AppMetrica export did not complete after {_MAX_ATTEMPTS} attempts: {endpoint}"
         )
 
     @staticmethod
-    def _parse_csv(data: str) -> Iterator[dict]:
-        """Parse tab-separated CSV response into row dicts."""
-        reader = csv.DictReader(io.StringIO(data), delimiter="\t")
-        for row in reader:
-            # Replace empty strings with None for cleaner BQ loads
-            yield {k: (v if v != "" else None) for k, v in row.items()}
+    def _normalize_row(row: dict) -> dict:
+        """Replace empty strings with None for cleaner BQ loads."""
+        return {k: (v if v != "" else None) for k, v in row.items()}

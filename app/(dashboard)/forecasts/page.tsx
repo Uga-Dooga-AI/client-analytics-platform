@@ -1,22 +1,50 @@
-import { ConfidenceBandChart } from "@/components/confidence-band-chart";
-import { ForecastCombinationTracker } from "@/components/forecast-combination-tracker";
 import { TopFilterRail } from "@/components/top-filter-rail";
+import {
+  flattenRuns,
+  formatDateTime,
+  formatRelativeTime,
+  runStatusTone,
+  scopeBundles,
+} from "@/lib/dashboard-live";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
-import { getForecastRuns, getForecastCards, getForecastTrajectories } from "@/lib/data/forecasts";
-
-const STATUS_STYLE = {
-  completed: { label: "Completed", color: "var(--color-success)", bg: "#dcfce7" },
-  running: { label: "Running", color: "var(--color-signal-blue)", bg: "var(--color-signal-blue-surface)" },
-  needs_review: { label: "Review", color: "var(--color-warning)", bg: "#fef3c7" },
-};
-
-const CARD_STYLE = {
-  stable: { label: "Stable", color: "var(--color-success)", bg: "#dcfce7" },
-  converging: { label: "Converging", color: "var(--color-signal-blue)", bg: "var(--color-signal-blue-surface)" },
-  wide: { label: "Wide interval", color: "var(--color-warning)", bg: "#fef3c7" },
-};
+import { listAnalyticsProjects, listForecastCombinations } from "@/lib/platform/store";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
+
+function SectionHeader({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, color: "var(--color-ink-950)" }}>{title}</div>
+      <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-500)" }}>{subtitle}</div>
+    </div>
+  );
+}
+
+function InfoCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+}) {
+  return (
+    <div style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
+      <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-ink-500)", marginBottom: 8 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1 }}>{value}</div>
+      <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{sub}</div>
+    </div>
+  );
+}
 
 export default async function ForecastsPage({
   searchParams,
@@ -24,206 +52,321 @@ export default async function ForecastsPage({
   searchParams: SearchParamsInput;
 }) {
   const filters = parseDashboardSearchParams(await searchParams, "/forecasts");
-  const selectedProject = getProjectLabel(filters.projectKey);
-  const [visibleRuns, visibleCards, visibleTrajectories] = await Promise.all([
-    getForecastRuns({ projectKey: filters.projectKey }),
-    getForecastCards({ projectKey: filters.projectKey }),
-    getForecastTrajectories({ projectKey: filters.projectKey }),
-  ]);
+  const bundles = await listAnalyticsProjects();
+  const scopedBundles = scopeBundles(bundles, filters.projectKey);
+  const selectedProjectLabel = getProjectLabel(filters.projectKey);
+  const selectedBundle = scopedBundles[0] ?? null;
+  const recentRuns = flattenRuns(scopedBundles).filter(({ run }) =>
+    run.runType === "forecast" || run.runType === "bounds_refresh" || run.runType === "serving_refresh"
+  );
+  const combinations = selectedBundle
+    ? await listForecastCombinations(selectedBundle.project.id, 20, { includeSystem: true })
+    : [];
+  const strategy = selectedBundle?.project.settings.forecastStrategy ?? null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <TopFilterRail title="Forecasts" />
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        <main
+      <main
+        style={{
+          padding: 32,
+          display: "flex",
+          flexDirection: "column",
+          gap: 24,
+          overflowY: "auto",
+          flex: 1,
+          minWidth: 0,
+        }}
+      >
+        <section
           style={{
-            flex: 1,
-            padding: 32,
-            display: "flex",
-            flexDirection: "column",
-            gap: 24,
-            overflowY: "auto",
-            minWidth: 0,
+            display: "grid",
+            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+            gap: 1,
+            background: "var(--color-border-soft)",
+            border: "1px solid var(--color-border-soft)",
+            borderRadius: 10,
+            overflow: "hidden",
           }}
         >
-          <ForecastCombinationTracker
-            projectKey={filters.projectKey}
-            label={`${selectedProject} · forecast surface`}
-            sourcePage="/forecasts"
-            filters={{
-              from: filters.from,
-              to: filters.to,
-              platform: filters.platform,
-              segment: filters.segment,
-              groupBy: filters.groupBy,
-              tag: filters.tag,
-              granularityDays: filters.granularityDays,
-            }}
-          />
+          <InfoCard label="Selected project" value={selectedProjectLabel} sub="Current forecast control-plane slice" />
+          <InfoCard label="Precompute primary" value={strategy?.precomputePrimaryForecasts ? "On" : "Off"} sub="Project-level primary matrix warming" />
+          <InfoCard label="On-demand" value={strategy?.enableOnDemandForecasts ? "On" : "Off"} sub="Queue cold combinations when users open them" />
+          <InfoCard label="Recent combination cap" value={strategy ? strategy.recentCombinationLimit.toString() : "0"} sub="How many viewed combinations stay warm" />
+          <InfoCard label="Tracked combinations" value={combinations.length.toString()} sub="Stored warm + recent forecast slices" />
+        </section>
 
-          <section
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, 1fr)",
-              gap: 1,
-              background: "var(--color-border-soft)",
-              border: "1px solid var(--color-border-soft)",
-              borderRadius: 10,
-              overflow: "hidden",
-            }}
-          >
-            {[
-              { label: "Selected project", value: selectedProject, sub: "Forecast outputs scoped to one product" },
-              { label: "Latest model", value: "v1.2.0", sub: "Revenue and paywall forecasts" },
-              { label: "Visible runs", value: `${visibleRuns.length}`, sub: `Range ${filters.from} to ${filters.to}` },
-              { label: "Day step", value: `${filters.granularityDays}d`, sub: "Forecast charts follow dashboard cohort grouping" },
-              { label: "Mode", value: "Chart + table", sub: "Confidence intervals shown directly on chart" },
-            ].map((card) => (
-              <div key={card.label} style={{ background: "var(--color-panel-base)", padding: "18px 22px" }}>
-                <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 8 }}>
-                  {card.label}
-                </div>
-                <div style={{ fontSize: 24, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1 }}>
-                  {card.value}
-                </div>
-                <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 5 }}>{card.sub}</div>
-              </div>
-            ))}
-          </section>
+        {selectedBundle ? (
+          <>
+            <section
+              style={{
+                display: "grid",
+                gridTemplateColumns: "0.95fr 1.05fr",
+                gap: 20,
+              }}
+            >
+              <div
+                style={{
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  padding: 18,
+                }}
+              >
+                <SectionHeader
+                  title="Forecast strategy"
+                  subtitle="Real settings currently stored in the analytics control plane."
+                />
 
-          <section style={{ display: "grid", gridTemplateColumns: "1fr", gap: 20 }}>
-            {visibleTrajectories.map((trajectory) => (
-              <ConfidenceBandChart
-                key={trajectory.id}
-                title={trajectory.metric}
-                subtitle={trajectory.subtitle}
-                unit={trajectory.unit}
-                series={trajectory.series}
-              />
-            ))}
-          </section>
-
-          <section style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, overflow: "hidden" }}>
-            <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border-soft)" }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>Forecast run history</div>
-              <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>
-                Operational log scoped to {selectedProject}
-              </div>
-            </div>
-
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {["Run id", "Project", "Metric", "Status", "Generated", "Horizon", "MAE", "Coverage"].map((column) => (
-                    <th
-                      key={column}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  {[
+                    ["Countries", strategy?.primaryCountries.join(", ") || "—"],
+                    ["Segments", strategy?.primarySegments.join(", ") || "—"],
+                    ["Spend sources", strategy?.primarySpendSources.join(", ") || "—"],
+                    ["Platforms", strategy?.primaryPlatforms.join(", ") || "—"],
+                    ["Forecast horizon", `${selectedBundle.project.forecastHorizonDays}d`],
+                    ["Forecast interval", `${selectedBundle.project.forecastIntervalHours}h`],
+                    ["Bounds interval", `${selectedBundle.project.boundsIntervalHours}h`],
+                    ["Bounds path", selectedBundle.project.boundsPath || "Not set"],
+                  ].map(([label, value]) => (
+                    <div
+                      key={label}
                       style={{
-                        padding: "10px 20px",
-                        textAlign: "left",
-                        fontSize: 10.5,
-                        fontWeight: 600,
-                        letterSpacing: "0.06em",
-                        textTransform: "uppercase",
-                        color: "var(--color-ink-500)",
-                        background: "var(--color-panel-soft)",
-                        borderBottom: "1px solid var(--color-border-soft)",
+                        border: "1px solid var(--color-border-soft)",
+                        borderRadius: 8,
+                        padding: "10px 12px",
                       }}
                     >
-                      {column}
-                    </th>
+                      <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)" }}>
+                        {label}
+                      </div>
+                      <div style={{ marginTop: 6, fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                        {value}
+                      </div>
+                    </div>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRuns.map((run, index) => {
-                  const status = STATUS_STYLE[run.status];
-                  return (
-                    <tr key={run.id} style={{ borderBottom: index < visibleRuns.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
-                      <td style={{ padding: "13px 20px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, color: "var(--color-ink-700)" }}>{run.id}</td>
-                      <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-700)" }}>{run.project}</td>
-                      <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-900)" }}>{run.metric}</td>
-                      <td style={{ padding: "13px 20px" }}>
-                        <span style={{ display: "inline-flex", padding: "3px 8px", borderRadius: 999, background: status.bg, color: status.color, fontSize: 11.5, fontWeight: 600 }}>
-                          {status.label}
-                        </span>
-                      </td>
-                      <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-500)" }}>{run.generatedAt}</td>
-                      <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-700)" }}>{run.horizonDays}d</td>
-                      <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-700)" }}>{run.mae}</td>
-                      <td style={{ padding: "13px 20px", fontSize: 13, color: "var(--color-ink-700)" }}>{run.coverage}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </section>
-
-          <section style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-            {visibleCards.map((card) => {
-              const status = CARD_STYLE[card.status];
-              return (
-                <div key={card.id} style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, overflow: "hidden" }}>
-                  <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--color-border-soft)", display: "flex", justifyContent: "space-between", gap: 12 }}>
-                    <div>
-                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--color-ink-950)" }}>{card.project} · {card.metric}</div>
-                      <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 2 }}>{card.horizonLabel}</div>
-                    </div>
-                    <span style={{ alignSelf: "flex-start", padding: "3px 8px", borderRadius: 6, background: status.bg, color: status.color, fontSize: 11, fontWeight: 600 }}>
-                      {status.label}
-                    </span>
-                  </div>
-
-                  <div style={{ padding: 20 }}>
-                    <div style={{ fontSize: 12.5, color: "var(--color-ink-700)", lineHeight: 1.55 }}>{card.summary}</div>
-                    <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
-                      {card.points.map((point) => (
-                        <div key={point.date} style={{ display: "grid", gridTemplateColumns: "60px 1fr 72px", gap: 10, alignItems: "center" }}>
-                          <div style={{ fontSize: 12, fontWeight: 500, color: "var(--color-ink-700)" }}>{point.date}</div>
-                          <div style={{ fontSize: 12.5, color: "var(--color-ink-900)" }}>{point.ci}</div>
-                          <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-950)", textAlign: "right" }}>{point.value}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
                 </div>
-              );
-            })}
-          </section>
-        </main>
+              </div>
 
-        <aside
-          style={{
-            width: 280,
-            flexShrink: 0,
-            borderLeft: "1px solid var(--color-border-soft)",
-            background: "var(--color-panel-soft)",
-            padding: "24px 20px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 20,
-            overflowY: "auto",
-          }}
-        >
-          <section style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 8, padding: 14 }}>
-            <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 10 }}>
-              Why charts now
-            </div>
-            <div style={{ fontSize: 12, color: "var(--color-ink-700)", lineHeight: 1.6 }}>
-              Forecasts now render as actual time-series charts with lower and upper confidence bounds instead of only textual cards.
-            </div>
-          </section>
+              <div
+                style={{
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ padding: 18 }}>
+                  <SectionHeader
+                    title="Combination registry"
+                    subtitle="Real forecast combinations recorded from prewarm and page views."
+                  />
+                </div>
 
-          <section style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 8, padding: 14 }}>
-            <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 10 }}>
-              Publish gate
-            </div>
-            <div style={{ fontSize: 12, color: "var(--color-ink-700)", lineHeight: 1.6 }}>
-              Admin review and source freshness stay separate from the chart surface. When data-plane jobs arrive, these outputs can bind without redesigning the UI.
-            </div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      {["Label", "Source", "Views", "Last viewed", "Last forecast"].map((column) => (
+                        <th
+                          key={column}
+                          style={{
+                            padding: "10px 18px",
+                            textAlign: "left",
+                            fontSize: 10.5,
+                            fontWeight: 600,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            color: "var(--color-ink-500)",
+                            background: "var(--color-panel-soft)",
+                            borderBottom: "1px solid var(--color-border-soft)",
+                          }}
+                        >
+                          {column}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {combinations.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} style={{ padding: 18, fontSize: 13, color: "var(--color-ink-500)" }}>
+                          No forecast combinations have been recorded yet.
+                        </td>
+                      </tr>
+                    ) : (
+                      combinations.map((combination, index) => {
+                        const tone = combination.lastForecastStatus
+                          ? runStatusTone(combination.lastForecastStatus)
+                          : null;
+
+                        return (
+                          <tr
+                            key={combination.id}
+                            style={{
+                              borderBottom:
+                                index < combinations.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                            }}
+                          >
+                            <td style={{ padding: "14px 18px" }}>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                                {combination.label}
+                              </div>
+                              <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                                {combination.combinationKey}
+                              </div>
+                            </td>
+                            <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                              {combination.sourcePage ?? "manual"}
+                            </td>
+                            <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                              {combination.viewCount}
+                            </td>
+                            <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
+                              <div>{formatDateTime(combination.lastViewedAt)}</div>
+                              <div style={{ marginTop: 2 }}>{formatRelativeTime(combination.lastViewedAt)}</div>
+                            </td>
+                            <td style={{ padding: "14px 18px" }}>
+                              {tone ? (
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    padding: "3px 8px",
+                                    borderRadius: 999,
+                                    background: tone.background,
+                                    color: tone.color,
+                                    fontSize: 11.5,
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {tone.label}
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: 12, color: "var(--color-ink-500)" }}>No run yet</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section
+              style={{
+                background: "var(--color-panel-base)",
+                border: "1px solid var(--color-border-soft)",
+                borderRadius: 10,
+                overflow: "hidden",
+              }}
+            >
+              <div style={{ padding: 18 }}>
+                <SectionHeader
+                  title="Forecast-related run history"
+                  subtitle="Bounds refresh, forecast jobs, and serving publish attempts from the live control plane."
+                />
+              </div>
+
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    {["Run", "Status", "Window", "Updated", "Message"].map((column) => (
+                      <th
+                        key={column}
+                        style={{
+                          padding: "10px 18px",
+                          textAlign: "left",
+                          fontSize: 10.5,
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.06em",
+                          color: "var(--color-ink-500)",
+                          background: "var(--color-panel-soft)",
+                          borderBottom: "1px solid var(--color-border-soft)",
+                        }}
+                      >
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentRuns.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} style={{ padding: 18, fontSize: 13, color: "var(--color-ink-500)" }}>
+                        No forecast, bounds, or serving runs have been recorded yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    recentRuns.slice(0, 12).map(({ run }, index) => {
+                      const tone = runStatusTone(run.status);
+                      const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
+                      return (
+                        <tr
+                          key={run.id}
+                          style={{
+                            borderBottom:
+                              index < Math.min(recentRuns.length, 12) - 1 ? "1px solid var(--color-border-soft)" : "none",
+                          }}
+                        >
+                          <td style={{ padding: "14px 18px" }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                              {run.runType}
+                            </div>
+                            <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                              {run.id.slice(0, 8)}
+                            </div>
+                          </td>
+                          <td style={{ padding: "14px 18px" }}>
+                            <span
+                              style={{
+                                display: "inline-flex",
+                                padding: "3px 8px",
+                                borderRadius: 999,
+                                background: tone.background,
+                                color: tone.color,
+                                fontSize: 11.5,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {tone.label}
+                            </span>
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                            {run.windowFrom && run.windowTo ? `${run.windowFrom} → ${run.windowTo}` : "No explicit window"}
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
+                            <div>{formatDateTime(updatedAt)}</div>
+                            <div style={{ marginTop: 2 }}>{formatRelativeTime(updatedAt)}</div>
+                          </td>
+                          <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                            {run.message ?? "No worker message"}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </section>
+          </>
+        ) : (
+          <section
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              padding: 20,
+              fontSize: 13,
+              color: "var(--color-ink-500)",
+            }}
+          >
+            No live project matched the selected forecast scope. Open Settings and create a project first.
           </section>
-        </aside>
-      </div>
+        )}
+      </main>
     </div>
   );
 }

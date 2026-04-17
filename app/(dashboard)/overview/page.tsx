@@ -1,509 +1,114 @@
 import Link from "next/link";
 import { TopFilterRail } from "@/components/top-filter-rail";
+import {
+  countScopedRuns,
+  findLatestRun,
+  flattenRuns,
+  formatDateTime,
+  formatRelativeTime,
+  runStatusTone,
+  scopeBundles,
+  sourceStatusTone,
+  summarizeSourceConfig,
+} from "@/lib/dashboard-live";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
+import { listAccessRequests, listUsers } from "@/lib/auth/store";
+import { getLiveOverviewMetrics } from "@/lib/live-warehouse";
+import { listAnalyticsProjects } from "@/lib/platform/store";
 
-// ── Local mock data ──────────────────────────────────────────────────────────
+type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
-const KPIS = [
-  { label: "Active Experiments", value: "12", badge: "+3", badgeType: "up" as const, meta: "vs prev. period" },
-  { label: "Monitored Cohorts", value: "8", badge: null, meta: "across 3 projects" },
-  { label: "Forecast Freshness", value: "2h", badge: "OK", badgeType: "up" as const, meta: "last run successful" },
-  { label: "Anomalies Detected", value: "2", badge: "↑", badgeType: "warn" as const, meta: "needs review" },
-];
-
-const EXPERIMENTS = [
-  {
-    id: "exp-001",
-    name: "Onboarding flow v3",
-    meta: "Word Catcher · iOS · started Apr 5",
-    status: "running" as const,
-    exposures: "42 381",
-    revenueLift: "+7.2%",
-    revenueLiftDir: "positive" as const,
-    retentionLift: "+4.1%",
-    retentionLiftDir: "positive" as const,
-    ciWidth: "±3.8%",
-  },
-  {
-    id: "exp-002",
-    name: "Paywall position B",
-    meta: "2PG · Android · started Mar 28",
-    status: "running" as const,
-    exposures: "18 940",
-    revenueLift: "−1.1%",
-    revenueLiftDir: "negative" as const,
-    retentionLift: "—",
-    retentionLiftDir: "neutral" as const,
-    ciWidth: "±6.2%",
-  },
-  {
-    id: "exp-003",
-    name: "Streak reward mechanic",
-    meta: "Words in Word · iOS + Android · concluded Apr 2",
-    status: "concluded" as const,
-    exposures: "104 220",
-    revenueLift: "+12.4%",
-    revenueLiftDir: "positive" as const,
-    retentionLift: "+9.7%",
-    retentionLiftDir: "positive" as const,
-    ciWidth: "±2.1%",
-  },
-  {
-    id: "exp-004",
-    name: "Push notification timing",
-    meta: "Word Catcher · iOS · started Apr 10",
-    status: "running" as const,
-    exposures: "6 187",
-    revenueLift: "—",
-    revenueLiftDir: "neutral" as const,
-    retentionLift: "—",
-    retentionLiftDir: "neutral" as const,
-    ciWidth: "Too early",
-  },
-  {
-    id: "exp-005",
-    name: "Hard paywall test",
-    meta: "2PG · iOS · paused Apr 7",
-    status: "paused" as const,
-    exposures: "9 302",
-    revenueLift: "−4.8%",
-    revenueLiftDir: "negative" as const,
-    retentionLift: "−2.3%",
-    retentionLiftDir: "negative" as const,
-    ciWidth: "±5.9%",
-  },
-];
-
-const CI_ROWS = [
-  { name: "Onboarding v3", bandLeft: "38%", bandWidth: "24%", pointLeft: "50%", zeroLeft: "35%", value: "+7.2%", color: "var(--color-success)" },
-  { name: "Paywall B", bandLeft: "20%", bandWidth: "30%", pointLeft: "32%", zeroLeft: "35%", value: "−1.1%", color: "var(--color-danger)" },
-  { name: "Streak reward", bandLeft: "48%", bandWidth: "18%", pointLeft: "58%", zeroLeft: "35%", value: "+12.4%", color: "var(--color-success)" },
-];
-
-const FRESHNESS = [
-  { source: "AppMetrica · Word Catcher", time: "Last sync: 14 min ago", statusLabel: "OK", statusColor: "var(--color-success)" },
-  { source: "AppMetrica · Words in Word", time: "Last sync: 6 h ago", statusLabel: "Lag", statusColor: "var(--color-warning)" },
-  { source: "BigQuery · 2PG", time: "Last sync: 2 h ago", statusLabel: "OK", statusColor: "var(--color-success)" },
-  { source: "BigQuery · User Acquisition", time: "Not connected", statusLabel: "—", statusColor: "var(--color-ink-500)" },
-];
-
-// ── Sub-components ───────────────────────────────────────────────────────────
-
-function KpiStrip({
-  selectedProject,
-  visibleExperimentCount,
+function SectionHeader({
+  title,
+  subtitle,
+  href,
+  hrefLabel,
 }: {
-  selectedProject: string;
-  visibleExperimentCount: number;
-}) {
-  const kpis = [
-    { label: "Selected project", value: selectedProject === "Cross-project overview" ? "All" : selectedProject, badge: null, badgeType: "up" as const, meta: "Project-scoped operator view" },
-    { label: "Active Experiments", value: String(visibleExperimentCount), badge: null, badgeType: "up" as const, meta: "in current slice" },
-    ...KPIS.slice(1),
-  ];
-
-  return (
-    <div>
-      <SectionHead title="Platform pulse" />
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gap: 1,
-          background: "var(--color-border-soft)",
-          border: "1px solid var(--color-border-soft)",
-          borderRadius: 10,
-          overflow: "hidden",
-        }}
-      >
-        {kpis.map((kpi) => (
-          <div key={kpi.label} style={{ background: "var(--color-panel-base)", padding: "20px 24px" }}>
-            <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 8 }}>
-              {kpi.label}
-            </div>
-            <div style={{ fontSize: 32, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1 }}>
-              {kpi.value}
-            </div>
-            <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
-              {kpi.badge && (
-                <span
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    fontSize: 11,
-                    fontWeight: 600,
-                    padding: "2px 7px",
-                    borderRadius: 4,
-                    background: kpi.badgeType === "up" ? "#DCFCE7" : "#FEF3C7",
-                    color: kpi.badgeType === "up" ? "var(--color-success)" : "var(--color-warning)",
-                  }}
-                >
-                  {kpi.badge}
-                </span>
-              )}
-              {kpi.meta}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SectionHead({ title, linkHref, linkLabel }: { title: string; linkHref?: string; linkLabel?: string }) {
-  return (
-    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 16 }}>
-      <div style={{ fontSize: 15, fontWeight: 600, color: "var(--color-ink-950)" }}>{title}</div>
-      {linkHref && (
-        <Link href={linkHref} style={{ fontSize: 12, color: "var(--color-signal-blue)", fontWeight: 500, textDecoration: "none" }}>
-          {linkLabel}
-        </Link>
-      )}
-    </div>
-  );
-}
-
-const STATUS_CONFIG = {
-  running: { bg: "var(--color-signal-blue-surface)", color: "var(--color-signal-blue)", label: "● Running", border: undefined },
-  concluded: { bg: "#DCFCE7", color: "var(--color-success)", label: "✓ Concluded", border: undefined },
-  paused: { bg: "var(--color-panel-soft)", color: "var(--color-ink-500)", label: "Paused", border: "1px solid var(--color-border-strong)" },
-};
-
-const LIFT_COLOR = {
-  positive: "var(--color-success)",
-  negative: "var(--color-danger)",
-  neutral: "var(--color-ink-500)",
-};
-
-function ExperimentTable({
-  experiments,
-}: {
-  experiments: typeof EXPERIMENTS;
+  title: string;
+  subtitle?: string;
+  href?: string;
+  hrefLabel?: string;
 }) {
   return (
-    <div>
-      <SectionHead title="Experiment health" linkHref="/experiments" linkLabel="All experiments →" />
-      <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              {["Experiment", "Status", "Exposed users", "Revenue lift", "Retention lift", "CI width"].map((col) => (
-                <th
-                  key={col}
-                  style={{
-                    fontSize: 10.5,
-                    fontWeight: 600,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.06em",
-                    color: "var(--color-ink-500)",
-                    padding: "10px 24px",
-                    textAlign: "left",
-                    borderBottom: "1px solid var(--color-border-soft)",
-                    background: "var(--color-panel-soft)",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {col}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {experiments.map((exp, i) => {
-              const s = STATUS_CONFIG[exp.status];
-              return (
-                <tr key={exp.id} style={{ borderBottom: i < experiments.length - 1 ? "1px solid var(--color-border-soft)" : "none" }}>
-                  <td style={{ padding: "13px 24px" }}>
-                    <div style={{ fontWeight: 500, color: "var(--color-ink-950)", fontSize: 13.5 }}>{exp.name}</div>
-                    <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 2 }}>{exp.meta}</div>
-                  </td>
-                  <td style={{ padding: "13px 24px" }}>
-                    <span
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 5,
-                        padding: "3px 9px",
-                        borderRadius: 100,
-                        fontSize: 11.5,
-                        fontWeight: 600,
-                        background: s.bg,
-                        color: s.color,
-                        border: s.border,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {s.label}
-                    </span>
-                  </td>
-                  <td style={{ padding: "13px 24px", fontSize: 13.5, color: "var(--color-ink-900)" }}>{exp.exposures}</td>
-                  <td style={{ padding: "13px 24px", fontSize: 13.5, fontWeight: 600, color: LIFT_COLOR[exp.revenueLiftDir] }}>{exp.revenueLift}</td>
-                  <td style={{ padding: "13px 24px", fontSize: 13.5, fontWeight: 600, color: LIFT_COLOR[exp.retentionLiftDir] }}>{exp.retentionLift}</td>
-                  <td style={{ padding: "13px 24px", fontSize: 13.5, color: exp.ciWidth === "Too early" ? "var(--color-ink-500)" : "var(--color-ink-900)" }}>{exp.ciWidth}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function CiPanel() {
-  return (
-    <div>
-      <SectionHead title="Confidence intervals · top experiments" />
-      <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, padding: "16px 24px" }}>
-        <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-ink-500)", marginBottom: 8 }}>
-          Revenue lift, 95% CI
-        </div>
-        {CI_ROWS.map((row, i) => (
-          <div
-            key={row.name}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              padding: "12px 0",
-              borderBottom: i < CI_ROWS.length - 1 ? "1px solid var(--color-border-soft)" : "none",
-            }}
-          >
-            <div style={{ fontSize: 13, fontWeight: 500, color: "var(--color-ink-900)", width: 140, flexShrink: 0 }}>{row.name}</div>
-            <div style={{ flex: 1, height: 12, background: "var(--color-panel-soft)", borderRadius: 4, position: "relative" }}>
-              <div style={{ position: "absolute", left: row.zeroLeft, width: 1, height: "100%", background: "#CBD5E1" }} />
-              <div style={{ position: "absolute", left: row.bandLeft, width: row.bandWidth, height: "100%", borderRadius: 4, background: "rgba(37,99,235,0.15)" }} />
-              <div style={{ position: "absolute", left: row.pointLeft, width: 3, height: "100%", background: "var(--color-signal-blue)", borderRadius: 2 }} />
-            </div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: row.color, width: 64, textAlign: "right" }}>{row.value}</div>
-          </div>
-        ))}
-        <div
-          style={{
-            marginTop: 16,
-            height: 100,
-            background: "var(--color-panel-soft)",
-            borderRadius: 8,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            border: "1.5px dashed var(--color-border-strong)",
-          }}
-        >
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--color-ink-500)" }}>Forecast trajectory</div>
-          <div style={{ fontSize: 11, color: "#CBD5E1" }}>Connects when forecast layer is live</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AnomalyPanel() {
-  return (
-    <div>
-      <SectionHead title="Detected anomalies" />
-      <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, padding: "16px 24px" }}>
-        <div style={{ display: "flex", gap: 12, padding: "12px 0", borderBottom: "1px solid var(--color-border-soft)" }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--color-warning)", flexShrink: 0, marginTop: 5 }} />
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 500, color: "var(--color-ink-950)" }}>Paywall B: revenue guardrail at threshold</div>
-            <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>Revenue per user dropped 1.1% with CI crossing zero. Consider pausing or running longer for significance.</div>
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 12, padding: "12px 0", borderBottom: "1px solid var(--color-border-soft)" }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--color-signal-blue)", flexShrink: 0, marginTop: 5 }} />
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 500, color: "var(--color-ink-950)" }}>AppMetrica export delay — Words in Word</div>
-            <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>Ingestion lag detected: last successful batch 6h ago. No data loss confirmed. Monitoring.</div>
-          </div>
-        </div>
-        <div style={{ marginTop: 16 }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 8 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>Funnel snapshot</div>
-            <Link href="/funnels" style={{ fontSize: 12, color: "var(--color-signal-blue)", fontWeight: 500, textDecoration: "none" }}>View →</Link>
-          </div>
-          <div
-            style={{
-              height: 80,
-              background: "var(--color-panel-soft)",
-              borderRadius: 8,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-              border: "1.5px dashed var(--color-border-strong)",
-            }}
-          >
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--color-ink-500)" }}>Funnel layer</div>
-            <div style={{ fontSize: 11, color: "#CBD5E1" }}>Coming in Phase 3</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function RetentionSnapshot({ selectedProject }: { selectedProject: string }) {
-  return (
-    <div>
-      <SectionHead title={`Retention snapshot · ${selectedProject === "Cross-project overview" ? "Word Catcher" : selectedProject} D7`} linkHref="/cohorts" linkLabel="Cohorts →" />
-      <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, padding: "20px 24px" }}>
-        <div
-          style={{
-            height: 120,
-            background: "var(--color-panel-soft)",
-            borderRadius: 8,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            border: "1.5px dashed var(--color-border-strong)",
-          }}
-        >
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--color-ink-500)" }}>Retention chart</div>
-          <div style={{ fontSize: 11, color: "#CBD5E1" }}>Cohort data connecting to mart_cohort_daily</div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 16 }}>
-          {[{ v: "61%", l: "D1 retention" }, { v: "38%", l: "D7 retention" }, { v: "22%", l: "D30 retention" }].map((m) => (
-            <div key={m.l} style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: "var(--color-ink-950)" }}>{m.v}</div>
-              <div style={{ fontSize: 11, color: "var(--color-ink-500)", marginTop: 2 }}>{m.l}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PendingAreas() {
-  return (
-    <div>
-      <SectionHead title="Pending areas" />
-      <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 12 }}>
-        {[
-          { label: "User Acquisition Analytics", sub: "Not connected — waiting on source inventory" },
-          { label: "Cross-project identity graph", sub: "Requires dim_user_identity mapping table" },
-        ].map((p) => (
-          <div
-            key={p.label}
-            style={{
-              height: 80,
-              background: "var(--color-panel-soft)",
-              borderRadius: 8,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-              border: "1.5px dashed var(--color-border-strong)",
-            }}
-          >
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--color-ink-500)" }}>{p.label}</div>
-            <div style={{ fontSize: 11, color: "#CBD5E1" }}>{p.sub}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function RightRail({
-  freshness,
-}: {
-  freshness: typeof FRESHNESS;
-}) {
-  return (
-    <aside
+    <div
       style={{
-        width: 260,
-        flexShrink: 0,
-        borderLeft: "1px solid var(--color-border-soft)",
-        padding: "24px 20px",
         display: "flex",
-        flexDirection: "column",
-        gap: 24,
-        background: "var(--color-panel-soft)",
-        overflowY: "auto",
+        justifyContent: "space-between",
+        gap: 16,
+        alignItems: "baseline",
+        marginBottom: 14,
       }}
     >
       <div>
-        <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 12 }}>
-          Data freshness
-        </div>
-        {freshness.map((item) => (
-          <div
-            key={item.source}
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              justifyContent: "space-between",
-              padding: "8px 0",
-              borderBottom: "1px solid var(--color-border-soft)",
-              gap: 8,
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 12.5, fontWeight: 500, color: "var(--color-ink-900)" }}>{item.source}</div>
-              <div style={{ fontSize: 11, color: "var(--color-ink-500)" }}>{item.time}</div>
-            </div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: item.statusColor, flexShrink: 0 }}>{item.statusLabel}</div>
-          </div>
-        ))}
+        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--color-ink-950)" }}>{title}</div>
+        {subtitle ? (
+          <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-500)" }}>{subtitle}</div>
+        ) : null}
       </div>
-
-      <div>
-        <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 12 }}>
-          Forecast model
-        </div>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--color-ink-900)", background: "var(--color-panel-base)", border: "1px solid var(--color-border-strong)", borderRadius: 6, padding: "8px 12px" }}>
-          v1.2.0 · stable
-        </div>
-        <div style={{ fontSize: 11, color: "var(--color-ink-500)", marginTop: 4 }}>
-          Last run: Apr 12, 17:04 UTC<br />Next: ~19:00 UTC
-        </div>
-      </div>
-
-      <div>
-        <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 12 }}>
-          Operator notes
-        </div>
-        <div style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 8, padding: 12, fontSize: 12, color: "var(--color-ink-700)", lineHeight: 1.55 }}>
-          <div style={{ fontSize: 10.5, fontWeight: 600, color: "var(--color-ink-500)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>Apr 12, 2026</div>
-          Paywall B experiment is approaching guardrail threshold. Decision required by Apr 15 before next forecast cycle.
-        </div>
-      </div>
-
-      <div>
-        <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)", marginBottom: 12 }}>
-          Identity mapping
-        </div>
-        <div
+      {href && hrefLabel ? (
+        <Link
+          href={href}
           style={{
-            padding: "20px 12px",
-            background: "var(--color-panel-base)",
-            border: "1.5px dashed var(--color-border-strong)",
-            borderRadius: 8,
-            textAlign: "center",
             fontSize: 12,
-            color: "var(--color-ink-500)",
-            lineHeight: 1.5,
+            fontWeight: 600,
+            color: "var(--color-signal-blue)",
+            textDecoration: "none",
           }}
         >
-          dim_user_identity not yet built.<br />Cross-source user joins unavailable.
-        </div>
-      </div>
-    </aside>
+          {hrefLabel}
+        </Link>
+      ) : null}
+    </div>
   );
 }
 
-// ── Page ─────────────────────────────────────────────────────────────────────
+function KpiCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+}) {
+  return (
+    <div style={{ background: "var(--color-panel-base)", padding: "18px 20px" }}>
+      <div
+        style={{
+          fontSize: 10.5,
+          fontWeight: 600,
+          textTransform: "uppercase",
+          letterSpacing: "0.07em",
+          color: "var(--color-ink-500)",
+          marginBottom: 8,
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: "var(--color-ink-950)", lineHeight: 1 }}>
+        {value}
+      </div>
+      <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>{sub}</div>
+    </div>
+  );
+}
 
-type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
+function formatInteger(value: number) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatMoney(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function latestLiveDate(values: Array<string | null | undefined>) {
+  const filtered = values.filter((value): value is string => Boolean(value)).sort();
+  return filtered.at(-1) ?? null;
+}
 
 export default async function OverviewPage({
   searchParams,
@@ -511,50 +116,553 @@ export default async function OverviewPage({
   searchParams: SearchParamsInput;
 }) {
   const filters = parseDashboardSearchParams(await searchParams, "/overview");
-  const selectedProject = getProjectLabel(filters.projectKey);
-  const visibleExperiments =
-    filters.projectKey === "all"
-      ? EXPERIMENTS
-      : EXPERIMENTS.filter((experiment) => experiment.meta.includes(selectedProject));
-  const visibleFreshness =
-    filters.projectKey === "all"
-      ? FRESHNESS
-      : FRESHNESS.filter(
-          (item) => item.source.includes(selectedProject) || item.source.includes("User Acquisition")
-        );
+  const [bundles, users, pendingRequests] = await Promise.all([
+    listAnalyticsProjects(),
+    listUsers(),
+    listAccessRequests({ status: "pending" }),
+  ]);
+
+  const scopedBundles = scopeBundles(bundles, filters.projectKey);
+  const liveMetrics = await getLiveOverviewMetrics(scopedBundles);
+  const selectedProjectLabel = getProjectLabel(filters.projectKey);
+  const scopedSources = scopedBundles.flatMap((bundle) =>
+    bundle.sources.map((source) => ({
+      projectName: bundle.project.displayName,
+      source,
+    }))
+  );
+  const scopedRuns = flattenRuns(scopedBundles).slice(0, 10);
+  const readySources = scopedSources.filter(({ source }) => source.status === "ready").length;
+  const runningRuns = countScopedRuns(scopedBundles, (run) => run.status === "running");
+  const failedRuns = countScopedRuns(scopedBundles, (run) => run.status === "failed");
+  const latestSuccessfulRun = flattenRuns(scopedBundles).find(
+    ({ run }) => run.status === "succeeded"
+  )?.run;
+  const installs7d = liveMetrics.reduce((sum, item) => sum + item.installs7d, 0);
+  const activeDevices7d = liveMetrics.reduce((sum, item) => sum + item.activeDevices7d, 0);
+  const revenue7d = liveMetrics.reduce((sum, item) => sum + item.revenue7d, 0);
+  const latestWarehouseDate = latestLiveDate(
+    liveMetrics.flatMap((item) => [item.lastInstallDate, item.lastSessionDate, item.lastRevenueDate])
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <TopFilterRail title="Overview" />
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        <main
+      <main
+        style={{
+          padding: 32,
+          display: "flex",
+          flexDirection: "column",
+          gap: 24,
+          overflowY: "auto",
+          minWidth: 0,
+          flex: 1,
+        }}
+      >
+        <section
           style={{
-            flex: 1,
-            padding: 32,
-            display: "flex",
-            flexDirection: "column",
-            gap: 32,
-            minWidth: 0,
-            overflowY: "auto",
+            display: "grid",
+            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+            gap: 1,
+            background: "var(--color-border-soft)",
+            border: "1px solid var(--color-border-soft)",
+            borderRadius: 10,
+            overflow: "hidden",
           }}
         >
-          <KpiStrip selectedProject={selectedProject} visibleExperimentCount={visibleExperiments.length} />
-          <ExperimentTable experiments={visibleExperiments} />
+          <KpiCard
+            label="Projects in scope"
+            value={scopedBundles.length.toString()}
+            sub={selectedProjectLabel}
+          />
+          <KpiCard
+            label="Ready sources"
+            value={`${readySources}/${scopedSources.length || 0}`}
+            sub="Configured connectors with live-ready status"
+          />
+          <KpiCard
+            label="Running jobs"
+            value={runningRuns.toString()}
+            sub="Current queued/running sync work in this slice"
+          />
+          <KpiCard
+            label="Failed jobs"
+            value={failedRuns.toString()}
+            sub="Latest failed runs still visible in control plane"
+          />
+          <KpiCard
+            label="Latest success"
+            value={latestSuccessfulRun ? formatRelativeTime(latestSuccessfulRun.finishedAt) : "Never"}
+            sub={
+              latestSuccessfulRun
+                ? `${latestSuccessfulRun.runType} · ${formatDateTime(latestSuccessfulRun.finishedAt)} UTC`
+                : "No successful live runs yet"
+            }
+          />
+        </section>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-            <CiPanel />
-            <AnomalyPanel />
+        <section
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: 1,
+            background: "var(--color-border-soft)",
+            border: "1px solid var(--color-border-soft)",
+            borderRadius: 10,
+            overflow: "hidden",
+          }}
+        >
+          <KpiCard
+            label="Live installs · 7d"
+            value={formatInteger(installs7d)}
+            sub={liveMetrics.length > 0 ? "From AppMetrica raw installs in warehouse" : "No live warehouse rows yet"}
+          />
+          <KpiCard
+            label="Live active devices · 7d"
+            value={formatInteger(activeDevices7d)}
+            sub={liveMetrics.length > 0 ? "Distinct session starts in the last 7 days" : "Waiting for session data"}
+          />
+          <KpiCard
+            label="Live revenue · 7d"
+            value={formatMoney(revenue7d)}
+            sub={liveMetrics.length > 0 ? "GA4 / BigQuery export revenue sources" : "Waiting for BigQuery source reads"}
+          />
+          <KpiCard
+            label="Latest warehouse day"
+            value={latestWarehouseDate ?? "No data"}
+            sub="Newest date visible through the live warehouse readers"
+          />
+        </section>
+
+        <section
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1.25fr 0.75fr",
+            gap: 20,
+          }}
+        >
+          <div
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 18 }}>
+              <SectionHeader
+                title="Projects"
+                subtitle="Live control-plane state for the projects currently visible in the dashboard slice."
+                href="/settings"
+                hrefLabel="Open settings"
+              />
+            </div>
+
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Project", "Status", "Sources", "Latest run", "Warehouse"].map((column) => (
+                    <th
+                      key={column}
+                      style={{
+                        padding: "10px 18px",
+                        textAlign: "left",
+                        fontSize: 10.5,
+                        fontWeight: 600,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                        color: "var(--color-ink-500)",
+                        background: "var(--color-panel-soft)",
+                        borderBottom: "1px solid var(--color-border-soft)",
+                      }}
+                    >
+                      {column}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {scopedBundles.map((bundle, index) => {
+                  const latestRun = findLatestRun(bundle);
+                  const readyCount = bundle.sources.filter((source) => source.status === "ready").length;
+                  const statusTone =
+                    bundle.project.status === "live" || bundle.project.status === "ready"
+                      ? { label: bundle.project.status, color: "var(--color-success)", background: "#dcfce7" }
+                      : bundle.project.status === "syncing" || bundle.project.status === "configuring"
+                        ? { label: bundle.project.status, color: "var(--color-signal-blue)", background: "var(--color-signal-blue-surface)" }
+                        : bundle.project.status === "error"
+                          ? { label: bundle.project.status, color: "var(--color-danger)", background: "#fee2e2" }
+                          : { label: bundle.project.status, color: "var(--color-ink-700)", background: "var(--color-panel-soft)" };
+
+                  return (
+                    <tr
+                      key={bundle.project.id}
+                      style={{
+                        borderBottom:
+                          index < scopedBundles.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                      }}
+                    >
+                      <td style={{ padding: "14px 18px" }}>
+                        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                          {bundle.project.displayName}
+                        </div>
+                        <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                          {bundle.project.slug}
+                        </div>
+                      </td>
+                      <td style={{ padding: "14px 18px" }}>
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            padding: "3px 8px",
+                            borderRadius: 999,
+                            background: statusTone.background,
+                            color: statusTone.color,
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            textTransform: "capitalize",
+                          }}
+                        >
+                          {statusTone.label}
+                        </span>
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 13, color: "var(--color-ink-700)" }}>
+                        {readyCount}/{bundle.sources.length} ready
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 13, color: "var(--color-ink-700)" }}>
+                        {latestRun ? `${latestRun.runType} · ${latestRun.status}` : "No runs yet"}
+                        <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                          {latestRun
+                            ? formatDateTime(latestRun.finishedAt ?? latestRun.startedAt ?? latestRun.requestedAt)
+                            : "No timestamps"}
+                        </div>
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                        <div>{bundle.project.gcpProjectId || "Not set"}</div>
+                        <div style={{ marginTop: 2, color: "var(--color-ink-500)" }}>
+                          {bundle.project.gcsBucket || "Bucket missing"}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-            <RetentionSnapshot selectedProject={selectedProject} />
-            <PendingAreas />
-          </div>
-        </main>
+          <div
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              padding: 18,
+            }}
+          >
+            <SectionHeader
+              title="Operators"
+              subtitle="Real platform access state, not mock shell data."
+              href="/access"
+              hrefLabel="Manage access"
+            />
 
-        <RightRail freshness={visibleFreshness} />
-      </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              {[
+                {
+                  label: "Approved users",
+                  value: users.filter((user) => user.approved).length.toString(),
+                  sub: "Platform members with live access",
+                },
+                {
+                  label: "Pending requests",
+                  value: pendingRequests.length.toString(),
+                  sub: "Waiting for admin action",
+                },
+                {
+                  label: "Auto-approved owners",
+                  value: users.filter((user) => user.role === "super_admin").length.toString(),
+                  sub: "Current super-admin count",
+                },
+              ].map((item) => (
+                <div
+                  key={item.label}
+                  style={{
+                    border: "1px solid var(--color-border-soft)",
+                    borderRadius: 8,
+                    padding: "12px 14px",
+                  }}
+                >
+                  <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-ink-500)" }}>
+                    {item.label}
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: "var(--color-ink-950)" }}>
+                    {item.value}
+                  </div>
+                  <div style={{ marginTop: 4, fontSize: 11.5, color: "var(--color-ink-500)" }}>{item.sub}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 20,
+          }}
+        >
+          <div
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 18 }}>
+              <SectionHeader
+                title="Recent runs"
+                subtitle="Latest sync attempts across ingestion, bootstrap, forecast, and serving."
+              />
+            </div>
+
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Project", "Run", "Status", "Window", "Updated"].map((column) => (
+                    <th
+                      key={column}
+                      style={{
+                        padding: "10px 18px",
+                        textAlign: "left",
+                        fontSize: 10.5,
+                        fontWeight: 600,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                        color: "var(--color-ink-500)",
+                        background: "var(--color-panel-soft)",
+                        borderBottom: "1px solid var(--color-border-soft)",
+                      }}
+                    >
+                      {column}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {scopedRuns.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ padding: 18, fontSize: 13, color: "var(--color-ink-500)" }}>
+                      No live runs recorded yet for this dashboard slice.
+                    </td>
+                  </tr>
+                ) : (
+                  scopedRuns.map(({ projectName, run }, index) => {
+                    const tone = runStatusTone(run.status);
+                    const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
+                    return (
+                      <tr
+                        key={run.id}
+                        style={{
+                          borderBottom:
+                            index < scopedRuns.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                        }}
+                      >
+                        <td style={{ padding: "14px 18px", fontSize: 13, color: "var(--color-ink-900)" }}>
+                          {projectName}
+                        </td>
+                        <td style={{ padding: "14px 18px" }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                            {run.runType}
+                          </div>
+                          <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                            {run.sourceType ?? "platform"} · {run.id.slice(0, 8)}
+                          </div>
+                        </td>
+                        <td style={{ padding: "14px 18px" }}>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              padding: "3px 8px",
+                              borderRadius: 999,
+                              background: tone.background,
+                              color: tone.color,
+                              fontSize: 11.5,
+                              fontWeight: 600,
+                            }}
+                          >
+                            {tone.label}
+                          </span>
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {run.windowFrom && run.windowTo
+                            ? `${run.windowFrom} → ${run.windowTo}`
+                            : "No explicit window"}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
+                          <div>{formatDateTime(updatedAt)}</div>
+                          <div style={{ marginTop: 2 }}>{formatRelativeTime(updatedAt)}</div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 18 }}>
+              <SectionHeader
+                title="Source registry"
+                subtitle="Actual connector state by project, including live credentials, delivery mode, and sync timestamps."
+                href="/settings"
+                hrefLabel="Review connectors"
+              />
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              {scopedSources.length === 0 ? (
+                <div style={{ padding: 18, fontSize: 13, color: "var(--color-ink-500)" }}>
+                  No project sources are configured for this slice yet.
+                </div>
+              ) : (
+                scopedSources.map(({ projectName, source }, index) => {
+                  const tone = sourceStatusTone(source.status);
+                  return (
+                    <div
+                      key={source.id}
+                      style={{
+                        padding: "14px 18px",
+                        borderTop: index === 0 ? "1px solid var(--color-border-soft)" : "none",
+                        borderBottom:
+                          index < scopedSources.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                        display: "grid",
+                        gridTemplateColumns: "1.15fr 0.85fr 0.75fr",
+                        gap: 14,
+                        alignItems: "center",
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                          {projectName} · {source.label}
+                        </div>
+                        <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                          {summarizeSourceConfig(source)}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 12, color: "var(--color-ink-700)" }}>
+                        <div>Last sync: {formatDateTime(source.lastSyncAt)}</div>
+                        <div style={{ marginTop: 2, color: "var(--color-ink-500)" }}>
+                          Next sync: {formatDateTime(source.nextSyncAt)}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            padding: "3px 8px",
+                            borderRadius: 999,
+                            background: tone.background,
+                            color: tone.color,
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                          }}
+                        >
+                          {tone.label}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </section>
+
+        {liveMetrics.length > 0 ? (
+          <section
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 18 }}>
+              <SectionHeader
+                title="Live analytics by project"
+                subtitle="Direct BigQuery reads from the shared warehouse and source export datasets."
+              />
+            </div>
+
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Project", "Installs 7d", "Active devices 7d", "Revenue 7d", "Latest live date"].map((column) => (
+                    <th
+                      key={column}
+                      style={{
+                        padding: "10px 18px",
+                        textAlign: "left",
+                        fontSize: 10.5,
+                        fontWeight: 600,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                        color: "var(--color-ink-500)",
+                        background: "var(--color-panel-soft)",
+                        borderBottom: "1px solid var(--color-border-soft)",
+                      }}
+                    >
+                      {column}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {liveMetrics.map((item, index) => (
+                  <tr
+                    key={item.projectId}
+                    style={{
+                      borderBottom:
+                        index < liveMetrics.length - 1 ? "1px solid var(--color-border-soft)" : "none",
+                    }}
+                  >
+                    <td style={{ padding: "14px 18px" }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                        {item.projectName}
+                      </div>
+                      <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                        {item.projectSlug}
+                      </div>
+                    </td>
+                    <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                      {formatInteger(item.installs7d)}
+                    </td>
+                    <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                      {formatInteger(item.activeDevices7d)}
+                    </td>
+                    <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                      {formatMoney(item.revenue7d)}
+                    </td>
+                    <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                      {latestLiveDate([item.lastRevenueDate, item.lastSessionDate, item.lastInstallDate]) ?? "No data"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        ) : null}
+      </main>
     </div>
   );
 }

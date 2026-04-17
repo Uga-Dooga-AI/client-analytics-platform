@@ -1,6 +1,6 @@
-// Data source feature flag: DATA_SOURCE=mock (default) | bigquery
-// Switch to "bigquery" once GCP credentials are available (UGAA-1166, UGAA-1167).
-export const DATA_SOURCE = (process.env.DATA_SOURCE ?? "mock") as "mock" | "bigquery";
+// Live dashboard pages now read from the control plane by default.
+// Keep the flag only as a compatibility shim while the remaining data modules are migrated.
+export const DATA_SOURCE = (process.env.DATA_SOURCE ?? "bigquery") as "mock" | "bigquery";
 
 export * from "./experiments";
 export * from "./funnels";

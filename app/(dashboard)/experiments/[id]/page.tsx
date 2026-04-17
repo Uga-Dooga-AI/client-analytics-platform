@@ -27,7 +27,13 @@ export default async function ExperimentDetailPage({
   if (!experiment || !detail) {
     return (
       <div style={{ padding: 32 }}>
-        <p style={{ color: "var(--color-danger)" }}>Experiment not found: {id}</p>
+        <p style={{ color: "var(--color-ink-900)", fontWeight: 600 }}>
+          Live experiment detail is not published yet for: {id}
+        </p>
+        <p style={{ color: "var(--color-ink-500)", marginTop: 8, maxWidth: 720, lineHeight: 1.6 }}>
+          The dashboard no longer falls back to mock experiment data. This page will start rendering once
+          experiment facts and forecast outputs are written into the warehouse and serving layer.
+        </p>
         <Link href="/experiments" style={{ color: "var(--color-signal-blue)" }}>
           Back to experiments
         </Link>
