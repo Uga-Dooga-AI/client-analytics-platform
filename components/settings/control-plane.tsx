@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState, useTransition, type CSSProperties, type ReactNode } from "react";
 import type { AnalyticsRuntimeBundle } from "@/lib/platform/runtime-bundle";
 
+const RUN_HISTORY_LIMIT = 100;
+
 type SerializedSource = {
   id: string;
   projectId: string;
@@ -679,7 +681,7 @@ export function SettingsControlPlane({
       setProjects((current) =>
         current.map((project) =>
           project.project.id === selectedProjectId
-            ? { ...project, latestRuns: [run, ...project.latestRuns].slice(0, 8) }
+            ? { ...project, latestRuns: [run, ...project.latestRuns].slice(0, RUN_HISTORY_LIMIT) }
             : project
         )
       );
@@ -1067,7 +1069,7 @@ export function SettingsControlPlane({
 
             <Panel title="Run history">
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {(selectedProject?.latestRuns ?? []).slice(0, 6).map((run) => {
+                {(selectedProject?.latestRuns ?? []).slice(0, RUN_HISTORY_LIMIT).map((run) => {
                   const badge = statusBadge(run.status);
                   return (
                     <div key={run.id} style={{ border: "1px solid var(--color-border-soft)", borderRadius: 10, background: "var(--color-panel-soft)", padding: "10px 12px" }}>

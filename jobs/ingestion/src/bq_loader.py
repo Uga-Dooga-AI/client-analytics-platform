@@ -53,6 +53,40 @@ _LOAD_CONFIG = {
     "max_bad_records": 10,
 }
 
+_APPMETRICA_RESOURCE_SCHEMAS = {
+    "events": [
+        ("event_name", "STRING"),
+        ("event_datetime", "STRING"),
+        ("appmetrica_device_id", "STRING"),
+        ("profile_id", "STRING"),
+        ("event_json", "STRING"),
+        ("session_id", "STRING"),
+        ("os_name", "STRING"),
+        ("app_version_name", "STRING"),
+        ("country_iso_code", "STRING"),
+        ("city", "STRING"),
+        ("application_id", "STRING"),
+    ],
+    "installations": [
+        ("install_datetime", "STRING"),
+        ("appmetrica_device_id", "STRING"),
+        ("profile_id", "STRING"),
+        ("tracker_name", "STRING"),
+        ("country_iso_code", "STRING"),
+        ("os_name", "STRING"),
+        ("app_version_name", "STRING"),
+    ],
+    "sessions": [
+        ("session_start_datetime", "STRING"),
+        ("appmetrica_device_id", "STRING"),
+        ("profile_id", "STRING"),
+        ("session_id", "STRING"),
+        ("duration_seconds", "STRING"),
+        ("os_name", "STRING"),
+        ("application_id", "STRING"),
+    ],
+}
+
 
 class BQLoader:
     def __init__(
@@ -65,6 +99,7 @@ class BQLoader:
 
         if not self.project_id:
             logger.warning("GCP_PROJECT_ID not set — running in stub mode")
+            self._bq = None
             self._client = None
             return
 
@@ -78,6 +113,19 @@ class BQLoader:
         except ImportError:
             logger.error("google-cloud-bigquery not installed")
             raise
+
+    def appmetrica_schema(self, resource: str):
+        if self._client is None or self._bq is None:
+            return None
+
+        field_definitions = _APPMETRICA_RESOURCE_SCHEMAS.get(resource)
+        if not field_definitions:
+            raise ValueError(f"Unknown AppMetrica resource type: {resource}")
+
+        return [
+            self._bq.SchemaField(field_name, field_type)
+            for field_name, field_type in field_definitions
+        ]
 
     # ------------------------------------------------------------------
     # Public API

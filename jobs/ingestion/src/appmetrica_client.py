@@ -23,6 +23,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+_STRING_IDENTIFIER_FIELDS = {
+    "appmetrica_device_id",
+    "profile_id",
+    "session_id",
+    "application_id",
+}
+
 # Fields requested from AppMetrica Logs API (must match sources.yml columns)
 _EVENT_FIELDS = [
     "event_name",
@@ -241,7 +248,12 @@ class AppMetricaClient:
     @staticmethod
     def _normalize_row(row: dict) -> dict:
         """Replace empty strings with None for cleaner BQ loads."""
-        return {k: (v if v != "" else None) for k, v in row.items()}
+        normalized = {k: (v if v != "" else None) for k, v in row.items()}
+        for field in _STRING_IDENTIFIER_FIELDS:
+            value = normalized.get(field)
+            if value is not None:
+                normalized[field] = str(value)
+        return normalized
 
     @staticmethod
     def _should_keep_event(event_name: object, allowed_names: set[str]) -> bool:

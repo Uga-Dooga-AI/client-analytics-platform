@@ -324,7 +324,7 @@ export default async function FunnelsPage({
                         </td>
                       </tr>
                     ) : (
-                      funnelRuns.slice(0, 12).map(({ run }, index) => {
+                      funnelRuns.slice(0, 100).map(({ run }, index) => {
                         const tone = runStatusTone(run.status);
                         const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
                         return (
@@ -332,7 +332,7 @@ export default async function FunnelsPage({
                             key={run.id}
                             style={{
                               borderBottom:
-                                index < Math.min(funnelRuns.length, 12) - 1 ? "1px solid var(--color-border-soft)" : "none",
+                                index < Math.min(funnelRuns.length, 100) - 1 ? "1px solid var(--color-border-soft)" : "none",
                             }}
                           >
                             <td style={{ padding: "14px 18px" }}>

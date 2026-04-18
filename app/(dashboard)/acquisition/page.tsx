@@ -60,6 +60,10 @@ function formatPercent(value: number) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function dateToUtcMs(value: string) {
+  return new Date(`${value}T00:00:00Z`).getTime();
+}
+
 export default async function AcquisitionPage({
   searchParams,
 }: {
@@ -90,18 +94,17 @@ export default async function AcquisitionPage({
           source.config.enabled === true
       ).length
     : 0;
-  const installs7d = trackerRows
-    .filter((row) => new Date(`${row.installDate}T00:00:00Z`).getTime() >= Date.now() - 7 * 24 * 60 * 60 * 1000)
-    .reduce((sum, row) => sum + row.installs, 0);
-  const organicInstalls7d = trackerRows
-    .filter(
-      (row) =>
-        new Date(`${row.installDate}T00:00:00Z`).getTime() >= Date.now() - 7 * 24 * 60 * 60 * 1000 &&
-        row.trackerName.toLowerCase() === "organic"
-    )
+  const latestTrackerDateMs = trackerRows.reduce((max, row) => Math.max(max, dateToUtcMs(row.installDate)), 0);
+  const trackerWindowStartMs = latestTrackerDateMs > 0 ? latestTrackerDateMs - 6 * 24 * 60 * 60 * 1000 : 0;
+  const trackerRows7d = trackerRows.filter(
+    (row) => latestTrackerDateMs > 0 && dateToUtcMs(row.installDate) >= trackerWindowStartMs
+  );
+  const installs7d = trackerRows7d.reduce((sum, row) => sum + row.installs, 0);
+  const organicInstalls7d = trackerRows7d
+    .filter((row) => row.trackerName.toLowerCase() === "organic")
     .reduce((sum, row) => sum + row.installs, 0);
   const topTrackers = Array.from(
-    trackerRows.reduce((acc, row) => {
+    trackerRows7d.reduce((acc, row) => {
       const current = acc.get(row.trackerName) ?? { installs: 0, projectNames: new Set<string>() };
       current.installs += row.installs;
       current.projectNames.add(row.projectName);
@@ -169,7 +172,11 @@ export default async function AcquisitionPage({
           <InfoCard
             label="Live installs · 7d"
             value={formatInteger(installs7d)}
-            sub={trackerRows.length > 0 ? "Distinct AppMetrica installs grouped by tracker" : "No live install rows yet"}
+            sub={
+              trackerRows.length > 0
+                ? "Distinct AppMetrica installs in the latest available 7-day tracker window"
+                : "No live install rows yet"
+            }
           />
           <InfoCard
             label="Organic share · 7d"
@@ -482,7 +489,7 @@ export default async function AcquisitionPage({
                       </td>
                     </tr>
                   ) : (
-                    dataRuns.slice(0, 12).map(({ run }, index) => {
+                    dataRuns.slice(0, 100).map(({ run }, index) => {
                       const tone = runStatusTone(run.status);
                       const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
                       return (
@@ -490,7 +497,7 @@ export default async function AcquisitionPage({
                           key={run.id}
                           style={{
                             borderBottom:
-                              index < Math.min(dataRuns.length, 12) - 1 ? "1px solid var(--color-border-soft)" : "none",
+                              index < Math.min(dataRuns.length, 100) - 1 ? "1px solid var(--color-border-soft)" : "none",
                           }}
                         >
                           <td style={{ padding: "14px 18px" }}>

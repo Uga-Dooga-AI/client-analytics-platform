@@ -49,6 +49,7 @@ export type AnalyticsTriggerKind = "manual" | "scheduled" | "bootstrap";
 const DEFAULT_INITIAL_BACKFILL_DAYS = 365;
 const DEFAULT_FORECAST_HORIZON_DAYS = 730;
 const MAX_BACKFILL_CHUNK_DAYS = 3;
+const LATEST_RUNS_LIMIT = 100;
 
 export interface AnalyticsForecastStrategy {
   precomputePrimaryForecasts: boolean;
@@ -2078,7 +2079,7 @@ export async function listAnalyticsProjects(): Promise<AnalyticsProjectBundle[]>
         const latestRuns = store.runs
           .filter((run) => run.projectId === project.id)
           .sort((left, right) => right.requestedAt.getTime() - left.requestedAt.getTime())
-          .slice(0, 8);
+          .slice(0, LATEST_RUNS_LIMIT);
         return {
           project: { ...project, status: deriveProjectStatus(project, sources, latestRuns) },
           sources,
@@ -2110,7 +2111,9 @@ export async function listAnalyticsProjects(): Promise<AnalyticsProjectBundle[]>
 
   return projects.map((project) => {
     const projectSources = normalizedSources.filter((source) => source.projectId === project.id);
-    const latestRuns = normalizedRuns.filter((run) => run.projectId === project.id).slice(0, 8);
+    const latestRuns = normalizedRuns
+      .filter((run) => run.projectId === project.id)
+      .slice(0, LATEST_RUNS_LIMIT);
     return {
       project: { ...project, status: deriveProjectStatus(project, projectSources, latestRuns) },
       sources: projectSources,
@@ -2549,7 +2552,7 @@ export async function updateAnalyticsProject(
     const latestRuns = store.runs
       .filter((run) => run.projectId === existing.project.id)
       .sort((left, right) => right.requestedAt.getTime() - left.requestedAt.getTime())
-      .slice(0, 8);
+      .slice(0, LATEST_RUNS_LIMIT);
     project.status = deriveProjectStatus(project, nextSources, latestRuns);
     return { project, sources: nextSources, latestRuns };
   }

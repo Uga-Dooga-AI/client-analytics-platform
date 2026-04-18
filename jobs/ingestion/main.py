@@ -222,6 +222,7 @@ def ingest_resource(
         rows_loaded = loader.load_from_gcs(
             gcs_uri=gcs_uri,
             table=bq_table,
+            schema=loader.appmetrica_schema(resource),
             partition_date=ingest_date,
         )
 

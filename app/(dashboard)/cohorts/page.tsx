@@ -347,7 +347,7 @@ export default async function CohortsPage({
                         </td>
                       </tr>
                     ) : (
-                      relevantRuns.slice(0, 12).map(({ run }, index) => {
+                      relevantRuns.slice(0, 100).map(({ run }, index) => {
                         const tone = runStatusTone(run.status);
                         const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
                         return (
@@ -355,7 +355,7 @@ export default async function CohortsPage({
                             key={run.id}
                             style={{
                               borderBottom:
-                                index < Math.min(relevantRuns.length, 12) - 1 ? "1px solid var(--color-border-soft)" : "none",
+                                index < Math.min(relevantRuns.length, 100) - 1 ? "1px solid var(--color-border-soft)" : "none",
                             }}
                           >
                             <td style={{ padding: "14px 18px" }}>

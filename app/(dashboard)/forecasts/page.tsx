@@ -1,3 +1,4 @@
+import { ConfidenceBandChart } from "@/components/confidence-band-chart";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import {
   flattenRuns,
@@ -6,6 +7,7 @@ import {
   runStatusTone,
   scopeBundles,
 } from "@/lib/dashboard-live";
+import { getForecastCards, getForecastTrajectories } from "@/lib/data/forecasts";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
 import { listAnalyticsProjects, listForecastCombinations } from "@/lib/platform/store";
 
@@ -48,6 +50,30 @@ function InfoCard({
   );
 }
 
+function forecastCardTone(status: "stable" | "converging" | "wide") {
+  if (status === "stable") {
+    return {
+      label: "Stable",
+      background: "rgba(16, 185, 129, 0.12)",
+      color: "var(--color-success)",
+    };
+  }
+
+  if (status === "converging") {
+    return {
+      label: "Converging",
+      background: "rgba(245, 158, 11, 0.14)",
+      color: "var(--color-warning)",
+    };
+  }
+
+  return {
+    label: "Wide",
+    background: "rgba(239, 68, 68, 0.12)",
+    color: "var(--color-danger)",
+  };
+}
+
 export default async function ForecastsPage({
   searchParams,
 }: {
@@ -61,9 +87,13 @@ export default async function ForecastsPage({
   const recentRuns = flattenRuns(scopedBundles).filter(({ run }) =>
     run.runType === "forecast" || run.runType === "bounds_refresh"
   );
-  const combinations = selectedBundle
-    ? await listForecastCombinations(selectedBundle.project.id, 20, { includeSystem: true })
-    : [];
+  const [combinations, forecastCards, forecastTrajectories] = await Promise.all([
+    selectedBundle
+      ? listForecastCombinations(selectedBundle.project.id, 20, { includeSystem: true })
+      : Promise.resolve([]),
+    getForecastCards({ projectKey: filters.projectKey }),
+    getForecastTrajectories({ projectKey: filters.projectKey }),
+  ]);
   const strategy = selectedBundle?.project.settings.forecastStrategy ?? null;
 
   return (
@@ -101,6 +131,144 @@ export default async function ForecastsPage({
 
         {selectedBundle ? (
           <>
+            <section
+              style={{
+                display: "grid",
+                gap: 20,
+              }}
+            >
+              <div
+                style={{
+                  background: "var(--color-panel-base)",
+                  border: "1px solid var(--color-border-soft)",
+                  borderRadius: 10,
+                  padding: 18,
+                }}
+              >
+                <SectionHeader
+                  title="Published forecast cards"
+                  subtitle="Latest live forecast points and interval widths from the serving table."
+                />
+
+                {forecastCards.length === 0 ? (
+                  <div style={{ fontSize: 13, color: "var(--color-ink-500)", lineHeight: 1.6 }}>
+                    No published forecast points are available yet for the selected scope. The control plane can still
+                    show queued or blocked runs before the forecast serving table has been populated.
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+                      gap: 14,
+                    }}
+                  >
+                    {forecastCards.map((card) => {
+                      const tone = forecastCardTone(card.status);
+                      return (
+                        <div
+                          key={card.id}
+                          style={{
+                            border: "1px solid var(--color-border-soft)",
+                            borderRadius: 10,
+                            padding: "14px 16px",
+                            background: "var(--color-panel-soft)",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <div>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                                {card.metric}
+                              </div>
+                              <div style={{ marginTop: 4, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                                {card.project}
+                              </div>
+                            </div>
+                            <span
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                height: "fit-content",
+                                padding: "3px 8px",
+                                borderRadius: 999,
+                                background: tone.background,
+                                color: tone.color,
+                                fontSize: 11,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {tone.label}
+                            </span>
+                          </div>
+
+                          <div style={{ marginTop: 10, fontSize: 12, color: "var(--color-ink-700)", lineHeight: 1.6 }}>
+                            {card.summary}
+                          </div>
+                          <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                            {card.horizonLabel}
+                          </div>
+
+                          <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                            {card.points.map((point) => (
+                              <div
+                                key={`${card.id}-${point.date}`}
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "0.8fr 0.9fr 1.2fr",
+                                  gap: 8,
+                                  fontSize: 11.5,
+                                  color: "var(--color-ink-600)",
+                                }}
+                              >
+                                <div>{point.date}</div>
+                                <div style={{ color: "var(--color-ink-950)", fontWeight: 600 }}>{point.value.toFixed(1)}</div>
+                                <div>{point.ci}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+                  gap: 18,
+                }}
+              >
+                {forecastTrajectories.length === 0 ? (
+                  <div
+                    style={{
+                      background: "var(--color-panel-base)",
+                      border: "1px solid var(--color-border-soft)",
+                      borderRadius: 10,
+                      padding: 18,
+                      fontSize: 13,
+                      color: "var(--color-ink-500)",
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    Forecast trajectories will appear here as soon as the latest forecast job publishes
+                    `*_forecast_points_serving` rows for the selected project scope.
+                  </div>
+                ) : (
+                  forecastTrajectories.map((trajectory) => (
+                    <ConfidenceBandChart
+                      key={trajectory.id}
+                      title={`${trajectory.project} · ${trajectory.metric}`}
+                      subtitle={trajectory.subtitle}
+                      unit={trajectory.unit}
+                      series={trajectory.series}
+                    />
+                  ))
+                )}
+              </div>
+            </section>
+
             <section
               style={{
                 display: "grid",
@@ -302,7 +470,7 @@ export default async function ForecastsPage({
                       </td>
                     </tr>
                   ) : (
-                    recentRuns.slice(0, 12).map(({ run }, index) => {
+                    recentRuns.slice(0, 100).map(({ run }, index) => {
                       const tone = runStatusTone(run.status);
                       const updatedAt = run.finishedAt ?? run.startedAt ?? run.requestedAt;
                       return (
@@ -310,7 +478,7 @@ export default async function ForecastsPage({
                           key={run.id}
                           style={{
                             borderBottom:
-                              index < Math.min(recentRuns.length, 12) - 1 ? "1px solid var(--color-border-soft)" : "none",
+                              index < Math.min(recentRuns.length, 100) - 1 ? "1px solid var(--color-border-soft)" : "none",
                           }}
                         >
                           <td style={{ padding: "14px 18px" }}>
