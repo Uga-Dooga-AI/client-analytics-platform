@@ -46,11 +46,30 @@ function TopFilterRailContent({ title }: { title: string }) {
   const stitchStatus = stitchRoute ? getStitchStatusMeta(stitchRoute.status) : null;
   const projectOptions = useMemo(() => {
     const base = getProjectOptions(pathname);
-    const extras = dynamicProjects.filter(
-      (project) => !base.some((baseProject) => baseProject.key === project.key)
-    );
-    return [...base, ...extras];
-  }, [dynamicProjects, pathname]);
+    if (DEMO_ACCESS_ENABLED) {
+      const extras = dynamicProjects.filter(
+        (project) => !base.some((baseProject) => baseProject.key === project.key)
+      );
+      return [...base, ...extras];
+    }
+
+    if (dynamicProjects.length > 0) {
+      const overviewOption = base.find((project) => project.key === "all");
+      return overviewOption ? [overviewOption, ...dynamicProjects] : dynamicProjects;
+    }
+
+    const selectedOption = base.find((project) => project.key === filters.projectKey);
+    if (selectedOption) {
+      const overviewOption = base.find((project) => project.key === "all");
+      if (overviewOption && selectedOption.key !== "all") {
+        return [overviewOption, selectedOption];
+      }
+
+      return [selectedOption];
+    }
+
+    return base;
+  }, [dynamicProjects, filters.projectKey, pathname]);
   const segmentOptions = useMemo(() => {
     const options = getSegmentOptions(savedSegments, filters.projectKey).map((option) => ({
       value: option.key,
