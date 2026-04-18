@@ -189,9 +189,34 @@ def ingest_resource(
 
         # --- 2. Upload to GCS (idempotency check) ---
         if uploader.blob_exists(blob_path):
-            logger.info("[%s] GCS blob already exists — skipping upload: %s", run_id, gcs_uri)
+            existing_blob_size = uploader.blob_size(blob_path)
+            if existing_blob_size == 0:
+                logger.info(
+                    "[%s] existing GCS blob is empty — deleting before retry: %s",
+                    run_id,
+                    gcs_uri,
+                )
+                uploader.delete_blob(blob_path)
+                upload_result = uploader.upload_ndjson(rows=rows, blob_path=blob_path)
+                gcs_uri = upload_result.uri
+                if upload_result.row_count == 0:
+                    status = "skipped_empty"
+                    logger.info("[%s] no %s rows returned after empty-blob retry — skipping BQ load", run_id, resource)
+                    return
+            else:
+                logger.info(
+                    "[%s] GCS blob already exists — skipping upload: %s (size=%s bytes)",
+                    run_id,
+                    gcs_uri,
+                    existing_blob_size,
+                )
         else:
-            gcs_uri = uploader.upload_ndjson(rows=rows, blob_path=blob_path)
+            upload_result = uploader.upload_ndjson(rows=rows, blob_path=blob_path)
+            gcs_uri = upload_result.uri
+            if upload_result.row_count == 0:
+                status = "skipped_empty"
+                logger.info("[%s] no %s rows returned — skipping GCS/BQ load", run_id, resource)
+                return
 
         # --- 3. Load into BigQuery ---
         rows_loaded = loader.load_from_gcs(

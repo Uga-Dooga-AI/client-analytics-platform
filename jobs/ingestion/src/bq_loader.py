@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
-_SUCCESSFUL_RUN_STATUSES = ("success", "skipped_existing")
+_SUCCESSFUL_RUN_STATUSES = ("success", "skipped_existing", "skipped_empty")
 
 # DDL for the health-check table (created if it does not exist)
 _META_TABLE = "meta.pipeline_runs"

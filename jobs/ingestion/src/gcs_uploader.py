@@ -16,9 +16,18 @@ import json
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class UploadResult:
+    uri: str
+    row_count: int
+    size_bytes: int
+    uploaded: bool
 
 
 class GCSUploader:
@@ -66,7 +75,7 @@ class GCSUploader:
     # Public API
     # ------------------------------------------------------------------
 
-    def upload_ndjson(self, rows: Iterable[dict], blob_path: str) -> str:
+    def upload_ndjson(self, rows: Iterable[dict], blob_path: str) -> UploadResult:
         """
         Upload an iterable of dicts as newline-delimited JSON to GCS.
 
@@ -78,7 +87,7 @@ class GCSUploader:
                        e.g. "raw/appmetrica/12345/2024-01-01/events.ndjson"
 
         Returns:
-            gs:// URI of the uploaded blob.
+            UploadResult with URI, row count, byte size, and whether upload happened.
 
         Raises:
             RuntimeError: if called in stub mode (no credentials configured).
@@ -87,7 +96,7 @@ class GCSUploader:
 
         if self._client is None:
             logger.info("stub upload_ndjson: %s (no credentials)", uri)
-            return uri
+            return UploadResult(uri=uri, row_count=0, size_bytes=0, uploaded=False)
 
         row_count = 0
         with tempfile.TemporaryFile(mode="w+b") as buffer:
@@ -96,6 +105,10 @@ class GCSUploader:
                 row_count += 1
 
             size_bytes = buffer.tell()
+            if row_count == 0 or size_bytes == 0:
+                logger.info("skipping empty upload: %s", uri)
+                return UploadResult(uri=uri, row_count=row_count, size_bytes=size_bytes, uploaded=False)
+
             buffer.seek(0)
             blob = self._bucket_obj.blob(blob_path)
             blob.upload_from_file(buffer, content_type="application/x-ndjson")
@@ -105,7 +118,7 @@ class GCSUploader:
             "uploaded: %s  rows=%d  size=%.1f KB",
             uri, row_count, size_kb,
         )
-        return uri
+        return UploadResult(uri=uri, row_count=row_count, size_bytes=size_bytes, uploaded=True)
 
     def blob_exists(self, blob_path: str) -> bool:
         """Return True if the blob already exists (used for idempotency check)."""
@@ -113,6 +126,16 @@ class GCSUploader:
             return False
         blob = self._bucket_obj.blob(blob_path)
         return blob.exists()
+
+    def blob_size(self, blob_path: str) -> int | None:
+        """Return blob size in bytes when it exists."""
+        if self._client is None:
+          return None
+        blob = self._bucket_obj.blob(blob_path)
+        if not blob.exists():
+            return None
+        blob.reload()
+        return int(blob.size or 0)
 
     def delete_blob(self, blob_path: str) -> None:
         """Delete a blob (used when retrying a failed partial upload)."""

@@ -3512,6 +3512,7 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
         const projectSources = store.sources.filter((source) => source.projectId === nextRun.projectId);
         let projectRuns = store.runs.filter((run) => run.projectId === nextRun.projectId);
         const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
+        const continuationRunsToDispatch: AnalyticsSyncRunRecord[] = [];
         const continuationRun = buildBackfillContinuationRun(
           { project, sources: projectSources, latestRuns: projectRuns },
           nextRun
@@ -3519,14 +3520,20 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
         if (continuationRun && !findEquivalentPendingRun(projectRuns, continuationRun)) {
           projectRuns = [continuationRun, ...projectRuns];
           store.runs = [continuationRun, ...store.runs];
+          if (continuationRun.status === "queued") {
+            continuationRunsToDispatch.push(continuationRun);
+          }
         }
         const promotedRuns = promoteBlockedRuns(
           { project, sources: projectSources, latestRuns: projectRuns },
           projectRuns
         );
-        promotedRunsToDispatch = promotedRuns.filter(
-          (run) => run.status === "queued" && statusBeforePromotion.get(run.id) !== "queued"
-        );
+        promotedRunsToDispatch = [
+          ...continuationRunsToDispatch,
+          ...promotedRuns.filter(
+            (run) => run.status === "queued" && statusBeforePromotion.get(run.id) !== "queued"
+          ),
+        ];
         promotedDispatchBundle = { project, sources: projectSources, latestRuns: promotedRuns };
         const promotedMap = new Map(promotedRuns.map((run) => [run.id, run]));
         store.runs = store.runs.map((run) => promotedMap.get(run.id) ?? run);
@@ -3638,6 +3645,7 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
           normalizePgRun(row as Record<string, unknown>)
         );
         const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
+        const continuationRunsToDispatch: AnalyticsSyncRunRecord[] = [];
         const continuationRun = buildBackfillContinuationRun(
           { project, sources: projectSources, latestRuns: projectRuns },
           nextRun
@@ -3682,14 +3690,20 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
             ]
           );
           projectRuns = [continuationRun, ...projectRuns];
+          if (continuationRun.status === "queued") {
+            continuationRunsToDispatch.push(continuationRun);
+          }
         }
         const promotedRuns = promoteBlockedRuns(
           { project, sources: projectSources, latestRuns: projectRuns },
           projectRuns
         );
-        promotedRunsToDispatch = promotedRuns.filter(
-          (run) => run.status === "queued" && statusBeforePromotion.get(run.id) !== "queued"
-        );
+        promotedRunsToDispatch = [
+          ...continuationRunsToDispatch,
+          ...promotedRuns.filter(
+            (run) => run.status === "queued" && statusBeforePromotion.get(run.id) !== "queued"
+          ),
+        ];
         promotedDispatchBundle = { project, sources: projectSources, latestRuns: promotedRuns };
         for (const promotedRun of promotedRuns.filter((run) => run.status !== "blocked")) {
           await client.query(
