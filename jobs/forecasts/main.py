@@ -93,6 +93,8 @@ def main() -> None:
         runtime_context,
         status="running",
         message="Forecast worker is preparing mart inputs.",
+        source_type="bounds_artifacts",
+        source_status="syncing",
     )
 
     try:

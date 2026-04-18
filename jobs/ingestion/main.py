@@ -259,6 +259,8 @@ def main() -> None:
         runtime_context,
         status="running",
         message="Ingestion worker is preparing AppMetrica extraction.",
+        source_type="appmetrica_logs",
+        source_status="syncing",
     )
 
     try:
