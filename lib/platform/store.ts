@@ -48,6 +48,7 @@ export type AnalyticsTriggerKind = "manual" | "scheduled" | "bootstrap";
 
 const DEFAULT_INITIAL_BACKFILL_DAYS = 365;
 const DEFAULT_FORECAST_HORIZON_DAYS = 730;
+const MAX_BACKFILL_CHUNK_DAYS = 3;
 
 export interface AnalyticsForecastStrategy {
   precomputePrimaryForecasts: boolean;
@@ -673,6 +674,61 @@ function nextSyncAtFromHours(hours: number) {
   return new Date(Date.now() + hours * 60 * 60 * 1000);
 }
 
+function compareIsoDates(left: string, right: string) {
+  return left.localeCompare(right);
+}
+
+function addDaysToIsoDate(value: string, days: number) {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function resolveRequestedBackfillWindow(
+  bundle: AnalyticsProjectBundle,
+  windowFrom: string | null | undefined,
+  windowTo: string | null | undefined
+) {
+  if (windowFrom && windowTo) {
+    return compareIsoDates(windowFrom, windowTo) <= 0
+      ? { windowFrom, windowTo }
+      : { windowFrom: windowTo, windowTo: windowFrom };
+  }
+
+  const windowEnd = addDaysToIsoDate(new Date().toISOString().slice(0, 10), -bundle.project.lookbackDays);
+  const windowStart = addDaysToIsoDate(
+    windowEnd,
+    -Math.max(bundle.project.initialBackfillDays - 1, 0)
+  );
+
+  return { windowFrom: windowStart, windowTo: windowEnd };
+}
+
+function resolveChunkedBackfillWindow(
+  bundle: AnalyticsProjectBundle,
+  windowFrom: string | null | undefined,
+  windowTo: string | null | undefined
+) {
+  const requestedWindow = resolveRequestedBackfillWindow(bundle, windowFrom, windowTo);
+  const maxChunkWindowTo = addDaysToIsoDate(
+    requestedWindow.windowFrom,
+    Math.max(MAX_BACKFILL_CHUNK_DAYS - 1, 0)
+  );
+
+  return {
+    windowFrom: requestedWindow.windowFrom,
+    windowTo:
+      compareIsoDates(maxChunkWindowTo, requestedWindow.windowTo) < 0
+        ? maxChunkWindowTo
+        : requestedWindow.windowTo,
+    payload: {
+      backfillRequestedWindowFrom: requestedWindow.windowFrom,
+      backfillRequestedWindowTo: requestedWindow.windowTo,
+      backfillChunkDays: MAX_BACKFILL_CHUNK_DAYS,
+    },
+  };
+}
+
 function secretHintForValue(sourceType: AnalyticsSourceType, value?: string) {
   if (!value) {
     return null;
@@ -710,7 +766,7 @@ function deriveSourceRecord(source: AnalyticsSourceRecord): AnalyticsSourceRecor
   if (source.sourceType === "bigquery_export") {
     const hasProject = typeof source.config.sourceProjectId === "string" && source.config.sourceProjectId.length > 0;
     const hasDataset = typeof source.config.sourceDataset === "string" && source.config.sourceDataset.length > 0;
-    const status = hasProject && hasDataset && source.secretPresent ? "ready" : hasProject && hasDataset ? "configured" : "missing_credentials";
+    const status = source.secretPresent ? "ready" : hasProject && hasDataset ? "configured" : "missing_credentials";
     return { ...source, status };
   }
 
@@ -3005,8 +3061,21 @@ function latestSuccessfulRun(
     .sort((left, right) => {
       const leftFinishedAt = left.finishedAt?.getTime() ?? 0;
       const rightFinishedAt = right.finishedAt?.getTime() ?? 0;
-      return rightFinishedAt - leftFinishedAt;
+      if (leftFinishedAt !== rightFinishedAt) {
+        return rightFinishedAt - leftFinishedAt;
+      }
+
+      return right.requestedAt.getTime() - left.requestedAt.getTime();
     })[0] ?? null;
+}
+
+function compareRunFreshness(left: AnalyticsSyncRunRecord, right: AnalyticsSyncRunRecord) {
+  const finishedDelta = (left.finishedAt?.getTime() ?? 0) - (right.finishedAt?.getTime() ?? 0);
+  if (finishedDelta !== 0) {
+    return finishedDelta;
+  }
+
+  return left.requestedAt.getTime() - right.requestedAt.getTime();
 }
 
 function hasSuccessfulDependency(bundle: AnalyticsProjectBundle, runType: AnalyticsRunType) {
@@ -3029,7 +3098,7 @@ function hasSuccessfulDependency(bundle: AnalyticsProjectBundle, runType: Analyt
       return true;
     }
 
-    return latestBoundsRefresh.finishedAt.getTime() >= latestSourceRefresh.finishedAt.getTime();
+    return compareRunFreshness(latestBoundsRefresh, latestSourceRefresh) >= 0;
   }
 
   const dependencies = runDependencies(runType);
@@ -3074,6 +3143,68 @@ function buildRunMessage(
   return input.runType === "backfill"
     ? `Initial backfill window queued for ${bundle.project.initialBackfillDays} days.`
     : `${input.runType.replace(/_/g, " ")} queued from the admin control plane.`;
+}
+
+function buildBackfillContinuationRun(
+  bundle: AnalyticsProjectBundle,
+  currentRun: AnalyticsSyncRunRecord
+) {
+  if (currentRun.runType !== "backfill" || !currentRun.windowTo) {
+    return null;
+  }
+
+  const requestedWindowTo =
+    typeof currentRun.payload.backfillRequestedWindowTo === "string"
+      ? currentRun.payload.backfillRequestedWindowTo
+      : currentRun.windowTo;
+
+  if (compareIsoDates(currentRun.windowTo, requestedWindowTo) >= 0) {
+    return null;
+  }
+
+  const nextChunk = resolveChunkedBackfillWindow(
+    bundle,
+    addDaysToIsoDate(currentRun.windowTo, 1),
+    requestedWindowTo
+  );
+  const requiredSources = requiredSourceStatusesForRun(bundle, "backfill");
+  const missing = requiredSources.filter((sourceType) => {
+    const source = bundle.sources.find((entry) => entry.sourceType === sourceType);
+    return !source || source.status !== "ready";
+  });
+  const blockingRun =
+    activeProjectRuns(bundle).find((run) => run.runType !== "bootstrap") ?? null;
+  const status: AnalyticsRunStatus =
+    missing.length > 0 ? "waiting_credentials" : blockingRun ? "blocked" : "queued";
+
+  return {
+    id: randomUUID(),
+    projectId: bundle.project.id,
+    runType: "backfill" as const,
+    triggerKind: currentRun.triggerKind,
+    sourceType: requiredSources[0] ?? null,
+    status,
+    requestedBy: currentRun.requestedBy,
+    requestedAt: new Date(),
+    startedAt: null,
+    finishedAt: null,
+    windowFrom: nextChunk.windowFrom,
+    windowTo: nextChunk.windowTo,
+    message:
+      status === "queued"
+        ? `Backfill continuation queued for ${nextChunk.windowFrom} → ${nextChunk.windowTo}.`
+        : status === "waiting_credentials"
+          ? `Waiting for ${missing.join(", ")} configuration before backfill continuation can start.`
+          : "Waiting for the current data run to release the backfill lane.",
+    payload: {
+      requiredSources,
+      projectSlug: bundle.project.slug,
+      dependencies: [],
+      ...currentRun.payload,
+      ...nextChunk.payload,
+      backfillContinuation: true,
+    },
+  } satisfies AnalyticsSyncRunRecord;
 }
 
 function promoteBlockedRuns(
@@ -3163,6 +3294,15 @@ export async function requestAnalyticsSync(
             ? "queued"
             : "blocked";
 
+    const chunkedBackfillWindow =
+      runType === "backfill"
+        ? resolveChunkedBackfillWindow(
+            bundle,
+            overrides?.windowFrom ?? input.windowFrom ?? null,
+            overrides?.windowTo ?? input.windowTo ?? null
+          )
+        : null;
+
     return {
       id: randomUUID(),
       projectId: bundle.project.id,
@@ -3174,17 +3314,19 @@ export async function requestAnalyticsSync(
       requestedAt: new Date(),
       startedAt: null,
       finishedAt: null,
-      windowFrom: overrides?.windowFrom ?? input.windowFrom ?? null,
-      windowTo: overrides?.windowTo ?? input.windowTo ?? null,
+      windowFrom:
+        chunkedBackfillWindow?.windowFrom ?? overrides?.windowFrom ?? input.windowFrom ?? null,
+      windowTo:
+        chunkedBackfillWindow?.windowTo ?? overrides?.windowTo ?? input.windowTo ?? null,
       message: buildRunMessage(bundle, input, status, requiredSources, missing, blockingRun),
       payload: {
         requiredSources,
         projectSlug: bundle.project.slug,
         dependencies: runDependencies(runType),
+        ...(chunkedBackfillWindow?.payload ?? {}),
         ...input.payload,
         ...overrides?.payload,
       },
-      ...overrides,
     };
   };
 
@@ -3368,14 +3510,22 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
       const project = store.projects.find((entry) => entry.id === nextRun.projectId);
       if (project) {
         const projectSources = store.sources.filter((source) => source.projectId === nextRun.projectId);
-        const projectRuns = store.runs.filter((run) => run.projectId === nextRun.projectId);
+        let projectRuns = store.runs.filter((run) => run.projectId === nextRun.projectId);
+        const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
+        const continuationRun = buildBackfillContinuationRun(
+          { project, sources: projectSources, latestRuns: projectRuns },
+          nextRun
+        );
+        if (continuationRun && !findEquivalentPendingRun(projectRuns, continuationRun)) {
+          projectRuns = [continuationRun, ...projectRuns];
+          store.runs = [continuationRun, ...store.runs];
+        }
         const promotedRuns = promoteBlockedRuns(
           { project, sources: projectSources, latestRuns: projectRuns },
           projectRuns
         );
-        const previousById = new Map(projectRuns.map((run) => [run.id, run.status]));
         promotedRunsToDispatch = promotedRuns.filter(
-          (run) => run.status === "queued" && previousById.get(run.id) !== "queued"
+          (run) => run.status === "queued" && statusBeforePromotion.get(run.id) !== "queued"
         );
         promotedDispatchBundle = { project, sources: projectSources, latestRuns: promotedRuns };
         const promotedMap = new Map(promotedRuns.map((run) => [run.id, run]));
@@ -3484,16 +3634,61 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
           `SELECT * FROM analytics_sync_runs WHERE project_id = $1 ORDER BY requested_at DESC`,
           [nextRun.projectId]
         );
-        const projectRuns = projectRunsResult.rows.map((row) =>
+        let projectRuns = projectRunsResult.rows.map((row) =>
           normalizePgRun(row as Record<string, unknown>)
         );
+        const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
+        const continuationRun = buildBackfillContinuationRun(
+          { project, sources: projectSources, latestRuns: projectRuns },
+          nextRun
+        );
+        if (continuationRun && !findEquivalentPendingRun(projectRuns, continuationRun)) {
+          await client.query(
+            `
+              INSERT INTO analytics_sync_runs (
+                id,
+                project_id,
+                run_type,
+                trigger_kind,
+                source_type,
+                status,
+                requested_by,
+                requested_at,
+                started_at,
+                finished_at,
+                window_from,
+                window_to,
+                message,
+                payload
+              )
+              VALUES (
+                $1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13::jsonb
+              )
+            `,
+            [
+              continuationRun.id,
+              continuationRun.projectId,
+              continuationRun.runType,
+              continuationRun.triggerKind,
+              continuationRun.sourceType,
+              continuationRun.status,
+              continuationRun.requestedBy,
+              continuationRun.startedAt,
+              continuationRun.finishedAt,
+              continuationRun.windowFrom,
+              continuationRun.windowTo,
+              continuationRun.message,
+              JSON.stringify(continuationRun.payload),
+            ]
+          );
+          projectRuns = [continuationRun, ...projectRuns];
+        }
         const promotedRuns = promoteBlockedRuns(
           { project, sources: projectSources, latestRuns: projectRuns },
           projectRuns
         );
-        const previousById = new Map(projectRuns.map((run) => [run.id, run.status]));
         promotedRunsToDispatch = promotedRuns.filter(
-          (run) => run.status === "queued" && previousById.get(run.id) !== "queued"
+          (run) => run.status === "queued" && statusBeforePromotion.get(run.id) !== "queued"
         );
         promotedDispatchBundle = { project, sources: projectSources, latestRuns: promotedRuns };
         for (const promotedRun of promotedRuns.filter((run) => run.status !== "blocked")) {

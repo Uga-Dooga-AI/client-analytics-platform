@@ -228,7 +228,7 @@ export default async function OverviewPage({
           <KpiCard
             label="Live revenue · 7d"
             value={formatMoney(revenue7d)}
-            sub={liveMetrics.length > 0 ? "GA4 / BigQuery export revenue sources" : "Waiting for BigQuery source reads"}
+            sub={liveMetrics.length > 0 ? "Parsed from AppMetrica raw revenue events in warehouse" : "Waiting for revenue events in warehouse"}
           />
           <KpiCard
             label="Latest warehouse day"

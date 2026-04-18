@@ -42,7 +42,6 @@ type BigQueryQueryResponse = {
 export type ProjectQueryContext = {
   bundle: AnalyticsProjectBundle;
   serviceAccount: BigQueryServiceAccount;
-  source: BigQuerySourceConfig;
   warehouseProjectId: string;
   location: string;
   rawEventsTable: string;
@@ -331,13 +330,8 @@ export async function loadBigQueryContexts(
   const contexts = new Map<string, ProjectQueryContext>();
 
   for (const bundle of bundles) {
-    const bigquerySource = bundle.sources.find((source) => source.sourceType === "bigquery_export");
-    const sourceProjectId =
-      typeof bigquerySource?.config.sourceProjectId === "string" ? bigquerySource.config.sourceProjectId : "";
-    const sourceDataset =
-      typeof bigquerySource?.config.sourceDataset === "string" ? bigquerySource.config.sourceDataset : "";
     const ciphertext = byProjectId.get(bundle.project.id);
-    if (!ciphertext || !sourceProjectId || !sourceDataset || !bundle.project.gcpProjectId) {
+    if (!ciphertext || !bundle.project.gcpProjectId) {
       continue;
     }
 
@@ -358,10 +352,6 @@ export async function loadBigQueryContexts(
         client_email: parsed.client_email,
         private_key: parsed.private_key,
         token_uri: parsed.token_uri,
-      },
-      source: {
-        sourceProjectId,
-        sourceDataset,
       },
       warehouseProjectId: bundle.project.gcpProjectId,
       location: inferWarehouseLocation(bundle.project.settings.provisioningRegion),
@@ -410,25 +400,16 @@ export async function getLiveOverviewMetrics(bundles: AnalyticsProjectBundle[]) 
               CAST(MAX(event_date) AS STRING) AS last_revenue_date
             FROM (
               SELECT
-                DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date,
+                DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) AS event_date,
                 COALESCE(
-                  (
-                    SELECT COALESCE(
-                      ep.value.double_value,
-                      ep.value.float_value,
-                      SAFE_CAST(ep.value.int_value AS FLOAT64),
-                      SAFE_CAST(ep.value.string_value AS FLOAT64)
-                    )
-                    FROM UNNEST(event_params) ep
-                    WHERE ep.key = 'revenue'
-                    LIMIT 1
-                  ),
-                  SAFE_CAST(event_value_in_usd AS FLOAT64),
+                  SAFE_CAST(JSON_VALUE(event_json, '$.price') AS FLOAT64),
+                  SAFE_CAST(JSON_VALUE(event_json, '$.revenue') AS FLOAT64),
+                  SAFE_CAST(JSON_VALUE(event_json, '$.value') AS FLOAT64),
                   0
                 ) AS revenue_value
-              FROM \`${context.source.sourceProjectId}.${context.source.sourceDataset}.events_*\`
-              WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY))
-                                      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+              FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
+              WHERE DATE(SAFE_CAST(event_datetime AS TIMESTAMP))
+                BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND CURRENT_DATE()
                 AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
             )
           )
