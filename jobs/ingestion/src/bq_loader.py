@@ -192,7 +192,24 @@ class BQLoader:
         )
         logger.info("BQ load job started: %s → %s", gcs_uri, destination)
 
-        load_job.result()  # blocks until complete
+        try:
+            load_job.result()  # blocks until complete
+        except Exception as error:
+            if self._should_rebuild_appmetrica_table(table, schema, error):
+                logger.warning(
+                    "BQ schema drift detected for %s; rebuilding raw AppMetrica table and retrying load once.",
+                    destination,
+                )
+                self._rebuild_appmetrica_table(table, schema)
+                load_job = self._client.load_table_from_uri(
+                    gcs_uri,
+                    dest_ref,
+                    job_config=job_config,
+                )
+                logger.info("BQ load retry started after table rebuild: %s → %s", gcs_uri, destination)
+                load_job.result()
+            else:
+                raise
 
         dest_table = self._client.get_table(dest_ref)
         rows = load_job.output_rows
@@ -257,6 +274,51 @@ class BQLoader:
             logger.error("Failed to write meta.pipeline_runs: %s", errors)
         else:
             logger.info("meta.pipeline_runs: recorded run_id=%s status=%s", run_id, status)
+
+    def _should_rebuild_appmetrica_table(self, table: str, schema: list | None, error: Exception) -> bool:
+        if self._client is None or self._bq is None or not schema:
+            return False
+
+        if "_appmetrica_" not in table:
+            return False
+
+        message = str(error)
+        return "Provided Schema does not match Table" in message and "has changed type from" in message
+
+    def _rebuild_appmetrica_table(self, table: str, schema: list) -> None:
+        if self._client is None or self._bq is None:
+            raise RuntimeError("BigQuery client is unavailable.")
+
+        source_table_id = f"{self.project_id}.{self.dataset}.{table}"
+        backup_suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        backup_table_id = f"{self.project_id}.{self.dataset}.{table}__legacy_{backup_suffix}"
+
+        logger.warning("Creating raw-table backup before schema rebuild: %s → %s", source_table_id, backup_table_id)
+        copy_job = self._client.copy_table(source_table_id, backup_table_id)
+        copy_job.result()
+
+        self._client.delete_table(source_table_id, not_found_ok=True)
+
+        replacement = self._bq.Table(source_table_id, schema=schema)
+        replacement.time_partitioning = self._bq.TimePartitioning(
+            type_=self._bq.TimePartitioningType.DAY
+        )
+        self._client.create_table(replacement)
+
+        column_names = [field.name for field in schema]
+        select_clause = ",\n                ".join(
+            f"SAFE_CAST(`{field.name}` AS {field.field_type}) AS `{field.name}`"
+            for field in schema
+        )
+        insert_sql = f"""
+            INSERT INTO `{source_table_id}` ({", ".join(f"`{name}`" for name in column_names)})
+            SELECT
+                {select_clause}
+            FROM `{backup_table_id}`
+        """
+        logger.warning("Rehydrating rebuilt raw table from backup: %s", source_table_id)
+        query_job = self._client.query(insert_sql)
+        query_job.result()
 
     def has_successful_slice(
         self,
