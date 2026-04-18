@@ -198,6 +198,62 @@ describe("analytics run orchestration", () => {
     expect(backfillRun.status).toBe("queued");
   });
 
+  it("allows retrying bounds refresh after bounds artifacts were marked error by a failed run", async () => {
+    const {
+      createAnalyticsProject,
+      requestAnalyticsSync,
+      updateAnalyticsSyncRun,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "bounds-retry",
+        displayName: "Bounds Retry",
+        autoBootstrapOnCreate: false,
+        initialBackfillDays: 1,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const backfillRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "backfill",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    await updateAnalyticsSyncRun(backfillRun.id, {
+      status: "succeeded",
+      sourceType: "appmetrica_logs",
+      message: "Backfill completed in test.",
+    });
+
+    const failedBoundsRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "bounds_refresh",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    expect(failedBoundsRun.status).toBe("queued");
+
+    await updateAnalyticsSyncRun(failedBoundsRun.id, {
+      status: "failed",
+      sourceType: "bounds_artifacts",
+      message: "Bounds refresh failed in test.",
+    });
+
+    const retriedBoundsRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "bounds_refresh",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    expect(retriedBoundsRun.status).toBe("queued");
+  });
+
   it("chunks long backfills while allowing bounds and forecast runs to start from the latest successful source slice", async () => {
     const {
       createAnalyticsProject,

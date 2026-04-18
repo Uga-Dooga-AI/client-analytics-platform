@@ -2942,7 +2942,7 @@ function requiredSourceStatusesForRun(bundle: AnalyticsProjectBundle, runType: A
   }
 
   if (runType === "bounds_refresh") {
-    return ["bigquery_export", "bounds_artifacts"] as AnalyticsSourceType[];
+    return ["bigquery_export"] as AnalyticsSourceType[];
   }
 
   if (runType === "forecast") {
