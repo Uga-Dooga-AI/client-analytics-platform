@@ -36,10 +36,17 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _request_url(path: str) -> str:
+    normalized = str(path).strip()
+    if normalized.startswith(("http://", "https://")):
+        return normalized
+    return f"{_base_url()}{normalized}"
+
+
 def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     response = requests.request(
         method,
-        f"{_base_url()}{path}",
+        _request_url(path),
         headers=_headers(),
         json=payload,
         timeout=REQUEST_TIMEOUT_S,

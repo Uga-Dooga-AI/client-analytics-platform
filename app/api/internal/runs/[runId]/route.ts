@@ -61,7 +61,10 @@ function parseSourceType(value: unknown) {
     : undefined;
 }
 
-function serializeRunContext(context: NonNullable<Awaited<ReturnType<typeof getAnalyticsRunContext>>>) {
+function serializeRunContext(
+  context: NonNullable<Awaited<ReturnType<typeof getAnalyticsRunContext>>>,
+  baseUrl: string
+) {
   return {
     run: {
       ...context.run,
@@ -69,7 +72,9 @@ function serializeRunContext(context: NonNullable<Awaited<ReturnType<typeof getA
       startedAt: context.run.startedAt?.toISOString() ?? null,
       finishedAt: context.run.finishedAt?.toISOString() ?? null,
     },
-    runtimeBundle: buildAnalyticsRuntimeBundle(context.bundle),
+    runtimeBundle: buildAnalyticsRuntimeBundle(context.bundle, {
+      baseUrl,
+    }),
   };
 }
 
@@ -88,7 +93,7 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  return NextResponse.json(serializeRunContext(context));
+  return NextResponse.json(serializeRunContext(context, request.nextUrl.origin));
 }
 
 export async function PATCH(
