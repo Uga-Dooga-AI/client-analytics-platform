@@ -67,6 +67,16 @@ def should_anchor_history_window(runtime_context) -> bool:
 
 
 def resolve_metric_list(config: dict) -> list[str]:
+    env_override = (
+        os.environ.get("ANALYTICS_FORECAST_METRICS")
+        or os.environ.get("FORECAST_METRICS")
+        or ""
+    ).strip()
+    if env_override:
+        metrics = [metric.strip() for metric in env_override.split(",") if metric.strip()]
+        if metrics:
+            return metrics
+
     forecast_cfg = config.get("forecast", {})
     metrics = forecast_cfg.get("metrics")
     if isinstance(metrics, list):
