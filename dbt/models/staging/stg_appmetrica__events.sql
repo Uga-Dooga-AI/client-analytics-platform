@@ -18,8 +18,8 @@ deduped as (
             cast(appmetrica_device_id as string),
             cast(event_datetime as timestamp),
             cast(event_name as string),
-            cast(coalesce(session_id, '') as string),
-            cast(coalesce(event_json, '') as string)
+            coalesce(cast(session_id as string), ''),
+            coalesce(cast(event_json as string), '')
         order by cast(event_datetime as timestamp) desc
     ) = 1
 ),
@@ -28,7 +28,7 @@ cleaned as (
     select
         -- identity
         cast(appmetrica_device_id as string)                as device_id,
-        cast(coalesce(profile_id, '')  as string)           as user_id,
+        coalesce(cast(profile_id as string), '')            as user_id,
         cast(application_id            as string)           as app_id,
 
         -- event

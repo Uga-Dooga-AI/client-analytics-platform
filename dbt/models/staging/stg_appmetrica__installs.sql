@@ -16,11 +16,11 @@ deduped as (
         partition by
             cast(appmetrica_device_id as string),
             cast(install_datetime as timestamp),
-            cast(coalesce(tracker_name, '') as string),
-            cast(coalesce(profile_id, '') as string),
-            cast(coalesce(os_name, '') as string),
-            cast(coalesce(country_iso_code, '') as string),
-            cast(coalesce(app_version_name, '') as string)
+            coalesce(cast(tracker_name as string), ''),
+            coalesce(cast(profile_id as string), ''),
+            coalesce(cast(os_name as string), ''),
+            coalesce(cast(country_iso_code as string), ''),
+            coalesce(cast(app_version_name as string), '')
         order by cast(install_datetime as timestamp) desc
     ) = 1
 ),
@@ -29,7 +29,7 @@ cleaned as (
     select
         -- identity
         cast(appmetrica_device_id   as string)              as device_id,
-        cast(coalesce(profile_id, '') as string)            as user_id,
+        coalesce(cast(profile_id as string), '')            as user_id,
 
         -- install event
         cast(install_datetime       as timestamp)           as installed_at,

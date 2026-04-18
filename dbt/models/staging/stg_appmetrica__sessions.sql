@@ -33,7 +33,7 @@ cleaned as (
     select
         -- identity
         cast(appmetrica_device_id       as string)          as device_id,
-        cast(coalesce(profile_id, '')   as string)          as user_id,
+        coalesce(cast(profile_id as string), '')            as user_id,
 
         -- session
         cast(session_id                 as string)          as session_id,
