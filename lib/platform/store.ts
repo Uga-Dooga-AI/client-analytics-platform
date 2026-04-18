@@ -2979,6 +2979,33 @@ function activeProjectRuns(bundle: AnalyticsProjectBundle) {
   return bundle.latestRuns.filter((run) => run.status === "queued" || run.status === "running");
 }
 
+function activeRunBlocksCandidate(
+  activeRun: AnalyticsSyncRunRecord,
+  candidateRunType: AnalyticsRunType
+) {
+  if (activeRun.status !== "queued" && activeRun.status !== "running") {
+    return false;
+  }
+
+  if (candidateRunType === "bounds_refresh") {
+    return (
+      activeRun.runType === "bounds_refresh" ||
+      activeRun.runType === "forecast" ||
+      activeRun.runType === "serving_refresh"
+    );
+  }
+
+  if (candidateRunType === "forecast") {
+    return (
+      activeRun.runType === "bounds_refresh" ||
+      activeRun.runType === "forecast" ||
+      activeRun.runType === "serving_refresh"
+    );
+  }
+
+  return activeRun.runType !== "bootstrap";
+}
+
 function isPendingRunStatus(status: AnalyticsRunStatus) {
   return (
     status === "queued" ||
@@ -3176,7 +3203,7 @@ function buildBackfillContinuationRun(
     return !source || source.status !== "ready";
   });
   const blockingRun =
-    activeProjectRuns(bundle).find((run) => run.runType !== "bootstrap") ?? null;
+    activeProjectRuns(bundle).find((run) => activeRunBlocksCandidate(run, "backfill")) ?? null;
   const status: AnalyticsRunStatus =
     missing.length > 0 ? "waiting_credentials" : blockingRun ? "blocked" : "queued";
 
@@ -3230,7 +3257,7 @@ function promoteBlockedRuns(
     };
 
     const activeOtherRuns = evaluationBundle.latestRuns.filter(
-      (run) => run.id !== candidate.id && (run.status === "queued" || run.status === "running")
+      (run) => run.id !== candidate.id && activeRunBlocksCandidate(run, candidate.runType)
     );
     const requiredSources = requiredSourceStatusesForRun(evaluationBundle, candidate.runType);
     const missing = requiredSources.filter((sourceType) => {
@@ -3286,7 +3313,7 @@ export async function requestAnalyticsSync(
       return !source || source.status !== "ready";
     });
     const blockingRun =
-      activeProjectRuns(bundle).find((run) => run.runType !== "bootstrap") ?? null;
+      activeProjectRuns(bundle).find((run) => activeRunBlocksCandidate(run, runType)) ?? null;
     const dependencyReady = hasSuccessfulDependency(bundle, runType);
     const status: AnalyticsRunStatus =
       missing.length > 0

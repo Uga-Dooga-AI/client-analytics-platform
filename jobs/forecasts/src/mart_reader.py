@@ -8,6 +8,7 @@ Supports two modes:
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 import logging
 import os
 from pathlib import Path
@@ -60,6 +61,40 @@ class MartReader:
             self._client = None
             self._bq = None
 
+    def resolve_available_window(self, date_from: str, date_to: str) -> tuple[str, str]:
+        if self._client is None:
+            return date_from, date_to
+
+        try:
+            requested_from = date.fromisoformat(date_from)
+            requested_to = date.fromisoformat(date_to)
+        except ValueError:
+            return date_from, date_to
+
+        if requested_from > requested_to:
+            requested_from, requested_to = requested_to, requested_from
+
+        latest_available = self._latest_available_date()
+        if latest_available is None:
+            return requested_from.isoformat(), requested_to.isoformat()
+
+        if requested_from <= latest_available <= requested_to:
+            return requested_from.isoformat(), requested_to.isoformat()
+
+        span_days = max((requested_to - requested_from).days, 0)
+        anchored_to = latest_available
+        anchored_from = latest_available - timedelta(days=span_days)
+
+        logger.info(
+            "requested mart history window %s..%s is outside latest available date %s; re-anchoring to %s..%s",
+            requested_from.isoformat(),
+            requested_to.isoformat(),
+            latest_available.isoformat(),
+            anchored_from.isoformat(),
+            anchored_to.isoformat(),
+        )
+        return anchored_from.isoformat(), anchored_to.isoformat()
+
     def read_experiment_daily(
         self,
         date_from: str,
@@ -110,6 +145,31 @@ class MartReader:
 
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values(["metric", "date"]).reset_index(drop=True)
+
+    def _latest_available_date(self) -> date | None:
+        if self._client is None:
+            return None
+
+        query = f"""
+            SELECT MAX(date) AS latest_date
+            FROM `{self.project_id}.{self.mart_dataset}.{self.experiment_daily_table}`
+        """
+        df = self._client.query(query).to_dataframe()
+        if df.empty or df["latest_date"].isna().all():
+            return None
+
+        latest_value = df["latest_date"].iloc[0]
+        if latest_value is None:
+            return None
+
+        parsed = latest_value.date() if hasattr(latest_value, "date") else None
+        if parsed is not None:
+            return parsed
+
+        try:
+            return date.fromisoformat(str(latest_value))
+        except ValueError:
+            return None
 
     def _read_from_local_input(self, metrics: list[str]) -> "pd.DataFrame":
         import pandas as pd

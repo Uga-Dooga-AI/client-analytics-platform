@@ -327,6 +327,21 @@ function formatDateTime(value?: string | null) {
   });
 }
 
+function sortSerializedRunsDesc(left: SerializedRun, right: SerializedRun) {
+  return new Date(right.requestedAt).getTime() - new Date(left.requestedAt).getTime();
+}
+
+function mergeSerializedRuns(primary: SerializedRun[], secondary: SerializedRun[]) {
+  const byId = new Map<string, SerializedRun>();
+  for (const run of [...primary, ...secondary]) {
+    if (!byId.has(run.id)) {
+      byId.set(run.id, run);
+    }
+  }
+
+  return Array.from(byId.values()).sort(sortSerializedRunsDesc);
+}
+
 function parseCsv(value: string) {
   return value
     .split(",")
@@ -450,6 +465,9 @@ export function SettingsControlPlane({
   const [runtimeBundle, setRuntimeBundle] = useState<AnalyticsRuntimeBundle | null>(null);
   const [feedback, setFeedback] = useState<string>("");
   const [isPending, startTransition] = useTransition();
+  const [runHistory, setRunHistory] = useState<SerializedRun[]>(initialProjects[0]?.latestRuns ?? []);
+  const [visibleRunCount, setVisibleRunCount] = useState<number>(RUN_HISTORY_LIMIT);
+  const [isRunHistoryLoading, setIsRunHistoryLoading] = useState(false);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.project.id === selectedProjectId) ?? null,
@@ -526,6 +544,9 @@ export function SettingsControlPlane({
             project.project.id === nextProject.project.id ? nextProject : project
           )
         );
+        if (nextProject.project.id === projectId) {
+          setRunHistory((current) => mergeSerializedRuns(nextProject.latestRuns, current));
+        }
       }
     }
 
@@ -576,6 +597,44 @@ export function SettingsControlPlane({
     };
   }, [mode, selectedProjectId]);
 
+  useEffect(() => {
+    if (!selectedProjectId || mode === "create") {
+      setRunHistory([]);
+      setVisibleRunCount(RUN_HISTORY_LIMIT);
+      setIsRunHistoryLoading(false);
+      return;
+    }
+
+    let active = true;
+    setRunHistory(selectedProject?.latestRuns ?? []);
+    setVisibleRunCount(RUN_HISTORY_LIMIT);
+    setIsRunHistoryLoading(true);
+
+    async function loadRunHistory() {
+      try {
+        const response = await fetch(`/api/admin/projects/${selectedProjectId}/runs`, {
+          cache: "no-store",
+        });
+        const payload = await response.json().catch(() => null);
+        if (!active || !response.ok) {
+          return;
+        }
+
+        const runs = Array.isArray(payload?.runs) ? (payload.runs as SerializedRun[]) : [];
+        setRunHistory(runs.sort(sortSerializedRunsDesc));
+      } finally {
+        if (active) {
+          setIsRunHistoryLoading(false);
+        }
+      }
+    }
+
+    void loadRunHistory();
+    return () => {
+      active = false;
+    };
+  }, [mode, selectedProjectId]);
+
   function updateDraft<K extends keyof ProjectDraft>(key: K, value: ProjectDraft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
   }
@@ -586,6 +645,8 @@ export function SettingsControlPlane({
     setDraft(DEFAULT_DRAFT);
     setConfigPreview(null);
     setRuntimeBundle(null);
+    setRunHistory([]);
+    setVisibleRunCount(RUN_HISTORY_LIMIT);
     setFeedback("");
   }
 
@@ -593,6 +654,8 @@ export function SettingsControlPlane({
     setMode("edit");
     setSelectedProjectId(project.project.id);
     setDraft(draftFromProject(project));
+    setRunHistory(project.latestRuns);
+    setVisibleRunCount(RUN_HISTORY_LIMIT);
     setFeedback("");
   }
 
@@ -644,6 +707,8 @@ export function SettingsControlPlane({
       });
       setSelectedProjectId(nextProject.project.id);
       setDraft(draftFromProject(nextProject));
+      setRunHistory(nextProject.latestRuns);
+      setVisibleRunCount(RUN_HISTORY_LIMIT);
       setMode("edit");
       setFeedback(
         mode === "create"
@@ -685,6 +750,7 @@ export function SettingsControlPlane({
             : project
         )
       );
+      setRunHistory((current) => mergeSerializedRuns([run], current));
       setFeedback(`${runType.replace(/_/g, " ")} queued.`);
       await refreshSelectedProjectSnapshot(selectedProjectId);
     });
@@ -1069,7 +1135,7 @@ export function SettingsControlPlane({
 
             <Panel title="Run history">
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {(selectedProject?.latestRuns ?? []).slice(0, RUN_HISTORY_LIMIT).map((run) => {
+                {runHistory.slice(0, visibleRunCount).map((run) => {
                   const badge = statusBadge(run.status);
                   return (
                     <div key={run.id} style={{ border: "1px solid var(--color-border-soft)", borderRadius: 10, background: "var(--color-panel-soft)", padding: "10px 12px" }}>
@@ -1088,9 +1154,27 @@ export function SettingsControlPlane({
                     </div>
                   );
                 })}
-                {(selectedProject?.latestRuns ?? []).length === 0 ? (
+                {runHistory.length === 0 ? (
                   <div style={{ fontSize: 12.5, color: "var(--color-ink-500)" }}>
                     Runs will appear here after the first backfill or refresh request.
+                  </div>
+                ) : null}
+                {visibleRunCount < runHistory.length ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setVisibleRunCount((current) =>
+                        Math.min(current + RUN_HISTORY_LIMIT, runHistory.length)
+                      )
+                    }
+                    style={SECONDARY_BUTTON_STYLE}
+                  >
+                    Load 100 more
+                  </button>
+                ) : null}
+                {isRunHistoryLoading ? (
+                  <div style={{ fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                    Loading full run history…
                   </div>
                 ) : null}
               </div>

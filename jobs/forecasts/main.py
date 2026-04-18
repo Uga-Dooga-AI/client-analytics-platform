@@ -56,6 +56,16 @@ def resolve_history_window(config: dict, runtime_context) -> tuple[str, str]:
     return date_from, date_to
 
 
+def should_anchor_history_window(runtime_context) -> bool:
+    if runtime_context.mode != "attached" or not runtime_context.run:
+        return True
+
+    run = runtime_context.run
+    return not (
+        isinstance(run.get("windowFrom"), str) or isinstance(run.get("windowTo"), str)
+    )
+
+
 def resolve_metric_list(config: dict) -> list[str]:
     forecast_cfg = config.get("forecast", {})
     metrics = forecast_cfg.get("metrics")
@@ -101,7 +111,8 @@ def main() -> None:
         config = load_config()
         bigquery_cfg = config.get("bigquery", {})
         forecast_cfg = config.get("forecast", {})
-        date_from, date_to = resolve_history_window(config, runtime_context)
+        requested_date_from, requested_date_to = resolve_history_window(config, runtime_context)
+        date_from, date_to = requested_date_from, requested_date_to
         run_type = (
             str(runtime_context.run.get("runType", "forecast"))
             if runtime_context.mode == "attached" and runtime_context.run
@@ -155,6 +166,11 @@ def main() -> None:
             project_id=bigquery_cfg.get("project_id"),
             mart_dataset=bigquery_cfg.get("mart_dataset"),
             experiment_daily_table=bigquery_cfg.get("experiment_daily_table"),
+        )
+        date_from, date_to = (
+            reader.resolve_available_window(requested_date_from, requested_date_to)
+            if should_anchor_history_window(runtime_context)
+            else (requested_date_from, requested_date_to)
         )
         writer = ResultsWriter(
             project_id=bigquery_cfg.get("project_id"),

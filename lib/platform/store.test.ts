@@ -198,7 +198,7 @@ describe("analytics run orchestration", () => {
     expect(backfillRun.status).toBe("queued");
   });
 
-  it("chunks long backfills and only unblocks bounds refresh after the final chunk succeeds", async () => {
+  it("chunks long backfills while allowing bounds and forecast runs to start from the latest successful source slice", async () => {
     const {
       createAnalyticsProject,
       listAnalyticsProjectRuns,
@@ -245,11 +245,17 @@ describe("analytics run orchestration", () => {
     const secondBackfill = runs.find(
       (run) => run.runType === "backfill" && run.id !== firstBackfill!.id
     );
-    const stillBlockedBounds = runs.find((run) => run.runType === "bounds_refresh");
+    const promotedBounds = runs.find((run) => run.runType === "bounds_refresh");
 
     expect(secondBackfill?.status).toBe("queued");
     expect(secondBackfill?.payload.backfillContinuation).toBe(true);
-    expect(stillBlockedBounds?.status).toBe("blocked");
+    expect(promotedBounds?.status).toBe("queued");
+
+    await updateAnalyticsSyncRun(promotedBounds!.id, {
+      status: "succeeded",
+      sourceType: "bounds_artifacts",
+      message: "Bounds rebuilt after chunk 1.",
+    });
 
     await updateAnalyticsSyncRun(secondBackfill!.id, {
       status: "succeeded",
@@ -258,8 +264,8 @@ describe("analytics run orchestration", () => {
     });
 
     runs = await listAnalyticsProjectRuns(bundle.project.id);
-    const promotedBoundsRun = runs.find((run) => run.runType === "bounds_refresh");
+    const promotedForecastRun = runs.find((run) => run.runType === "forecast");
 
-    expect(promotedBoundsRun?.status).toBe("queued");
+    expect(promotedForecastRun?.status).toBe("queued");
   });
 });
