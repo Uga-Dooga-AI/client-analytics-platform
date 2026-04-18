@@ -312,6 +312,6 @@ class BQLoader:
             self._client.get_dataset(dataset_ref)
         except NotFound:
             dataset = self._bq.Dataset(dataset_ref)
-            dataset.location = os.environ.get("BQ_LOCATION", "EU")
+            dataset.location = os.environ.get("BQ_LOCATION", "US")
             self._client.create_dataset(dataset, exists_ok=True)
             logger.info("Created BQ dataset: %s", dataset_ref)

@@ -145,11 +145,9 @@ function buildCronHint(intervalHours: number) {
 }
 
 function inferWarehouseLocation(region: string) {
-  const normalized = region.trim().toLowerCase();
-  if (normalized.startsWith("europe-")) {
-    return "EU";
-  }
-
+  // Cloud Run region and BigQuery dataset location are decoupled.
+  // Default to US unless an explicit warehouse-location field is introduced.
+  void region;
   return "US";
 }
 

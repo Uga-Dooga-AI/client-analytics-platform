@@ -63,10 +63,6 @@ def _resolve_location(config: dict) -> str:
     if location:
         return location.upper()
 
-    region = str(config.get("provisioning", {}).get("region", "")).strip().lower()
-    if region.startswith("europe-"):
-        return "EU"
-
     return "US"
 
 

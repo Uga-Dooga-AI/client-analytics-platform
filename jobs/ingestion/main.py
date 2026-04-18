@@ -115,7 +115,7 @@ def ensure_runtime_infrastructure(config: dict, uploader, loader) -> None:
     if not provisioning.get("auto_create_infrastructure", False):
         return
 
-    region = str(provisioning.get("region", os.environ.get("BQ_LOCATION", "EU")))
+    region = str(provisioning.get("region", os.environ.get("BQ_LOCATION", "US")))
     datasets = provisioning.get("datasets", {})
     uploader.ensure_bucket(location=region)
     loader.ensure_datasets(

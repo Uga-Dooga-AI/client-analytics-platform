@@ -168,8 +168,8 @@ describe("buildAnalyticsRuntimeBundle", () => {
     expect(bundle.forecasts.configYaml).toContain("recentCombinationLimit: 50");
     expect(bundle.forecasts.configYaml).toContain("expandPrimaryMatrix: true");
     expect(bundle.forecasts.configYaml).toContain("project_slug: word-catcher");
-    expect(bundle.forecasts.configYaml).toContain("location: EU");
-    expect(bundle.ingestion.env.some((entry) => entry.name === "BQ_LOCATION" && entry.value === "EU")).toBe(true);
+    expect(bundle.forecasts.configYaml).toContain("location: US");
+    expect(bundle.ingestion.env.some((entry) => entry.name === "BQ_LOCATION" && entry.value === "US")).toBe(true);
     expect(bundle.forecasts.configYaml).toContain("- revenue");
     expect(bundle.forecasts.configYaml).toContain("- guardrail_crashes");
     expect(bundle.forecasts.configYaml).not.toContain("ad_revenue");

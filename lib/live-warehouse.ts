@@ -105,13 +105,9 @@ function quoteSqlString(value: string) {
 }
 
 function inferWarehouseLocation(region: string | null | undefined) {
-  const normalized = String(region ?? "")
-    .trim()
-    .toLowerCase();
-  if (normalized.startsWith("europe-")) {
-    return "EU";
-  }
-
+  // Cloud Run region and BigQuery dataset location are not equivalent in prod.
+  // The current warehouse is provisioned in US even when workers run in europe-* regions.
+  void region;
   return DEFAULT_BQ_LOCATION;
 }
 
