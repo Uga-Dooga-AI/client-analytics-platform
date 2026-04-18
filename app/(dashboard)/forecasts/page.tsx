@@ -57,7 +57,7 @@ export default async function ForecastsPage({
   const selectedProjectLabel = getProjectLabel(filters.projectKey);
   const selectedBundle = scopedBundles[0] ?? null;
   const recentRuns = flattenRuns(scopedBundles).filter(({ run }) =>
-    run.runType === "forecast" || run.runType === "bounds_refresh" || run.runType === "serving_refresh"
+    run.runType === "forecast" || run.runType === "bounds_refresh"
   );
   const combinations = selectedBundle
     ? await listForecastCombinations(selectedBundle.project.id, 20, { includeSystem: true })

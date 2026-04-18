@@ -69,15 +69,13 @@ export default async function CohortsPage({
   const selectedBundle = scopedBundles[0] ?? null;
   const selectedProjectLabel = getProjectLabel(filters.projectKey);
   const relevantRuns = flattenRuns(scopedBundles).filter(({ run }) =>
-    run.runType === "backfill" || run.runType === "ingestion" || run.runType === "serving_refresh"
+    run.runType === "backfill" || run.runType === "ingestion"
   );
   const latestDataRun = selectedBundle ? findLatestRun(selectedBundle, ["backfill", "ingestion"]) : null;
-  const latestServing = selectedBundle ? findLatestRun(selectedBundle, ["serving_refresh"]) : null;
   const publishReady =
     selectedBundle &&
     selectedBundle.sources.some((source) => source.sourceType === "appmetrica_logs" && source.status === "ready") &&
-    latestDataRun?.status === "succeeded" &&
-    latestServing?.status === "succeeded";
+    latestDataRun?.status === "succeeded";
   const latestLiveCohort = cohortRows[0] ?? null;
 
   return (
@@ -110,7 +108,7 @@ export default async function CohortsPage({
           <InfoCard label="Granularity" value={`${selectedBundle?.project.defaultGranularityDays ?? filters.granularityDays}d`} sub="Default cohort step in project settings" />
           <InfoCard label="Lookback" value={`${selectedBundle?.project.lookbackDays ?? 0}d`} sub="D+1 extraction offset for raw data" />
           <InfoCard label="Backfill window" value={`${selectedBundle?.project.initialBackfillDays ?? 0}d`} sub="Configured initial catch-up window" />
-          <InfoCard label="Publish state" value={publishReady ? "Ready" : "Pending"} sub={publishReady ? "Serving refresh completed successfully" : "Cohort facts are not published yet"} />
+          <InfoCard label="Publish state" value={publishReady ? "Ready" : "Pending"} sub={publishReady ? "Warehouse reads are live" : "Cohort facts are not available yet"} />
         </section>
 
         <section

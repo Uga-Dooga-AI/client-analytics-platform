@@ -144,6 +144,15 @@ function buildCronHint(intervalHours: number) {
   return "custom cadence";
 }
 
+function inferWarehouseLocation(region: string) {
+  const normalized = region.trim().toLowerCase();
+  if (normalized.startsWith("europe-")) {
+    return "EU";
+  }
+
+  return "US";
+}
+
 function jobBaseName(bundle: AnalyticsProjectBundle) {
   return `analytics-${bundle.project.slug}`;
 }
@@ -169,6 +178,14 @@ function buildForecastPrewarmPlan(settings: AnalyticsProjectBundle["project"]["s
   };
 }
 
+const FORECAST_RUNTIME_METRICS = [
+  "revenue",
+  "exposures",
+  "activations",
+  "guardrail_crashes",
+  "guardrail_errors",
+] as const;
+
 export function buildAnalyticsRuntimeBundle(
   bundle: AnalyticsProjectBundle,
   options?: { baseUrl?: string }
@@ -180,6 +197,7 @@ export function buildAnalyticsRuntimeBundle(
   const googleAds = bundle.sources.find((source) => source.sourceType === "google_ads_spend");
   const baseUrl = options?.baseUrl ?? "";
   const jobName = jobBaseName(bundle);
+  const warehouseLocation = inferWarehouseLocation(bundle.project.settings.provisioningRegion);
   const prewarmPlan = buildForecastPrewarmPlan(bundle.project.settings);
   const rawPrefix = `raw/${bundle.project.slug}/appmetrica`;
   const runtimeBundlePath = `/api/internal/projects/${bundle.project.id}/runtime-bundle`;
@@ -209,6 +227,7 @@ export function buildAnalyticsRuntimeBundle(
     },
     bigquery: {
       project_id: bundle.project.gcpProjectId,
+      location: warehouseLocation,
       raw_dataset: bundle.project.rawDataset,
       stg_dataset: bundle.project.stgDataset,
       mart_dataset: bundle.project.martDataset,
@@ -227,8 +246,12 @@ export function buildAnalyticsRuntimeBundle(
   };
 
   const forecastsConfig = {
+    project_slug: bundle.project.slug,
     bigquery: {
       project_id: bundle.project.gcpProjectId,
+      location: warehouseLocation,
+      raw_dataset: bundle.project.rawDataset,
+      stg_dataset: bundle.project.stgDataset,
       mart_dataset: bundle.project.martDataset,
       experiment_daily_table: `${bundle.project.slug.replace(/-/g, "_")}_experiment_daily`,
       forecast_table: `${bundle.project.slug.replace(/-/g, "_")}_forecast_points`,
@@ -238,7 +261,7 @@ export function buildAnalyticsRuntimeBundle(
       min_history_days: Math.max(14, bundle.project.defaultGranularityDays * 2),
       engine: "auto",
       confidence_interval: 0.8,
-      metrics: ["revenue", "ad_revenue", "iap_revenue", "spend", "roas", "exposures", "activations"],
+      metrics: [...FORECAST_RUNTIME_METRICS],
       bounds_bucket: bounds?.config.bucket || bundle.project.gcsBucket,
       bounds_prefix: bounds?.config.prefix || `bounds/${bundle.project.slug}/`,
       strategy: bundle.project.settings.forecastStrategy,
@@ -292,6 +315,7 @@ export function buildAnalyticsRuntimeBundle(
         { name: "GCP_PROJECT_ID", value: bundle.project.gcpProjectId || "REPLACE_GCP_PROJECT" },
         { name: "GCS_BUCKET", value: String(bounds?.config.bucket || bundle.project.gcsBucket || "REPLACE_BUCKET") },
         { name: "BQ_DATASET", value: bundle.project.rawDataset },
+        { name: "BQ_LOCATION", value: warehouseLocation },
         { name: "JOB_CONFIG_PATH", value: "/workspace/runtime/ingestion.job.yml" },
         { name: "WORKER_CONTROL_BASE_URL", value: baseUrl || "https://REPLACE_HOST" },
       ],
@@ -321,6 +345,7 @@ export function buildAnalyticsRuntimeBundle(
       env: [
         { name: "GCP_PROJECT_ID", value: bundle.project.gcpProjectId || "REPLACE_GCP_PROJECT" },
         { name: "BQ_MART_DATASET", value: bundle.project.martDataset },
+        { name: "BQ_LOCATION", value: warehouseLocation },
         { name: "JOB_CONFIG_PATH", value: "/workspace/runtime/forecasts.job.yml" },
         { name: "WORKER_CONTROL_BASE_URL", value: baseUrl || "https://REPLACE_HOST" },
       ],
@@ -358,18 +383,19 @@ export function buildAnalyticsRuntimeBundle(
     dbt: {
       varsYaml: toYaml({
         project_slug: bundle.project.slug,
+        gcp_project_id: bundle.project.gcpProjectId,
         raw_dataset: bundle.project.rawDataset,
         stg_dataset: bundle.project.stgDataset,
         mart_dataset: bundle.project.martDataset,
       }),
       commands: [
-        `dbt run --project-dir dbt --vars 'project_slug: ${bundle.project.slug}'`,
-        `dbt test --project-dir dbt --select tag:${bundle.project.slug}`,
+        `dbt build --project-dir dbt --vars 'project_slug: ${bundle.project.slug}, gcp_project_id: ${bundle.project.gcpProjectId}, raw_dataset: ${bundle.project.rawDataset}, stg_dataset: ${bundle.project.stgDataset}, mart_dataset: ${bundle.project.martDataset}' --select +mart_experiment_daily +mart_cohort_daily +mart_daily_active_users +mart_funnel_daily +mart_installs_funnel +mart_revenue_metrics +mart_session_metrics`,
+        `dbt build --project-dir dbt --vars 'project_slug: ${bundle.project.slug}, gcp_project_id: ${bundle.project.gcpProjectId}, raw_dataset: ${bundle.project.rawDataset}, stg_dataset: ${bundle.project.stgDataset}, mart_dataset: ${bundle.project.martDataset}' --select mart_forecast_points`,
       ],
     },
     notes: [
       "Project credentials stay in the control plane; worker config is generated from the registry, not handwritten.",
-      "Bootstrap should auto-run after project creation: backfill → bounds refresh → forecast → serving refresh.",
+      "Bootstrap should auto-run after project creation: backfill → bounds refresh → forecast.",
       "Bounds artifacts should be published to GCS manifests and then read by forecasts and serving tables.",
       "Forecast strategy keeps a project-level matrix of segments, countries, spend sources, and platforms warm and remembers the last N viewed combinations for follow-up precompute.",
       "Cold forecast combinations can be registered through the control plane endpoint so workers can queue or prewarm them without redeploying config.",

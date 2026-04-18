@@ -110,7 +110,8 @@ models:
           Категория длительности: short (<60s), medium (60-299s), long (>=300s), unknown
         tests:
           - accepted_values:
-              values: ['short', 'medium', 'long', 'unknown']
+              arguments:
+                values: ['short', 'medium', 'long', 'unknown']
       - name: os_name
         description: Операционная система в нижнем регистре
 

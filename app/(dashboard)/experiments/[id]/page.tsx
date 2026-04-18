@@ -202,7 +202,7 @@ export default async function ExperimentDetailPage({
               >
                 <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-900)" }}>Forecast trajectory</div>
                 <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 4, lineHeight: 1.5 }}>
-                  This panel will switch from mock shell to forecast outputs once `mart_forecast_points` is populated and the batch compute job is deployed.
+                  This panel will switch from mock shell to forecast outputs once the project-scoped forecast serving table is populated and the batch compute job is deployed.
                 </div>
               </div>
             </section>

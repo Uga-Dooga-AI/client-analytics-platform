@@ -200,8 +200,8 @@ const DEFAULT_DRAFT: ProjectDraft = {
   forecastIntervalHours: 12,
   boundsIntervalHours: 720,
   lookbackDays: 1,
-  initialBackfillDays: 180,
-  forecastHorizonDays: 120,
+  initialBackfillDays: 365,
+  forecastHorizonDays: 730,
   precomputePrimaryForecasts: true,
   enableOnDemandForecasts: true,
   expandPrimaryMatrix: true,
@@ -504,14 +504,6 @@ export function SettingsControlPlane({
             ? "Another run is already in progress."
             : !hasSuccessfulRun(selectedProject, ["bounds_refresh"])
               ? "Forecast unlocks after a successful bounds refresh."
-              : null,
-      serving_refresh:
-        mode === "create"
-          ? "Create the project first."
-          : activeRun
-            ? "Another run is already in progress."
-            : !hasSuccessfulRun(selectedProject, ["forecast"])
-              ? "Serving refresh unlocks after a successful forecast."
               : null,
     };
   }, [mode, selectedProject]);
@@ -953,7 +945,7 @@ export function SettingsControlPlane({
                 label="Auto-bootstrap after project creation"
                 checked={draft.autoBootstrapOnCreate}
                 onChange={(value) => updateDraft("autoBootstrapOnCreate", value)}
-                description="Queues backfill, then bounds refresh, forecast, and serving refresh automatically once the project is saved."
+                description="Queues backfill, then bounds refresh and forecast automatically once the project is saved."
               />
               <ToggleField
                 label="Precompute primary forecasts"
@@ -1005,7 +997,6 @@ export function SettingsControlPlane({
                   { key: "ingestion", label: "Pull now" },
                   { key: "bounds_refresh", label: "Rebuild bounds" },
                   { key: "forecast", label: "Forecast now" },
-                  { key: "serving_refresh", label: "Serving refresh" },
                 ].map((run) => (
                   <div key={run.key} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     <button
@@ -1018,7 +1009,6 @@ export function SettingsControlPlane({
                             | "ingestion"
                             | "forecast"
                             | "bounds_refresh"
-                            | "serving_refresh"
                         )
                       }
                       disabled={!selectedProjectId || mode === "create" || isPending || Boolean(runControlState[run.key as keyof typeof runControlState])}

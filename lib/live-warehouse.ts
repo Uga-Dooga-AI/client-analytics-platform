@@ -18,7 +18,7 @@ type BigQueryServiceAccount = {
   token_uri?: string;
 };
 
-type BigQueryQueryParam = {
+export type BigQueryQueryParam = {
   name: string;
   type: "STRING" | "INT64" | "FLOAT64" | "BOOL" | "DATE";
   value: string | number | boolean | null;
@@ -39,7 +39,7 @@ type BigQueryQueryResponse = {
   jobReference?: { projectId?: string; jobId?: string; location?: string };
 };
 
-type ProjectQueryContext = {
+export type ProjectQueryContext = {
   bundle: AnalyticsProjectBundle;
   serviceAccount: BigQueryServiceAccount;
   source: BigQuerySourceConfig;
@@ -105,6 +105,17 @@ function quoteSqlString(value: string) {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function inferWarehouseLocation(region: string | null | undefined) {
+  const normalized = String(region ?? "")
+    .trim()
+    .toLowerCase();
+  if (normalized.startsWith("europe-")) {
+    return "EU";
+  }
+
+  return DEFAULT_BQ_LOCATION;
+}
+
 function decodeBigQueryValue(field: BigQueryField, raw: unknown): unknown {
   if (raw === null || raw === undefined) {
     return null;
@@ -144,7 +155,7 @@ function decodeBigQueryValue(field: BigQueryField, raw: unknown): unknown {
   }
 }
 
-async function getAccessToken(serviceAccount: BigQueryServiceAccount) {
+export async function getAccessToken(serviceAccount: BigQueryServiceAccount) {
   const cacheKey = serviceAccount.client_email;
   const cached = TOKEN_CACHE.get(cacheKey);
   if (cached && cached.expiresAtMs > Date.now() + 60_000) {
@@ -200,7 +211,7 @@ async function getAccessToken(serviceAccount: BigQueryServiceAccount) {
   return payload.access_token;
 }
 
-async function executeBigQuery<T extends Record<string, unknown>>(
+export async function executeBigQuery<T extends Record<string, unknown>>(
   context: ProjectQueryContext,
   sql: string,
   params: BigQueryQueryParam[] = []
@@ -291,7 +302,7 @@ async function executeBigQuery<T extends Record<string, unknown>>(
   });
 }
 
-async function loadBigQueryContexts(
+export async function loadBigQueryContexts(
   bundles: AnalyticsProjectBundle[]
 ): Promise<Map<string, ProjectQueryContext>> {
   if (bundles.length === 0) {
@@ -353,7 +364,7 @@ async function loadBigQueryContexts(
         sourceDataset,
       },
       warehouseProjectId: bundle.project.gcpProjectId,
-      location: DEFAULT_BQ_LOCATION,
+      location: inferWarehouseLocation(bundle.project.settings.provisioningRegion),
       rawEventsTable: `${prefix}_appmetrica_events`,
       rawInstallsTable: `${prefix}_appmetrica_installs`,
       rawSessionsTable: `${prefix}_appmetrica_sessions`,

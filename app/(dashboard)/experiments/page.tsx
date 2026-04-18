@@ -61,10 +61,8 @@ export default async function ExperimentsPage({
   const relevantRuns = flattenRuns(scopedBundles).filter(({ run }) =>
     run.runType === "backfill" ||
     run.runType === "bounds_refresh" ||
-    run.runType === "forecast" ||
-    run.runType === "serving_refresh"
+    run.runType === "forecast"
   );
-  const latestServing = selectedBundle ? findLatestRun(selectedBundle, ["serving_refresh"]) : null;
   const latestBackfill = selectedBundle ? findLatestRun(selectedBundle, ["backfill", "ingestion"]) : null;
   const latestForecast = selectedBundle ? findLatestRun(selectedBundle, ["forecast"]) : null;
   const readySources = selectedBundle?.sources.filter((source) => source.status === "ready").length ?? 0;
@@ -73,8 +71,8 @@ export default async function ExperimentsPage({
     !selectedBundle ? "No live project is selected for experiment analysis." : null,
     selectedBundle && readySources === 0 ? "No sources are currently in ready state." : null,
     selectedBundle && !latestBackfill ? "No successful backfill has completed yet." : null,
-    selectedBundle && (!latestServing || latestServing.status !== "succeeded")
-      ? "Serving refresh has not published experiment facts yet."
+    selectedBundle && (!latestForecast || latestForecast.status !== "succeeded")
+      ? "Forecast publication has not completed yet."
       : null,
   ].filter((value): value is string => Boolean(value));
 
@@ -112,15 +110,11 @@ export default async function ExperimentsPage({
             sub={latestBackfill ? formatDateTime(latestBackfill.finishedAt ?? latestBackfill.startedAt ?? latestBackfill.requestedAt) : "No run recorded"}
           />
           <InfoCard
-            label="Latest serving refresh"
-            value={latestServing ? latestServing.status : "none"}
-            sub={latestServing ? formatRelativeTime(latestServing.finishedAt ?? latestServing.startedAt ?? latestServing.requestedAt) : "Not published yet"}
-          />
-          <InfoCard
             label="Latest forecast"
             value={latestForecast ? latestForecast.status : "none"}
             sub={latestForecast ? formatRelativeTime(latestForecast.finishedAt ?? latestForecast.startedAt ?? latestForecast.requestedAt) : "No forecast run recorded"}
           />
+          <InfoCard label="Publication mode" value="Direct mart reads" sub="Experiment readiness now follows warehouse state instead of a separate serving stage" />
         </section>
 
         {selectedBundle ? (

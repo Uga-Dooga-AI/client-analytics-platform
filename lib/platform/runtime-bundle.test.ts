@@ -167,6 +167,15 @@ describe("buildAnalyticsRuntimeBundle", () => {
     expect(bundle.forecasts.configYaml).toContain("horizon_days: 120");
     expect(bundle.forecasts.configYaml).toContain("recentCombinationLimit: 50");
     expect(bundle.forecasts.configYaml).toContain("expandPrimaryMatrix: true");
+    expect(bundle.forecasts.configYaml).toContain("project_slug: word-catcher");
+    expect(bundle.forecasts.configYaml).toContain("location: EU");
+    expect(bundle.ingestion.env.some((entry) => entry.name === "BQ_LOCATION" && entry.value === "EU")).toBe(true);
+    expect(bundle.forecasts.configYaml).toContain("- revenue");
+    expect(bundle.forecasts.configYaml).toContain("- guardrail_crashes");
+    expect(bundle.forecasts.configYaml).not.toContain("ad_revenue");
+    expect(bundle.forecasts.configYaml).not.toContain("- spend");
+    expect(bundle.dbt.commands[0]).toContain("gcp_project_id: ugada-word-catcher-prod");
+    expect(bundle.dbt.commands[1]).toContain("mart_forecast_points");
     expect(bundle.callbacks.endpoints.claimRunPath).toContain("/api/internal/projects/project-1/claim-run");
     expect(bundle.callbacks.endpoints.runStatusPathTemplate).toContain("/api/internal/runs/{runId}");
     expect(bundle.callbacks.endpoints.forecastCombinationPath).toContain(

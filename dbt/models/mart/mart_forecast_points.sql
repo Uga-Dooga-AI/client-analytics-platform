@@ -32,6 +32,22 @@ with source as (
         cast(null as timestamp) as generated_at
     where false
     {% endif %}
+),
+
+ranked as (
+    select
+        run_id,
+        metric,
+        date,
+        p50,
+        p10,
+        p90,
+        generated_at,
+        row_number() over (
+            partition by metric, date
+            order by generated_at desc, run_id desc
+        ) as row_num
+    from source
 )
 
 select
@@ -42,5 +58,6 @@ select
     p10,
     p90,
     generated_at
-from source
+from ranked
+where row_num = 1
 order by generated_at desc, metric, date

@@ -7,6 +7,28 @@ with source as (
     select * from {{ source('appmetrica_raw', 'sessions') }}
 ),
 
+deduped as (
+    select *
+    from source
+    where session_start_datetime is not null
+      and appmetrica_device_id is not null
+      and (
+          duration_seconds is null
+          or cast(duration_seconds as int64) >= 0
+      )
+    qualify row_number() over (
+        partition by coalesce(
+            cast(session_id as string),
+            concat(
+                cast(appmetrica_device_id as string),
+                '#',
+                cast(session_start_datetime as string)
+            )
+        )
+        order by cast(session_start_datetime as timestamp) desc
+    ) = 1
+),
+
 cleaned as (
     select
         -- identity
@@ -30,13 +52,7 @@ cleaned as (
         -- device
         lower(cast(os_name              as string))         as os_name
 
-    from source
-    where session_start_datetime is not null
-      and appmetrica_device_id is not null
-      and (
-          duration_seconds is null
-          or cast(duration_seconds as int64) >= 0
-      )
+    from deduped
 )
 
 select * from cleaned

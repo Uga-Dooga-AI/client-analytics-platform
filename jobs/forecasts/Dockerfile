@@ -7,10 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY jobs/forecasts/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY jobs/forecasts/ ./
+COPY dbt ./dbt
 
 ENV PYTHONUNBUFFERED=1
 

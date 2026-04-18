@@ -5,10 +5,11 @@ sources:
     description: >
       Сырые данные AppMetrica, загружаемые через Logs API → GCS → BigQuery.
       Схема: raw в dataset вашего GCP-проекта.
-    database: "{{ env_var('GCP_SOURCE_PROJECT', 'YOUR_GCP_PROJECT_ID') }}"
-    schema: raw
+    database: "{{ var('gcp_project_id', env_var('GCP_SOURCE_PROJECT', target.database)) }}"
+    schema: "{{ var('raw_dataset', 'raw') }}"
     tables:
       - name: events
+        identifier: "{{ var('project_slug') | replace('-', '_') ~ '_appmetrica_events' }}"
         description: >
           Поток всех событий AppMetrica (installs, sessions, custom events, ab_*).
           Обновляется ежедневно D+1 в 07:00 MSK.
@@ -39,6 +40,7 @@ sources:
           # передаются через event_json как структура {"product_id":..., "price":..., "currency":..., "transaction_id":...}
 
       - name: installs
+        identifier: "{{ var('project_slug') | replace('-', '_') ~ '_appmetrica_installs' }}"
         description: >
           Инсталляции приложения из AppMetrica.
           Используется для acquisition-воронки.
@@ -59,6 +61,7 @@ sources:
             description: Версия приложения при установке
 
       - name: sessions
+        identifier: "{{ var('project_slug') | replace('-', '_') ~ '_appmetrica_sessions' }}"
         description: >
           Сессии пользователей из AppMetrica.
         columns:

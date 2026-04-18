@@ -40,7 +40,9 @@ def load_config() -> dict:
 
 def resolve_history_window(config: dict, runtime_context) -> tuple[str, str]:
     forecast_cfg = config.get("forecast", {})
-    max_history_days = max(int(forecast_cfg.get("min_history_days", 14)) * 4, 120)
+    min_history_days = int(forecast_cfg.get("min_history_days", 14))
+    horizon_days = int(forecast_cfg.get("horizon_days", 30))
+    max_history_days = max(min_history_days * 4, horizon_days, 120)
     date_to = date.today().isoformat()
     date_from = (date.today() - timedelta(days=max_history_days)).isoformat()
 
@@ -98,6 +100,11 @@ def main() -> None:
         bigquery_cfg = config.get("bigquery", {})
         forecast_cfg = config.get("forecast", {})
         date_from, date_to = resolve_history_window(config, runtime_context)
+        run_type = (
+            str(runtime_context.run.get("runType", "forecast"))
+            if runtime_context.mode == "attached" and runtime_context.run
+            else "forecast"
+        )
         metrics = resolve_metric_list(config)
         prewarm_plan = resolve_prewarm_plan(config)
         hot_combinations = list_hot_forecast_combinations(
@@ -115,6 +122,29 @@ def main() -> None:
             prewarm_plan.get("estimatedCombinationCount"),
         )
 
+        if run_type == "bounds_refresh":
+            from src.dbt_runner import build_upstream_marts
+
+            build_upstream_marts(config)
+            message = (
+                "Bounds refresh rebuilt project-scoped marts without recomputing forecasts. "
+                "Forecast execution still owns the actual p10/p50/p90 materialization."
+            )
+            logger.info(message)
+            patch_run_status(
+                runtime_context,
+                status="succeeded",
+                message=message,
+                payload={
+                    "sourceRange": {"from": date_from, "to": date_to},
+                    "hotCombinations": hot_combinations,
+                    "prewarmPlan": prewarm_plan,
+                    "executionMode": "bounds_refresh_transform",
+                },
+            )
+            return
+
+        from src.dbt_runner import publish_forecast_serving_table
         from src.forecast_engine import ForecastEngine
         from src.mart_reader import MartReader
         from src.results_writer import ResultsWriter
@@ -179,6 +209,7 @@ def main() -> None:
                 "prewarmPlan": prewarm_plan,
             },
         )
+        publish_forecast_serving_table(config)
 
         message = f"Forecast job completed for {len(metrics)} metric(s)."
         logger.info(message)

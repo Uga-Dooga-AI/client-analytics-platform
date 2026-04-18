@@ -15,7 +15,6 @@ const RUN_TYPES: AnalyticsRunType[] = [
   "backfill",
   "forecast",
   "bounds_refresh",
-  "serving_refresh",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -45,6 +45,9 @@ export type AnalyticsRunStatus =
 
 export type AnalyticsTriggerKind = "manual" | "scheduled" | "bootstrap";
 
+const DEFAULT_INITIAL_BACKFILL_DAYS = 365;
+const DEFAULT_FORECAST_HORIZON_DAYS = 730;
+
 export interface AnalyticsForecastStrategy {
   precomputePrimaryForecasts: boolean;
   enableOnDemandForecasts: boolean;
@@ -812,8 +815,8 @@ function seedDemoStore() {
       forecastIntervalHours: 12,
       boundsIntervalHours: 720,
       lookbackDays: 1,
-      initialBackfillDays: 180,
-      forecastHorizonDays: 120,
+      initialBackfillDays: DEFAULT_INITIAL_BACKFILL_DAYS,
+      forecastHorizonDays: DEFAULT_FORECAST_HORIZON_DAYS,
       settings: DEFAULT_ANALYTICS_PROJECT_SETTINGS,
       createdBy: "demo-admin",
       updatedBy: "demo-admin",
@@ -964,7 +967,7 @@ function seedDemoStore() {
         windowFrom: null,
         windowTo: null,
         message: index === 1 ? "Bounds refresh is preparing forecast intervals." : "Forecast artifacts published.",
-        payload: { horizonDays: 120 },
+        payload: { horizonDays: DEFAULT_FORECAST_HORIZON_DAYS },
       },
     ];
   });
@@ -1022,8 +1025,8 @@ function normalizePgProject(row: Record<string, unknown>): AnalyticsProjectRecor
     forecastIntervalHours: Number(row.forecast_interval_hours ?? 12),
     boundsIntervalHours: Number(row.bounds_interval_hours ?? 720),
     lookbackDays: Number(row.lookback_days ?? 1),
-    initialBackfillDays: Number(row.initial_backfill_days ?? 180),
-    forecastHorizonDays: Number(row.forecast_horizon_days ?? 120),
+    initialBackfillDays: Number(row.initial_backfill_days ?? DEFAULT_INITIAL_BACKFILL_DAYS),
+    forecastHorizonDays: Number(row.forecast_horizon_days ?? DEFAULT_FORECAST_HORIZON_DAYS),
     settings: parseProjectSettings(row.settings_json),
     createdBy: typeof row.created_by === "string" ? row.created_by : null,
     updatedBy: typeof row.updated_by === "string" ? row.updated_by : null,
@@ -1124,8 +1127,8 @@ async function ensurePlatformSchema() {
           forecast_interval_hours INTEGER NOT NULL DEFAULT 12,
           bounds_interval_hours INTEGER NOT NULL DEFAULT 720,
           lookback_days INTEGER NOT NULL DEFAULT 1,
-          initial_backfill_days INTEGER NOT NULL DEFAULT 180,
-          forecast_horizon_days INTEGER NOT NULL DEFAULT 120,
+          initial_backfill_days INTEGER NOT NULL DEFAULT 365,
+          forecast_horizon_days INTEGER NOT NULL DEFAULT 730,
           settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_by TEXT,
           updated_by TEXT,
@@ -1193,6 +1196,12 @@ async function ensurePlatformSchema() {
       await pool.query(`
         ALTER TABLE analytics_projects
         ADD COLUMN IF NOT EXISTS settings_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+      `);
+
+      await pool.query(`
+        ALTER TABLE analytics_projects
+        ALTER COLUMN initial_backfill_days SET DEFAULT 365,
+        ALTER COLUMN forecast_horizon_days SET DEFAULT 730;
       `);
     })();
   }
@@ -1614,8 +1623,18 @@ function ensureProjectPayload(input: AnalyticsProjectInput) {
     forecastIntervalHours: normalizeInt(input.forecastIntervalHours, 12, 1, 168),
     boundsIntervalHours: normalizeInt(input.boundsIntervalHours, 720, 1, 24 * 365),
     lookbackDays: normalizeInt(input.lookbackDays, 1, 1, 365),
-    initialBackfillDays: normalizeInt(input.initialBackfillDays, 180, 1, 720),
-    forecastHorizonDays: normalizeInt(input.forecastHorizonDays, 120, 7, 720),
+    initialBackfillDays: normalizeInt(
+      input.initialBackfillDays,
+      DEFAULT_INITIAL_BACKFILL_DAYS,
+      1,
+      DEFAULT_INITIAL_BACKFILL_DAYS
+    ),
+    forecastHorizonDays: normalizeInt(
+      input.forecastHorizonDays,
+      DEFAULT_FORECAST_HORIZON_DAYS,
+      7,
+      DEFAULT_FORECAST_HORIZON_DAYS
+    ),
     settings,
     appmetricaAppIds: normalizeStringList(input.appmetricaAppIds),
     appmetricaEventNames: normalizeStringList(input.appmetricaEventNames),
@@ -1764,6 +1783,37 @@ function sourcePayloadsFromInput(projectId: string, input: ReturnType<typeof ens
       updatedAt: new Date(),
     }),
   ];
+}
+
+function immutableInfraChangesForProject(
+  existing: AnalyticsProjectBundle,
+  next: ReturnType<typeof ensureProjectPayload>
+) {
+  const changes: string[] = [];
+
+  if (existing.project.slug !== next.slug) {
+    changes.push("slug");
+  }
+  if (existing.project.gcpProjectId !== next.gcpProjectId) {
+    changes.push("warehouse project");
+  }
+  if (existing.project.gcsBucket !== next.gcsBucket) {
+    changes.push("storage bucket");
+  }
+  if (existing.project.rawDataset !== next.rawDataset) {
+    changes.push("raw dataset");
+  }
+  if (existing.project.stgDataset !== next.stgDataset) {
+    changes.push("stg dataset");
+  }
+  if (existing.project.martDataset !== next.martDataset) {
+    changes.push("mart dataset");
+  }
+  if (existing.project.boundsPath !== next.boundsPath) {
+    changes.push("bounds path");
+  }
+
+  return changes;
 }
 
 function mergeExistingSourceSecrets(
@@ -2390,6 +2440,18 @@ export async function updateAnalyticsProject(
     ...patch,
   });
 
+  const hasRuntimeState =
+    existing.latestRuns.length > 0 ||
+    existing.sources.some((source) => source.lastSyncAt !== null);
+  if (hasRuntimeState) {
+    const immutableChanges = immutableInfraChangesForProject(existing, normalized);
+    if (immutableChanges.length > 0) {
+      throw new Error(
+        `Cannot change ${immutableChanges.join(", ")} after the project has already produced runtime state. Create a new project or run an explicit migration instead.`
+      );
+    }
+  }
+
   if (useDemoStore()) {
     seedDemoStore();
     const store = getDemoStore();
@@ -2928,7 +2990,47 @@ function findEquivalentPendingRun(
   );
 }
 
+function latestSuccessfulRun(
+  bundle: AnalyticsProjectBundle,
+  runTypes: AnalyticsRunType[]
+) {
+  return bundle.latestRuns
+    .filter(
+      (run) =>
+        run.status === "succeeded" &&
+        run.finishedAt &&
+        runTypes.includes(run.runType)
+    )
+    .sort((left, right) => {
+      const leftFinishedAt = left.finishedAt?.getTime() ?? 0;
+      const rightFinishedAt = right.finishedAt?.getTime() ?? 0;
+      return rightFinishedAt - leftFinishedAt;
+    })[0] ?? null;
+}
+
 function hasSuccessfulDependency(bundle: AnalyticsProjectBundle, runType: AnalyticsRunType) {
+  if (runType === "bounds_refresh") {
+    return bundle.latestRuns.some(
+      (run) =>
+        (run.runType === "backfill" || run.runType === "ingestion") &&
+        run.status === "succeeded"
+    );
+  }
+
+  if (runType === "forecast") {
+    const latestBoundsRefresh = latestSuccessfulRun(bundle, ["bounds_refresh"]);
+    if (!latestBoundsRefresh?.finishedAt) {
+      return false;
+    }
+
+    const latestSourceRefresh = latestSuccessfulRun(bundle, ["backfill", "ingestion"]);
+    if (!latestSourceRefresh?.finishedAt) {
+      return true;
+    }
+
+    return latestBoundsRefresh.finishedAt.getTime() >= latestSourceRefresh.finishedAt.getTime();
+  }
+
   const dependencies = runDependencies(runType);
   if (dependencies.length === 0) {
     return true;
@@ -3020,6 +3122,11 @@ export async function requestAnalyticsSync(
   input: AnalyticsSyncRequestInput
 ) {
   await ensurePlatformSchema();
+  if (input.runType === "serving_refresh") {
+    throw new Error(
+      "serving_refresh is no longer a queueable run type. Forecast execution now owns live artifact publication directly."
+    );
+  }
   const bundle = await getAnalyticsProject(projectId);
   if (!bundle) {
     throw new Error("Project not found.");
@@ -3087,11 +3194,6 @@ export async function requestAnalyticsSync(
             status: "blocked",
             message: "Waiting for bounds refresh to complete before forecasting.",
             payload: { stage: "bootstrap-3", sequence: "initial-bootstrap" },
-          }),
-          buildRunRecord("serving_refresh", {
-            status: "blocked",
-            message: "Waiting for forecast publication before serving refresh.",
-            payload: { stage: "bootstrap-4", sequence: "initial-bootstrap" },
           }),
         ]
       : [buildRunRecord(input.runType)];
@@ -3556,7 +3658,7 @@ export function buildAnalyticsProjectConfig(bundle: AnalyticsProjectBundle) {
       "2. Warehouse datasets and the GCS bucket are auto-derived from project slug + GCP project and should be auto-created remotely when the worker first runs.",
       "3. AppMetrica, BigQuery export, Unity Ads spend, and Google Ads spend are configured in connector settings.",
       "4. Bounds artifacts point to a GCS bucket/prefix where interval manifests are published.",
-      "5. Create-project flow automatically queues bootstrap: backfill → bounds refresh → forecast → serving refresh.",
+      "5. Create-project flow automatically queues bootstrap: backfill → bounds refresh → forecast.",
       "6. Forecast strategy precomputes a project-level matrix across baseline segments, countries, spend sources, and platforms, remembers recent combinations, and falls back to on-demand calculation when the selection is cold.",
     ],
     notebookParity: {

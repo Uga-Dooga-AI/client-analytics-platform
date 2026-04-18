@@ -7,6 +7,23 @@ with source as (
     select * from {{ source('appmetrica_raw', 'events') }}
 ),
 
+deduped as (
+    select *
+    from source
+    where event_datetime is not null
+      and appmetrica_device_id is not null
+    qualify row_number() over (
+        partition by
+            cast(application_id as string),
+            cast(appmetrica_device_id as string),
+            cast(event_datetime as timestamp),
+            cast(event_name as string),
+            cast(coalesce(session_id, '') as string),
+            cast(coalesce(event_json, '') as string)
+        order by cast(event_datetime as timestamp) desc
+    ) = 1
+),
+
 cleaned as (
     select
         -- identity
@@ -29,9 +46,7 @@ cleaned as (
         upper(cast(country_iso_code    as string))          as country_code,
         cast(city                      as string)           as city
 
-    from source
-    where event_datetime is not null
-      and appmetrica_device_id is not null
+    from deduped
 )
 
 select * from cleaned

@@ -2,19 +2,28 @@
 # Copy to job_config.yml and fill in real values before running.
 # All sensitive values should be passed via environment variables, not this file.
 
+project_slug: word-catcher
+
 bigquery:
   # GCP project ID
   # Env var: GCP_PROJECT_ID
   project_id: REPLACE_WITH_GCP_PROJECT_ID
 
+  # BigQuery multi-region for raw/stg/mart datasets
+  location: US
+
+  # Raw/staging datasets required for dbt rebuild before forecasting
+  raw_dataset: raw
+  stg_dataset: stg
+
   # Dataset containing dbt marts (read source)
   mart_dataset: mart
 
   # Source mart table for experiment time-series
-  experiment_daily_table: mart_experiment_daily
+  experiment_daily_table: word_catcher_experiment_daily
 
   # Destination table for forecast output
-  forecast_table: mart_forecast_points
+  forecast_table: word_catcher_forecast_points
 
 forecast:
   # Number of days to forecast into the future
@@ -48,5 +57,6 @@ schedule:
 # Environment variables required at runtime (do not set values here):
 #   GCP_PROJECT_ID                 — GCP project ID (overrides bigquery.project_id)
 #   BQ_MART_DATASET                — mart dataset name (overrides bigquery.mart_dataset)
+#   BQ_LOCATION                    — BigQuery location override for dbt + worker runtime
 #   GOOGLE_APPLICATION_CREDENTIALS — path to service account JSON (or use Workload Identity)
 #   JOB_CONFIG_PATH                — path to this config file (default: config/job_config.example.yml)
