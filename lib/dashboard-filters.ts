@@ -151,11 +151,13 @@ function getRangeDates(rangeKey: DashboardRangeKey, now = new Date()) {
 }
 
 function getDefaultProjectForPath(pathname: string): DashboardProjectKey {
-  return pathname === "/overview" || pathname === "/segments" ? "all" : "word-catcher";
+  return pathname === "/overview" || pathname === "/segments" || pathname === "/data-quality"
+    ? "all"
+    : "word-catcher";
 }
 
 export function getProjectOptions(pathname: string) {
-  if (pathname === "/overview" || pathname === "/segments") {
+  if (pathname === "/overview" || pathname === "/segments" || pathname === "/data-quality") {
     return [
       { key: "all" as const, label: "Cross-project overview", shortLabel: "All" },
       ...DASHBOARD_PROJECTS,

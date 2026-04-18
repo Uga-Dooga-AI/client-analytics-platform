@@ -55,6 +55,16 @@ const ANALYZE_ITEMS = [
       </svg>
     ),
   },
+  {
+    label: "Data Quality",
+    href: "/data-quality",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2 8.5L5.25 11.5L14 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M13.5 8v4.5H2.5V3.5H9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
 ];
 
 const COMPARE_ITEMS = [
