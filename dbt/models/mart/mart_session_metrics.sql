@@ -73,4 +73,3 @@ select
     safe_divide(a.long_sessions, a.total_sessions)  as long_session_rate
 from agg a
 left join daily_users du using (date, os_name)
-order by date desc, os_name

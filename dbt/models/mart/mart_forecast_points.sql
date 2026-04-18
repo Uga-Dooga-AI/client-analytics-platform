@@ -60,4 +60,3 @@ select
     generated_at
 from ranked
 where row_num = 1
-order by generated_at desc, metric, date

@@ -58,4 +58,3 @@ select
     coalesce(prev_step_entries - entries, 0)                                as drop_off,
     coalesce(step_conversion_rate, 1.0)                                     as conversions
 from with_conversions
-order by date desc, funnel_id, step_order

@@ -97,7 +97,7 @@ def _build_profiles_payload(config: dict) -> dict[str, object]:
     }
 
 
-def _run_dbt_command(config: dict, *, select: list[str]) -> None:
+def _run_dbt_command(config: dict, *, select: list[str], command_name: str = "run") -> None:
     dbt_vars = _build_dbt_vars(config)
     if not dbt_vars["gcp_project_id"]:
         raise ValueError("Forecast dbt runtime requires bigquery.project_id in the generated config.")
@@ -114,7 +114,7 @@ def _run_dbt_command(config: dict, *, select: list[str]) -> None:
 
         command = [
             dbt_bin,
-            "build",
+            command_name,
             "--fail-fast",
             "--project-dir",
             str(project_dir),

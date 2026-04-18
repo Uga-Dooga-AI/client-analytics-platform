@@ -95,4 +95,3 @@ select
     safe_divide(retained_d1, installed)             as d1_retention_rate,
     safe_divide(retained_d7, installed)             as d7_retention_rate
 from funnel
-order by install_date desc, installed desc

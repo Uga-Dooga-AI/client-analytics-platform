@@ -124,4 +124,3 @@ left join revenue rv
     using (experiment_id, variant, date, app_id, os_name, country_code)
 left join guardrail gr
     using (experiment_id, variant, date, app_id, os_name, country_code)
-order by ex.date desc, ex.experiment_id, ex.variant

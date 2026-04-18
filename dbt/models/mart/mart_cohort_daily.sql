@@ -161,4 +161,3 @@ left join retention r
     using (cohort_date, os_name, country_code, tracker_name, period_day)
 left join cumulative_revenue cr
     using (cohort_date, os_name, country_code, tracker_name, period_day)
-order by p.cohort_date desc, p.period_day

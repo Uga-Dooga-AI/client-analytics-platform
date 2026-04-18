@@ -90,4 +90,3 @@ select
     -- ARPU на дату (требует join с mart_daily_active_users для полного расчёта)
     round(safe_divide(gross_revenue, paying_users), 2)  as arppu
 from agg
-order by date desc, gross_revenue desc

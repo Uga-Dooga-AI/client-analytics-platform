@@ -80,4 +80,3 @@ left join wau_rolling wr
     using (app_id, date, os_name)
 left join mau_rolling mr
     using (app_id, date, os_name)
-order by da.date desc, da.app_id
