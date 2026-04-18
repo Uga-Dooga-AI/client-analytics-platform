@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeInternalWorker } from "@/lib/platform/internal-auth";
+import { resolvePublicBaseUrl } from "@/lib/platform/public-origin";
 import { buildAnalyticsRuntimeBundle } from "@/lib/platform/runtime-bundle";
 import {
   getAnalyticsRunContext,
@@ -93,7 +94,7 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  return NextResponse.json(serializeRunContext(context, request.nextUrl.origin));
+  return NextResponse.json(serializeRunContext(context, resolvePublicBaseUrl(request)));
 }
 
 export async function PATCH(

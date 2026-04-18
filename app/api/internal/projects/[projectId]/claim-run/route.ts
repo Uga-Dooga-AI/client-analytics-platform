@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeInternalWorker } from "@/lib/platform/internal-auth";
+import { resolvePublicBaseUrl } from "@/lib/platform/public-origin";
 import { buildAnalyticsRuntimeBundle } from "@/lib/platform/runtime-bundle";
 import {
   claimNextAnalyticsRun,
@@ -79,7 +80,7 @@ export async function POST(
         finishedAt: context.run.finishedAt?.toISOString() ?? null,
       },
       runtimeBundle: buildAnalyticsRuntimeBundle(context.bundle, {
-        baseUrl: request.nextUrl.origin,
+        baseUrl: resolvePublicBaseUrl(request),
       }),
     });
   } catch (error) {

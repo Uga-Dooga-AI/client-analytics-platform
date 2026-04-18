@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeInternalWorker } from "@/lib/platform/internal-auth";
+import { resolvePublicBaseUrl } from "@/lib/platform/public-origin";
 import { buildAnalyticsRuntimeBundle } from "@/lib/platform/runtime-bundle";
 import { getAnalyticsProject } from "@/lib/platform/store";
 
@@ -22,7 +23,7 @@ export async function GET(
 
   return NextResponse.json({
     runtimeBundle: buildAnalyticsRuntimeBundle(project, {
-      baseUrl: request.nextUrl.origin,
+      baseUrl: resolvePublicBaseUrl(request),
     }),
   });
 }
