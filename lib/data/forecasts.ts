@@ -33,6 +33,16 @@ const METRIC_META: Record<
     unit: "$",
     subtitle: "Projected revenue with confidence interval from the latest published forecast run.",
   },
+  dau: {
+    label: "DAU forecast",
+    unit: "",
+    subtitle: "Projected daily active users with confidence interval from the latest published forecast run.",
+  },
+  installs: {
+    label: "Installs forecast",
+    unit: "",
+    subtitle: "Projected installs with confidence interval from the latest published forecast run.",
+  },
   exposures: {
     label: "Exposure forecast",
     unit: "",

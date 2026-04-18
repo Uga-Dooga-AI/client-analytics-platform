@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_METRICS = {
     "revenue": "SUM(COALESCE(revenue, 0))",
+    "dau": "SUM(COALESCE(dau, 0))",
+    "installs": "SUM(COALESCE(installed, 0))",
     "exposures": "SUM(COALESCE(exposures, 0))",
     "activations": "SUM(COALESCE(activations, 0))",
     "guardrail_crashes": "SUM(COALESCE(guardrail_crashes, 0))",
@@ -47,6 +49,16 @@ class MartReader:
             os.environ.get("BQ_REVENUE_METRICS_TABLE")
             or self._derive_companion_table("revenue_metrics")
             or "mart_revenue_metrics"
+        )
+        self.daily_active_users_table = (
+            os.environ.get("BQ_DAILY_ACTIVE_USERS_TABLE")
+            or self._derive_companion_table("daily_active_users")
+            or "mart_daily_active_users"
+        )
+        self.installs_funnel_table = (
+            os.environ.get("BQ_INSTALLS_FUNNEL_TABLE")
+            or self._derive_companion_table("installs_funnel")
+            or "mart_installs_funnel"
         )
         self.input_path = input_path or os.environ.get("FORECAST_INPUT_PATH")
 
@@ -116,9 +128,13 @@ class MartReader:
     ) -> "pd.DataFrame":
         import pandas as pd
 
-        metric_names = [metric for metric in (metrics or ["revenue", "exposures", "activations"]) if metric in ALLOWED_METRICS]
+        metric_names = [
+            metric
+            for metric in (metrics or ["revenue", "dau", "installs", "exposures", "activations"])
+            if metric in ALLOWED_METRICS
+        ]
         if not metric_names:
-            metric_names = ["revenue", "exposures", "activations"]
+            metric_names = ["revenue", "dau", "installs", "exposures", "activations"]
 
         if self._client is None:
             return self._read_from_local_input(metric_names)
@@ -145,6 +161,12 @@ class MartReader:
         if metric == "revenue":
             table_name = self.revenue_metrics_table
             value_sql = "SUM(COALESCE(gross_revenue, 0))"
+        elif metric == "dau":
+            table_name = self.daily_active_users_table
+            value_sql = "SUM(COALESCE(dau, 0))"
+        elif metric == "installs":
+            table_name = self.installs_funnel_table
+            value_sql = "SUM(COALESCE(installed, 0))"
         else:
             table_name = self.experiment_daily_table
             value_sql = ALLOWED_METRICS[metric]

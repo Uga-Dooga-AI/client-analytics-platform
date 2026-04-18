@@ -178,6 +178,8 @@ function buildForecastPrewarmPlan(settings: AnalyticsProjectBundle["project"]["s
 
 const FORECAST_RUNTIME_METRICS = [
   "revenue",
+  "dau",
+  "installs",
   "exposures",
   "activations",
   "guardrail_crashes",

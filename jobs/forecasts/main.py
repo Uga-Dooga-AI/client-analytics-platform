@@ -71,7 +71,7 @@ def resolve_metric_list(config: dict) -> list[str]:
     metrics = forecast_cfg.get("metrics")
     if isinstance(metrics, list):
         return [str(metric).strip() for metric in metrics if str(metric).strip()]
-    return ["revenue", "exposures", "activations"]
+    return ["revenue", "dau", "installs", "exposures", "activations"]
 
 
 def resolve_hot_combination_limit(config: dict) -> int:
