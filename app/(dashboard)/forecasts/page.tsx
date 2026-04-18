@@ -7,7 +7,7 @@ import {
   runStatusTone,
   scopeBundles,
 } from "@/lib/dashboard-live";
-import { getForecastCards, getForecastTrajectories } from "@/lib/data/forecasts";
+import { buildForecastCards, getForecastTrajectories } from "@/lib/data/forecasts";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
 import { listAnalyticsProjects, listForecastCombinations } from "@/lib/platform/store";
 
@@ -87,13 +87,13 @@ export default async function ForecastsPage({
   const recentRuns = flattenRuns(scopedBundles).filter(({ run }) =>
     run.runType === "forecast" || run.runType === "bounds_refresh"
   );
-  const [combinations, forecastCards, forecastTrajectories] = await Promise.all([
+  const [combinations, forecastTrajectories] = await Promise.all([
     selectedBundle
       ? listForecastCombinations(selectedBundle.project.id, 20, { includeSystem: true })
       : Promise.resolve([]),
-    getForecastCards({ projectKey: filters.projectKey }),
     getForecastTrajectories({ projectKey: filters.projectKey }),
   ]);
+  const forecastCards = buildForecastCards(forecastTrajectories);
   const strategy = selectedBundle?.project.settings.forecastStrategy ?? null;
 
   return (

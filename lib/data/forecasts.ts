@@ -1,7 +1,7 @@
 import type { ForecastCard, ForecastRun, ForecastTrajectory } from "@/lib/mock-data";
 import { scopeBundles } from "@/lib/dashboard-live";
 import { type DashboardProjectKey } from "@/lib/dashboard-filters";
-import { executeBigQuery, loadBigQueryContexts } from "@/lib/live-warehouse";
+import { executeBigQuery, loadBigQueryContexts, type ProjectQueryContext } from "@/lib/live-warehouse";
 import { listAnalyticsProjects } from "@/lib/platform/store";
 
 export type ForecastsFilter = {
@@ -19,6 +19,11 @@ type ForecastPointRow = {
 
 const FORECAST_SERIES_POINTS = 14;
 const FORECAST_CARD_POINTS = 5;
+
+type ForecastTableCandidate = {
+  kind: "serving" | "raw";
+  table: string;
+};
 
 const METRIC_META: Record<
   string,
@@ -101,7 +106,10 @@ export async function getForecastRuns(filters?: ForecastsFilter): Promise<Foreca
 
 export async function getForecastCards(filters?: ForecastsFilter): Promise<ForecastCard[]> {
   const trajectories = await getForecastTrajectories(filters);
+  return buildForecastCards(trajectories);
+}
 
+export function buildForecastCards(trajectories: ForecastTrajectory[]): ForecastCard[] {
   return trajectories.map((trajectory) => {
     const cardPoints = thinSeries(trajectory.series, FORECAST_CARD_POINTS);
     const lastPoint = trajectory.series[trajectory.series.length - 1];
@@ -150,33 +158,8 @@ export async function getForecastTrajectories(filters?: ForecastsFilter): Promis
 
   await Promise.all(
     Array.from(contexts.values()).map(async (context) => {
-      const prefix = context.bundle.project.slug.replace(/-/g, "_");
-      const forecastTable = `\`${context.warehouseProjectId}.${context.bundle.project.martDataset}.${prefix}_forecast_points_serving\``;
-
-      let rows: ForecastPointRow[] = [];
-      try {
-        rows = await executeBigQuery<ForecastPointRow>(
-          context,
-          `
-            WITH latest_generated AS (
-              SELECT MAX(generated_at) AS latest_generated_at
-              FROM ${forecastTable}
-            )
-            SELECT
-              metric,
-              CAST(date AS STRING) AS forecast_date,
-              p50,
-              p10,
-              p90,
-              CAST(generated_at AS STRING) AS generated_at
-            FROM ${forecastTable}
-            CROSS JOIN latest_generated
-            WHERE latest_generated.latest_generated_at IS NOT NULL
-              AND generated_at = latest_generated.latest_generated_at
-            ORDER BY metric, date
-          `
-        );
-      } catch {
+      const rows = await loadLatestForecastRows(context);
+      if (rows.length === 0) {
         return;
       }
 
@@ -225,6 +208,68 @@ export async function getForecastTrajectories(filters?: ForecastsFilter): Promis
 
     return left.metric.localeCompare(right.metric);
   });
+}
+
+async function loadLatestForecastRows(context: ProjectQueryContext): Promise<ForecastPointRow[]> {
+  const prefix = context.bundle.project.slug.replace(/-/g, "_");
+  const tables: ForecastTableCandidate[] = [
+    {
+      kind: "serving",
+      table: `\`${context.warehouseProjectId}.${context.bundle.project.martDataset}.${prefix}_forecast_points_serving\``,
+    },
+    {
+      kind: "raw",
+      table: `\`${context.warehouseProjectId}.${context.bundle.project.martDataset}.${prefix}_forecast_points\``,
+    },
+  ];
+
+  for (const candidate of tables) {
+    try {
+      const rows = await executeBigQuery<ForecastPointRow>(
+        context,
+        `
+          WITH latest_generated AS (
+            SELECT MAX(generated_at) AS latest_generated_at
+            FROM ${candidate.table}
+          )
+          SELECT
+            metric,
+            CAST(date AS STRING) AS forecast_date,
+            p50,
+            p10,
+            p90,
+            CAST(generated_at AS STRING) AS generated_at
+          FROM ${candidate.table}
+          CROSS JOIN latest_generated
+          WHERE latest_generated.latest_generated_at IS NOT NULL
+            AND generated_at = latest_generated.latest_generated_at
+          ORDER BY metric, date
+        `
+      );
+
+      if (rows.length > 0) {
+        if (candidate.kind === "raw") {
+          console.warn("[FORECASTS] Falling back to raw forecast table for live reads", {
+            projectId: context.bundle.project.id,
+            projectSlug: context.bundle.project.slug,
+            table: candidate.table,
+          });
+        }
+        return rows;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown BigQuery error";
+      console.error("[FORECASTS] Failed to read forecast table", {
+        projectId: context.bundle.project.id,
+        projectSlug: context.bundle.project.slug,
+        tableKind: candidate.kind,
+        table: candidate.table,
+        message,
+      });
+    }
+  }
+
+  return [];
 }
 
 function thinSeries<T>(series: T[], maxPoints: number) {
