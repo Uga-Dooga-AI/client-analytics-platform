@@ -2,13 +2,13 @@
 -- Grain: run_id × metric × date
 -- Source table convention: {project_slug}_forecast_points in mart dataset
 
-{%- set mart_dataset = var('mart_dataset', target.schema) -%}
-{%- set source_identifier = var('project_slug') | replace('-', '_') ~ '_forecast_points' -%}
-{%- set source_relation = adapter.get_relation(
+{% set mart_dataset = var('mart_dataset', target.schema) %}
+{% set source_identifier = var('project_slug') | replace('-', '_') ~ '_forecast_points' %}
+{% set source_relation = adapter.get_relation(
     database=target.database,
     schema=mart_dataset,
     identifier=source_identifier
-) -%}
+) %}
 
 with source as (
     {% if source_relation %}
