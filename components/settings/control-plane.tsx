@@ -655,7 +655,7 @@ export function SettingsControlPlane({
   }
 
   async function triggerRun(
-    runType: "bootstrap" | "backfill" | "ingestion" | "forecast" | "bounds_refresh" | "serving_refresh"
+    runType: "bootstrap" | "backfill" | "ingestion" | "forecast" | "bounds_refresh"
   ) {
     if (!selectedProjectId) {
       return;

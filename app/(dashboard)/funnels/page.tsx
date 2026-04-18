@@ -71,8 +71,8 @@ export default async function FunnelsPage({
   const eventNames = Array.isArray(appMetricaSource?.config.eventNames)
     ? appMetricaSource?.config.eventNames.filter((value): value is string => typeof value === "string")
     : [];
-  const funnelRuns = flattenRuns(scopedBundles).filter(({ run }) =>
-    run.runType === "backfill" || run.runType === "ingestion" || run.runType === "serving_refresh"
+  const funnelRuns = flattenRuns(scopedBundles).filter(
+    ({ run }) => run.runType === "backfill" || run.runType === "ingestion"
   );
   const appMetricaTone = appMetricaSource ? sourceStatusTone(appMetricaSource.status) : null;
   const orderedLiveStages = eventNames
@@ -109,7 +109,7 @@ export default async function FunnelsPage({
           <InfoCard label="Selected project" value={selectedProjectLabel} sub="Current event funnel scope" />
           <InfoCard label="Tracked events" value={eventNames.length.toString()} sub={eventNames.length ? "Configured in AppMetrica source" : "No explicit event catalog"} />
           <InfoCard label="AppMetrica source" value={appMetricaTone?.label ?? "Missing"} sub={appMetricaSource ? appMetricaSource.deliveryMode : "No AppMetrica source configured"} />
-          <InfoCard label="Recent pipeline runs" value={funnelRuns.length.toString()} sub="Backfill, ingestion, and serving attempts" />
+          <InfoCard label="Recent pipeline runs" value={funnelRuns.length.toString()} sub="Backfill and ingestion attempts" />
           <InfoCard
             label="Live funnel stages"
             value={orderedLiveStages.length.toString()}
