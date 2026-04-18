@@ -162,7 +162,20 @@ export async function dispatchAnalyticsRun(
         "Content-Type": "application/json",
         "x-goog-user-project": bundle.project.gcpProjectId,
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        overrides: {
+          containerOverrides: [
+            {
+              env: [
+                {
+                  name: "ANALYTICS_RUN_ID",
+                  value: run.id,
+                },
+              ],
+            },
+          ],
+        },
+      }),
       cache: "no-store",
     }
   );
