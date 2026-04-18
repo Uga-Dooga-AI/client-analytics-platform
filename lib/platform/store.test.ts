@@ -65,7 +65,9 @@ describe("analytics run orchestration", () => {
     });
 
     const promotedRuns = await listAnalyticsProjectRuns(bundle.project.id);
-    const promotedBoundsRun = promotedRuns.find((run) => run.runType === "bounds_refresh");
+    const promotedBoundsRun = promotedRuns.find(
+      (run) => run.runType === "bounds_refresh" && run.status === "queued"
+    );
 
     expect(promotedBoundsRun?.status).toBe("queued");
   });
@@ -84,6 +86,7 @@ describe("analytics run orchestration", () => {
         displayName: "Stale Bounds Check",
         autoBootstrapOnCreate: false,
         initialBackfillDays: 1,
+        precomputePrimaryForecasts: false,
         appmetricaAppIds: ["3927166"],
         appmetricaToken: "test-token",
         bigquerySourceProjectId: "analytics-platform-493522",
@@ -114,9 +117,7 @@ describe("analytics run orchestration", () => {
 
     runs = await listAnalyticsProjectRuns(bundle.project.id);
     const firstBounds = runs.find(
-      (run) =>
-        run.runType === "bounds_refresh" &&
-        run.payload?.sequence === "initial-bootstrap"
+      (run) => run.runType === "bounds_refresh" && run.status === "queued"
     );
     expect(firstBounds?.status).toBe("queued");
 
@@ -128,9 +129,7 @@ describe("analytics run orchestration", () => {
 
     runs = await listAnalyticsProjectRuns(bundle.project.id);
     const bootstrapForecast = runs.find(
-      (run) =>
-        run.runType === "forecast" &&
-        run.payload?.sequence === "initial-bootstrap"
+      (run) => run.runType === "forecast" && run.status === "queued"
     );
     expect(bootstrapForecast?.status).toBe("queued");
 
@@ -301,7 +300,9 @@ describe("analytics run orchestration", () => {
     const secondBackfill = runs.find(
       (run) => run.runType === "backfill" && run.id !== firstBackfill!.id
     );
-    const promotedBounds = runs.find((run) => run.runType === "bounds_refresh");
+    const promotedBounds = runs.find(
+      (run) => run.runType === "bounds_refresh" && run.status === "queued"
+    );
 
     expect(secondBackfill?.status).toBe("queued");
     expect(secondBackfill?.payload.backfillContinuation).toBe(true);
@@ -313,10 +314,36 @@ describe("analytics run orchestration", () => {
       message: "Bounds rebuilt after chunk 1.",
     });
 
+    runs = await listAnalyticsProjectRuns(bundle.project.id);
+    const firstForecast = runs.find(
+      (run) => run.runType === "forecast" && run.status === "queued"
+    );
+
+    expect(firstForecast?.status).toBe("queued");
+
+    await updateAnalyticsSyncRun(firstForecast!.id, {
+      status: "succeeded",
+      sourceType: "bounds_artifacts",
+      message: "Forecast rebuilt after chunk 1.",
+    });
+
     await updateAnalyticsSyncRun(secondBackfill!.id, {
       status: "succeeded",
       sourceType: "appmetrica_logs",
       message: "Chunk 2 complete.",
+    });
+
+    runs = await listAnalyticsProjectRuns(bundle.project.id);
+    const secondBounds = runs.find(
+      (run) => run.runType === "bounds_refresh" && run.id !== promotedBounds!.id
+    );
+
+    expect(secondBounds?.status).toBe("queued");
+
+    await updateAnalyticsSyncRun(secondBounds!.id, {
+      status: "succeeded",
+      sourceType: "bounds_artifacts",
+      message: "Bounds rebuilt after chunk 2.",
     });
 
     runs = await listAnalyticsProjectRuns(bundle.project.id);

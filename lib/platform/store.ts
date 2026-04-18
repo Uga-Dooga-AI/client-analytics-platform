@@ -3556,6 +3556,68 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
 
   let promotedRunsToDispatch: AnalyticsSyncRunRecord[] = [];
   let promotedDispatchBundle: AnalyticsProjectBundle | null = null;
+  const buildFollowUpRunRequests = (run: AnalyticsSyncRunRecord): AnalyticsSyncRequestInput[] => {
+    if (run.status !== "succeeded") {
+      return [];
+    }
+
+    if (run.runType === "backfill" || run.runType === "ingestion") {
+      return [
+        {
+          runType: "bounds_refresh",
+          requestedBy: run.requestedBy,
+          triggerKind: run.triggerKind,
+          payload: {
+            sourceRunId: run.id,
+            sourceRunType: run.runType,
+          },
+        },
+      ];
+    }
+
+    if (run.runType === "bounds_refresh") {
+      return [
+        {
+          runType: "forecast",
+          requestedBy: run.requestedBy,
+          triggerKind: run.triggerKind,
+          payload: {
+            sourceRunId: run.id,
+            sourceRunType: run.runType,
+          },
+        },
+      ];
+    }
+
+    return [];
+  };
+  const requestFollowUpRunsIfNeeded = async (run: AnalyticsSyncRunRecord) => {
+    const followUpRunRequests = buildFollowUpRunRequests(run);
+    if (followUpRunRequests.length === 0) {
+      return;
+    }
+
+    const bundle = await getAnalyticsProject(run.projectId);
+    if (!bundle) {
+      return;
+    }
+
+    const followUpRunsToQueue = followUpRunRequests.filter(
+      (input) =>
+        !bundle.latestRuns.some(
+          (existingRun) =>
+            existingRun.runType === input.runType && isPendingRunStatus(existingRun.status)
+        )
+    );
+
+    if (followUpRunsToQueue.length === 0) {
+      return;
+    }
+
+    await Promise.allSettled(
+      followUpRunsToQueue.map((input) => requestAnalyticsSync(run.projectId, input))
+    );
+  };
 
   if (useDemoStore()) {
     seedDemoStore();
@@ -3632,6 +3694,8 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
         store.runs = store.runs.map((run) => promotedMap.get(run.id) ?? run);
       }
     }
+
+    await requestFollowUpRunsIfNeeded(nextRun);
 
     return nextRun;
   }
@@ -3823,6 +3887,8 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
       )
     );
   }
+
+  await requestFollowUpRunsIfNeeded(updatedRun);
 
   return updatedRun;
 }
