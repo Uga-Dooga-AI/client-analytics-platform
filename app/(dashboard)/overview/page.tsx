@@ -20,6 +20,25 @@ export const dynamic = "force-dynamic";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
+function describeSourceSyncWindow(source: (Awaited<ReturnType<typeof listAnalyticsProjects>>)[number]["sources"][number]) {
+  const mode = source.config.mode === "api" ? "api" : "bigquery";
+  if (
+    !source.lastSyncAt &&
+    (source.sourceType === "unity_ads_spend" || source.sourceType === "google_ads_spend") &&
+    mode === "bigquery"
+  ) {
+    return {
+      primary: "Last sync: external mirror",
+      secondary: "Next sync: managed outside this platform",
+    };
+  }
+
+  return {
+    primary: `Last sync: ${formatDateTime(source.lastSyncAt)}`,
+    secondary: `Next sync: ${formatDateTime(source.nextSyncAt)}`,
+  };
+}
+
 function SectionHeader({
   title,
   subtitle,
@@ -539,6 +558,7 @@ export default async function OverviewPage({
               ) : (
                 scopedSources.map(({ projectName, source }, index) => {
                   const tone = sourceStatusTone(source.status);
+                  const syncWindow = describeSourceSyncWindow(source);
                   return (
                     <div
                       key={source.id}
@@ -562,10 +582,8 @@ export default async function OverviewPage({
                         </div>
                       </div>
                       <div style={{ fontSize: 12, color: "var(--color-ink-700)" }}>
-                        <div>Last sync: {formatDateTime(source.lastSyncAt)}</div>
-                        <div style={{ marginTop: 2, color: "var(--color-ink-500)" }}>
-                          Next sync: {formatDateTime(source.nextSyncAt)}
-                        </div>
+                        <div>{syncWindow.primary}</div>
+                        <div style={{ marginTop: 2, color: "var(--color-ink-500)" }}>{syncWindow.secondary}</div>
                       </div>
                       <div style={{ display: "flex", justifyContent: "flex-end" }}>
                         <span

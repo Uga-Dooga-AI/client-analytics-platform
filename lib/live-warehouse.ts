@@ -376,6 +376,7 @@ export async function getLiveOverviewMetrics(bundles: AnalyticsProjectBundle[]) 
         `
           WITH install_anchor AS (
             SELECT
+              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_install_partition,
               COALESCE(MAX(DATE(SAFE_CAST(install_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_install_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
           ),
@@ -385,12 +386,16 @@ export async function getLiveOverviewMetrics(bundles: AnalyticsProjectBundle[]) 
               CAST(MAX(DATE(SAFE_CAST(install_datetime AS TIMESTAMP))) AS STRING) AS last_install_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
             CROSS JOIN install_anchor
-            WHERE DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
+            WHERE _PARTITIONDATE
+              BETWEEN DATE_SUB(install_anchor.max_install_partition, INTERVAL 6 DAY)
+                  AND install_anchor.max_install_partition
+              AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
               BETWEEN DATE_SUB(install_anchor.max_install_date, INTERVAL 6 DAY)
                   AND install_anchor.max_install_date
           ),
           session_anchor AS (
             SELECT
+              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_session_partition,
               COALESCE(MAX(DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_session_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawSessionsTable}\`
           ),
@@ -400,12 +405,16 @@ export async function getLiveOverviewMetrics(bundles: AnalyticsProjectBundle[]) 
               CAST(MAX(DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))) AS STRING) AS last_session_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawSessionsTable}\`
             CROSS JOIN session_anchor
-            WHERE DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))
+            WHERE _PARTITIONDATE
+              BETWEEN DATE_SUB(session_anchor.max_session_partition, INTERVAL 6 DAY)
+                  AND session_anchor.max_session_partition
+              AND DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))
               BETWEEN DATE_SUB(session_anchor.max_session_date, INTERVAL 6 DAY)
                   AND session_anchor.max_session_date
           ),
           revenue_anchor AS (
             SELECT
+              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_revenue_partition,
               COALESCE(MAX(DATE(SAFE_CAST(event_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_revenue_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
             WHERE event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
@@ -425,7 +434,10 @@ export async function getLiveOverviewMetrics(bundles: AnalyticsProjectBundle[]) 
                 ) AS revenue_value
               FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`,
                    revenue_anchor
-              WHERE DATE(SAFE_CAST(event_datetime AS TIMESTAMP))
+              WHERE _PARTITIONDATE
+                BETWEEN DATE_SUB(revenue_anchor.max_revenue_partition, INTERVAL 6 DAY)
+                    AND revenue_anchor.max_revenue_partition
+                AND DATE(SAFE_CAST(event_datetime AS TIMESTAMP))
                 BETWEEN DATE_SUB(revenue_anchor.max_revenue_date, INTERVAL 6 DAY)
                     AND revenue_anchor.max_revenue_date
                 AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
@@ -475,6 +487,7 @@ export async function getLiveTrackerRows(bundles: AnalyticsProjectBundle[]) {
         `
           WITH install_anchor AS (
             SELECT
+              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_install_partition,
               COALESCE(MAX(DATE(SAFE_CAST(install_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_install_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
           )
@@ -484,7 +497,10 @@ export async function getLiveTrackerRows(bundles: AnalyticsProjectBundle[]) {
             COUNT(DISTINCT CAST(appmetrica_device_id AS STRING)) AS installs
           FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
           CROSS JOIN install_anchor
-          WHERE DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
+          WHERE _PARTITIONDATE
+            BETWEEN DATE_SUB(install_anchor.max_install_partition, INTERVAL 13 DAY)
+                AND install_anchor.max_install_partition
+            AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
             BETWEEN DATE_SUB(install_anchor.max_install_date, INTERVAL 13 DAY)
                 AND install_anchor.max_install_date
           GROUP BY 1, 2
@@ -523,6 +539,7 @@ export async function getLiveCohortRows(bundles: AnalyticsProjectBundle[]) {
         `
           WITH install_anchor AS (
             SELECT
+              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_install_partition,
               COALESCE(MAX(DATE(SAFE_CAST(install_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_install_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
           ),
@@ -532,15 +549,26 @@ export async function getLiveCohortRows(bundles: AnalyticsProjectBundle[]) {
               DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) AS install_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
             CROSS JOIN install_anchor
-            WHERE DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
+            WHERE _PARTITIONDATE
+              BETWEEN DATE_SUB(install_anchor.max_install_partition, INTERVAL 21 DAY)
+                  AND install_anchor.max_install_partition
+              AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
               BETWEEN DATE_SUB(install_anchor.max_install_date, INTERVAL 21 DAY)
                   AND install_anchor.max_install_date
           ),
           first_sessions AS (
             SELECT
-              CAST(appmetrica_device_id AS STRING) AS device_id,
+              i.device_id,
               MIN(DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))) AS first_session_date
-            FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawSessionsTable}\`
+            FROM installs i
+            CROSS JOIN install_anchor
+            LEFT JOIN \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawSessionsTable}\`
+              ON CAST(appmetrica_device_id AS STRING) = i.device_id
+             AND _PARTITIONDATE
+               BETWEEN DATE_SUB(install_anchor.max_install_partition, INTERVAL 21 DAY)
+                   AND DATE_ADD(install_anchor.max_install_partition, INTERVAL 1 DAY)
+             AND DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))
+               BETWEEN i.install_date AND DATE_ADD(i.install_date, INTERVAL 1 DAY)
             GROUP BY 1
           ),
           daily_activity AS (
@@ -549,7 +577,10 @@ export async function getLiveCohortRows(bundles: AnalyticsProjectBundle[]) {
               DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP)) AS session_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawSessionsTable}\`
             CROSS JOIN install_anchor
-            WHERE DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))
+            WHERE _PARTITIONDATE
+              BETWEEN DATE_SUB(install_anchor.max_install_partition, INTERVAL 28 DAY)
+                  AND DATE_ADD(install_anchor.max_install_partition, INTERVAL 7 DAY)
+              AND DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))
               BETWEEN DATE_SUB(install_anchor.max_install_date, INTERVAL 28 DAY)
                   AND DATE_ADD(install_anchor.max_install_date, INTERVAL 7 DAY)
           )
@@ -643,6 +674,7 @@ export async function getLiveFunnelRows(bundles: AnalyticsProjectBundle[]) {
         `
           WITH event_anchor AS (
             SELECT
+              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_event_partition,
               COALESCE(MAX(DATE(SAFE_CAST(event_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_event_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
             WHERE event_name IN (${eventNames.map(quoteSqlString).join(", ")})
@@ -654,7 +686,10 @@ export async function getLiveFunnelRows(bundles: AnalyticsProjectBundle[]) {
             CAST(MAX(DATE(SAFE_CAST(event_datetime AS TIMESTAMP))) AS STRING) AS latest_date
           FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
           CROSS JOIN event_anchor
-          WHERE DATE(SAFE_CAST(event_datetime AS TIMESTAMP))
+          WHERE _PARTITIONDATE
+            BETWEEN DATE_SUB(event_anchor.max_event_partition, INTERVAL 6 DAY)
+                AND event_anchor.max_event_partition
+            AND DATE(SAFE_CAST(event_datetime AS TIMESTAMP))
             BETWEEN DATE_SUB(event_anchor.max_event_date, INTERVAL 6 DAY)
                 AND event_anchor.max_event_date
             AND event_name IN (${eventNames.map(quoteSqlString).join(", ")})

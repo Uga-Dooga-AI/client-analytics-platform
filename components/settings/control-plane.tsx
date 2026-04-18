@@ -342,6 +342,26 @@ function mergeSerializedRuns(primary: SerializedRun[], secondary: SerializedRun[
   return Array.from(byId.values()).sort(sortSerializedRunsDesc);
 }
 
+function describeSourceCredentialState(source: SerializedSource) {
+  const config = source.config ?? {};
+
+  if (source.sourceType === "bounds_artifacts") {
+    return "Not required";
+  }
+
+  if (
+    (source.sourceType === "unity_ads_spend" || source.sourceType === "google_ads_spend") &&
+    config.enabled !== false
+  ) {
+    const mode = config.mode === "api" ? "api" : "bigquery";
+    if (mode === "bigquery") {
+      return "Uses warehouse service account";
+    }
+  }
+
+  return source.secretPresent ? source.secretHint ?? "present" : "missing";
+}
+
 function parseCsv(value: string) {
   return value
     .split(",")
@@ -468,6 +488,7 @@ export function SettingsControlPlane({
   const [runHistory, setRunHistory] = useState<SerializedRun[]>(initialProjects[0]?.latestRuns ?? []);
   const [visibleRunCount, setVisibleRunCount] = useState<number>(RUN_HISTORY_LIMIT);
   const [isRunHistoryLoading, setIsRunHistoryLoading] = useState(false);
+  const [hasMoreRunHistory, setHasMoreRunHistory] = useState(false);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.project.id === selectedProjectId) ?? null,
@@ -602,6 +623,7 @@ export function SettingsControlPlane({
       setRunHistory([]);
       setVisibleRunCount(RUN_HISTORY_LIMIT);
       setIsRunHistoryLoading(false);
+      setHasMoreRunHistory(false);
       return;
     }
 
@@ -609,10 +631,15 @@ export function SettingsControlPlane({
     setRunHistory(selectedProject?.latestRuns ?? []);
     setVisibleRunCount(RUN_HISTORY_LIMIT);
     setIsRunHistoryLoading(true);
+    setHasMoreRunHistory(false);
 
-    async function loadRunHistory() {
+    async function loadRunHistory(offset = 0, append = false) {
       try {
-        const response = await fetch(`/api/admin/projects/${selectedProjectId}/runs`, {
+        const params = new URLSearchParams({
+          limit: String(RUN_HISTORY_LIMIT),
+          offset: String(offset),
+        });
+        const response = await fetch(`/api/admin/projects/${selectedProjectId}/runs?${params.toString()}`, {
           cache: "no-store",
         });
         const payload = await response.json().catch(() => null);
@@ -621,7 +648,13 @@ export function SettingsControlPlane({
         }
 
         const runs = Array.isArray(payload?.runs) ? (payload.runs as SerializedRun[]) : [];
-        setRunHistory(runs.sort(sortSerializedRunsDesc));
+        setHasMoreRunHistory(payload?.hasMore === true);
+        setRunHistory((current) =>
+          append ? mergeSerializedRuns(current, runs) : runs.sort(sortSerializedRunsDesc)
+        );
+        setVisibleRunCount((current) =>
+          append ? current + runs.length : Math.max(RUN_HISTORY_LIMIT, runs.length)
+        );
       } finally {
         if (active) {
           setIsRunHistoryLoading(false);
@@ -647,6 +680,7 @@ export function SettingsControlPlane({
     setRuntimeBundle(null);
     setRunHistory([]);
     setVisibleRunCount(RUN_HISTORY_LIMIT);
+    setHasMoreRunHistory(false);
     setFeedback("");
   }
 
@@ -656,6 +690,7 @@ export function SettingsControlPlane({
     setDraft(draftFromProject(project));
     setRunHistory(project.latestRuns);
     setVisibleRunCount(RUN_HISTORY_LIMIT);
+    setHasMoreRunHistory(project.latestRuns.length >= RUN_HISTORY_LIMIT);
     setFeedback("");
   }
 
@@ -709,6 +744,7 @@ export function SettingsControlPlane({
       setDraft(draftFromProject(nextProject));
       setRunHistory(nextProject.latestRuns);
       setVisibleRunCount(RUN_HISTORY_LIMIT);
+      setHasMoreRunHistory(nextProject.latestRuns.length >= RUN_HISTORY_LIMIT);
       setMode("edit");
       setFeedback(
         mode === "create"
@@ -1124,7 +1160,7 @@ export function SettingsControlPlane({
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10, fontSize: 11.5, color: "var(--color-ink-600)" }}>
                         <div>Last sync: {formatDateTime(source.lastSyncAt)}</div>
                         <div>Next sync: {formatDateTime(source.nextSyncAt)}</div>
-                        <div>Secret: {source.secretPresent ? source.secretHint ?? "present" : "missing"}</div>
+                        <div>Credentials: {describeSourceCredentialState(source)}</div>
                         <div>Config: {Object.values(source.config).some(Boolean) ? "ready" : "incomplete"}</div>
                       </div>
                     </div>
@@ -1159,17 +1195,38 @@ export function SettingsControlPlane({
                     Runs will appear here after the first backfill or refresh request.
                   </div>
                 ) : null}
-                {visibleRunCount < runHistory.length ? (
+                {hasMoreRunHistory ? (
                   <button
                     type="button"
-                    onClick={() =>
-                      setVisibleRunCount((current) =>
-                        Math.min(current + RUN_HISTORY_LIMIT, runHistory.length)
-                      )
-                    }
+                    onClick={async () => {
+                      if (!selectedProjectId || isRunHistoryLoading) {
+                        return;
+                      }
+
+                      setIsRunHistoryLoading(true);
+                      const params = new URLSearchParams({
+                        limit: String(RUN_HISTORY_LIMIT),
+                        offset: String(runHistory.length),
+                      });
+                      const response = await fetch(
+                        `/api/admin/projects/${selectedProjectId}/runs?${params.toString()}`,
+                        { cache: "no-store" }
+                      );
+                      const payload = await response.json().catch(() => null);
+                      if (!response.ok) {
+                        setIsRunHistoryLoading(false);
+                        return;
+                      }
+
+                      const runs = Array.isArray(payload?.runs) ? (payload.runs as SerializedRun[]) : [];
+                      setHasMoreRunHistory(payload?.hasMore === true);
+                      setRunHistory((current) => mergeSerializedRuns(current, runs));
+                      setVisibleRunCount((current) => current + runs.length);
+                      setIsRunHistoryLoading(false);
+                    }}
                     style={SECONDARY_BUTTON_STYLE}
                   >
-                    Load 100 more
+                    Load 100 older runs
                   </button>
                 ) : null}
                 {isRunHistoryLoading ? (

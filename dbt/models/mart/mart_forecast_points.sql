@@ -30,6 +30,9 @@ with source as (
         cast(null as float64) as p10,
         cast(null as float64) as p90,
         cast(null as timestamp) as generated_at
+    from (
+        select 1 as placeholder
+    ) as empty_source
     where false
     {% endif %}
 ),

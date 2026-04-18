@@ -64,6 +64,25 @@ function dateToUtcMs(value: string) {
   return new Date(`${value}T00:00:00Z`).getTime();
 }
 
+function describeSourceLastActivity(source: (Awaited<ReturnType<typeof listAnalyticsProjects>>)[number]["sources"][number]) {
+  const mode = source.config.mode === "api" ? "api" : "bigquery";
+  if (
+    !source.lastSyncAt &&
+    (source.sourceType === "unity_ads_spend" || source.sourceType === "google_ads_spend") &&
+    mode === "bigquery"
+  ) {
+    return {
+      primary: "External mirror",
+      secondary: "Read directly from mirror dataset",
+    };
+  }
+
+  return {
+    primary: formatDateTime(source.lastSyncAt),
+    secondary: formatRelativeTime(source.lastSyncAt),
+  };
+}
+
 export default async function AcquisitionPage({
   searchParams,
 }: {
@@ -312,6 +331,7 @@ export default async function AcquisitionPage({
                   <tbody>
                     {selectedBundle.sources.map((source, index) => {
                       const tone = sourceStatusTone(source.status);
+                      const activity = describeSourceLastActivity(source);
                       return (
                         <tr
                           key={source.id}
@@ -350,8 +370,8 @@ export default async function AcquisitionPage({
                             </span>
                           </td>
                           <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-500)" }}>
-                            <div>{formatDateTime(source.lastSyncAt)}</div>
-                            <div style={{ marginTop: 2 }}>{formatRelativeTime(source.lastSyncAt)}</div>
+                            <div>{activity.primary}</div>
+                            <div style={{ marginTop: 2 }}>{activity.secondary}</div>
                           </td>
                         </tr>
                       );

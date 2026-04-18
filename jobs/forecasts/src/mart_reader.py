@@ -214,11 +214,50 @@ class MartReader:
         if self._client is None:
             return None
 
+        candidates = [
+            (self.experiment_daily_table, "date"),
+            (self.revenue_metrics_table, "date"),
+            (self.daily_active_users_table, "date"),
+            (self.installs_funnel_table, "install_date"),
+        ]
+        latest_dates: list[date] = []
+        seen: set[tuple[str, str]] = set()
+
+        for table_name, date_column in candidates:
+            key = (table_name, date_column)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            latest_date = self._latest_available_date_for_table(table_name, date_column)
+            if latest_date is not None:
+                latest_dates.append(latest_date)
+
+        if not latest_dates:
+            return None
+
+        return max(latest_dates)
+
+    def _latest_available_date_for_table(self, table_name: str, date_column: str) -> date | None:
+        if self._client is None:
+            return None
+
         query = f"""
-            SELECT MAX(date) AS latest_date
-            FROM `{self.project_id}.{self.mart_dataset}.{self.experiment_daily_table}`
+            SELECT MAX({date_column}) AS latest_date
+            FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
         """
-        df = self._client.query(query).to_dataframe()
+        try:
+            df = self._client.query(query).to_dataframe()
+        except Exception as error:
+            message = str(error)
+            if "Not found: Table" in message:
+                logger.warning(
+                    "latest date probe skipped because source table is unavailable: %s",
+                    message,
+                )
+                return None
+            raise
+
         if df.empty or df["latest_date"].isna().all():
             return None
 

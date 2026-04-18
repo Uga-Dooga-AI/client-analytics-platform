@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MIN_ROWS = 14
+SHORT_HISTORY_MIN_ROWS = 7
 
 
 class ForecastEngine:
@@ -34,7 +35,7 @@ class ForecastEngine:
     ) -> None:
         self.horizon_days = horizon_days
         self.confidence_interval = max(0.5, min(confidence_interval, 0.99))
-        self.min_history_days = max(min_history_days, MIN_ROWS)
+        self.min_history_days = max(min_history_days, SHORT_HISTORY_MIN_ROWS)
         self.engine = engine
 
     def forecast(self, df: "pd.DataFrame", run_id: str | None = None) -> "pd.DataFrame":
@@ -71,9 +72,10 @@ class ForecastEngine:
         metric_df["date"] = pd.to_datetime(metric_df["date"])
         metric_df["value"] = pd.to_numeric(metric_df["value"], errors="coerce")
         metric_df = metric_df.dropna(subset=["value"])
-        if metric_df.empty or len(metric_df) < self.min_history_days:
+        if metric_df.empty or len(metric_df) < SHORT_HISTORY_MIN_ROWS:
             logger.info("forecast skipped for metric=%s: only %d usable rows", metric, len(metric_df))
             return pd.DataFrame()
+        short_history_fallback = len(metric_df) < self.min_history_days
 
         series = (
             metric_df.set_index("date")["value"]
@@ -83,20 +85,27 @@ class ForecastEngine:
             .fillna(method="ffill")
             .fillna(method="bfill")
         )
-        if len(series) < self.min_history_days:
+        if len(series) < SHORT_HISTORY_MIN_ROWS:
             logger.info("forecast skipped for metric=%s after resample: %d rows", metric, len(series))
             return pd.DataFrame()
+        if short_history_fallback:
+            logger.info(
+                "forecast using short-history fallback for metric=%s: %d usable rows",
+                metric,
+                len(series),
+            )
 
-        method = self._select_method(len(series))
+        method = "holt" if short_history_fallback else self._select_method(len(series))
+        interval_scale = 1.5 if short_history_fallback else 1.0
         try:
             if method == "prophet":
                 forecast = self._run_prophet(series)
             else:
-                forecast = self._run_holt(series)
+                forecast = self._run_holt(series, interval_scale=interval_scale)
         except Exception as exc:  # noqa: BLE001
             if method != "holt":
                 logger.warning("prophet forecast failed for %s, falling back to holt: %s", metric, exc)
-                forecast = self._run_holt(series)
+                forecast = self._run_holt(series, interval_scale=interval_scale)
             else:
                 raise
 
@@ -114,7 +123,7 @@ class ForecastEngine:
             return self.engine
         return "prophet" if series_length >= 90 else "holt"
 
-    def _run_holt(self, series):
+    def _run_holt(self, series, interval_scale: float = 1.0):
         import pandas as pd
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
@@ -133,8 +142,8 @@ class ForecastEngine:
             sigma = max(float(series.std(ddof=1) or 0.0) * 0.15, 1.0)
 
         z_value = NormalDist().inv_cdf((1 + self.confidence_interval) / 2)
-        lower = forecast - z_value * sigma
-        upper = forecast + z_value * sigma
+        lower = forecast - z_value * sigma * interval_scale
+        upper = forecast + z_value * sigma * interval_scale
 
         return pd.DataFrame(
             {

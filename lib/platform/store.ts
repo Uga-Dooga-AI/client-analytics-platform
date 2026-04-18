@@ -130,6 +130,13 @@ export interface AnalyticsSyncRunRecord {
   payload: Record<string, unknown>;
 }
 
+export interface AnalyticsProjectRunsPage {
+  runs: AnalyticsSyncRunRecord[];
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+}
+
 export interface AnalyticsProjectBundle {
   project: AnalyticsProjectRecord;
   sources: AnalyticsSourceRecord[];
@@ -2639,9 +2646,65 @@ export async function updateAnalyticsProject(
   return bundle;
 }
 
+export async function listAnalyticsProjectRunsPage(
+  projectId: string,
+  options?: { limit?: number; offset?: number }
+): Promise<AnalyticsProjectRunsPage> {
+  await ensurePlatformSchema();
+
+  const limit = Math.max(1, Math.min(options?.limit ?? LATEST_RUNS_LIMIT, 500));
+  const offset = Math.max(0, options?.offset ?? 0);
+
+  if (useDemoStore()) {
+    seedDemoStore();
+    const store = getDemoStore();
+    const orderedRuns = store.runs
+      .filter((run) => run.projectId === projectId)
+      .sort((left, right) => right.requestedAt.getTime() - left.requestedAt.getTime());
+    const slice = orderedRuns.slice(offset, offset + limit + 1);
+    return {
+      runs: slice.slice(0, limit),
+      hasMore: slice.length > limit,
+      limit,
+      offset,
+    };
+  }
+
+  const pool = getPostgresPool();
+  if (!pool) {
+    throw new Error("DATABASE_URL is not configured.");
+  }
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM analytics_sync_runs
+      WHERE project_id = $1
+      ORDER BY requested_at DESC
+      LIMIT $2
+      OFFSET $3
+    `,
+    [projectId, limit + 1, offset]
+  );
+
+  const runs = result.rows
+    .slice(0, limit)
+    .map((row) => normalizePgRun(row as Record<string, unknown>));
+
+  return {
+    runs,
+    hasMore: result.rows.length > limit,
+    limit,
+    offset,
+  };
+}
+
 export async function listAnalyticsProjectRuns(projectId: string) {
-  const bundle = await getAnalyticsProject(projectId);
-  return bundle?.latestRuns ?? [];
+  const page = await listAnalyticsProjectRunsPage(projectId, {
+    limit: LATEST_RUNS_LIMIT,
+    offset: 0,
+  });
+  return page.runs;
 }
 
 export async function getAnalyticsRunContext(runId: string) {

@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerAuth } from "@/lib/auth/server";
-import { listAnalyticsProjectRuns } from "@/lib/platform/store";
+import { listAnalyticsProjectRunsPage } from "@/lib/platform/store";
 
 export const runtime = "nodejs";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> }
 ) {
   const auth = await getServerAuth();
@@ -14,13 +14,19 @@ export async function GET(
   }
 
   const { projectId } = await params;
-  const runs = await listAnalyticsProjectRuns(projectId);
+  const searchParams = request.nextUrl.searchParams;
+  const limit = Number(searchParams.get("limit") ?? "") || undefined;
+  const offset = Number(searchParams.get("offset") ?? "") || undefined;
+  const result = await listAnalyticsProjectRunsPage(projectId, { limit, offset });
   return NextResponse.json({
-    runs: runs.map((run) => ({
+    runs: result.runs.map((run) => ({
       ...run,
       requestedAt: run.requestedAt.toISOString(),
       startedAt: run.startedAt?.toISOString() ?? null,
       finishedAt: run.finishedAt?.toISOString() ?? null,
     })),
+    hasMore: result.hasMore,
+    limit: result.limit,
+    offset: result.offset,
   });
 }
