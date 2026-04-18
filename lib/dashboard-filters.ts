@@ -46,7 +46,12 @@ export const DASHBOARD_PROJECTS: Array<{
 }> = [
   { key: "word-catcher", label: "Word Catcher", shortLabel: "WC" },
   { key: "words-in-word", label: "Words in Word", shortLabel: "WIW" },
+  { key: "words-of-nature", label: "Words of Nature", shortLabel: "WON" },
+  { key: "words-of-cities", label: "Words of Cities", shortLabel: "WOC" },
+  { key: "block-puzzle", label: "Block Puzzle", shortLabel: "BP" },
   { key: "2pg", label: "2PG", shortLabel: "2PG" },
+  { key: "hidden-objects-1", label: "Hidden Object 1", shortLabel: "HO1" },
+  { key: "tag-game-pocket-ships", label: "Pocket Ships", shortLabel: "PS" },
 ];
 
 export const RANGE_OPTIONS: Array<{ key: DashboardRangeKey; label: string }> = [
@@ -102,7 +107,12 @@ export const TAG_OPTIONS: Array<{ key: DashboardTagKey; label: string }> = [
 const PROJECT_NAME_TO_KEY: Record<string, string> = {
   "Word Catcher": "word-catcher",
   "Words in Word": "words-in-word",
+  "Words of Nature": "words-of-nature",
+  "Words of Cities": "words-of-cities",
+  "Block Puzzle": "block-puzzle",
   "2PG": "2pg",
+  "Hidden Object 1": "hidden-objects-1",
+  "Pocket Ships": "tag-game-pocket-ships",
 };
 
 function formatDateInput(date: Date) {

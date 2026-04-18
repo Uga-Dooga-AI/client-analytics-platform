@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type { PoolClient } from "pg";
 import { MOCK_METRIC_CATALOG } from "@/lib/mock-data";
 import { getPostgresPool } from "@/lib/db/postgres";
+import { dispatchAnalyticsRunSafely } from "./run-dispatcher";
 import { encryptSecret } from "./secrets";
 
 export type AnalyticsProjectStatus =
@@ -2875,17 +2876,19 @@ function getEnabledOptionalSpendSources(bundle: AnalyticsProjectBundle) {
 function requiredSourceStatusesForRun(bundle: AnalyticsProjectBundle, runType: AnalyticsRunType) {
   if (runType === "ingestion" || runType === "backfill") {
     return [
+      "bigquery_export",
       "appmetrica_logs",
       ...getEnabledOptionalSpendSources(bundle),
     ] as AnalyticsSourceType[];
   }
 
   if (runType === "bounds_refresh") {
-    return ["bounds_artifacts"] as AnalyticsSourceType[];
+    return ["bigquery_export", "bounds_artifacts"] as AnalyticsSourceType[];
   }
 
   if (runType === "forecast") {
     return [
+      "bigquery_export",
       "bounds_artifacts",
       ...getEnabledOptionalSpendSources(bundle),
     ] as AnalyticsSourceType[];
@@ -3209,6 +3212,9 @@ export async function requestAnalyticsSync(
     .map((run) => findEquivalentPendingRun(bundle.latestRuns, run))
     .find((run): run is AnalyticsSyncRunRecord => Boolean(run));
   if (existingBundleDuplicate) {
+    if (!useDemoStore() && existingBundleDuplicate.status === "queued") {
+      await dispatchAnalyticsRunSafely(existingBundleDuplicate, bundle);
+    }
     return existingBundleDuplicate;
   }
 
@@ -3303,11 +3309,18 @@ export async function requestAnalyticsSync(
     });
   }
 
+  if (queuedRun.status === "queued") {
+    await dispatchAnalyticsRunSafely(queuedRun, bundle);
+  }
+
   return queuedRun;
 }
 
 export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunUpdateInput) {
   await ensurePlatformSchema();
+
+  let promotedRunsToDispatch: AnalyticsSyncRunRecord[] = [];
+  let promotedDispatchBundle: AnalyticsProjectBundle | null = null;
 
   if (useDemoStore()) {
     seedDemoStore();
@@ -3360,6 +3373,11 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
           { project, sources: projectSources, latestRuns: projectRuns },
           projectRuns
         );
+        const previousById = new Map(projectRuns.map((run) => [run.id, run.status]));
+        promotedRunsToDispatch = promotedRuns.filter(
+          (run) => run.status === "queued" && previousById.get(run.id) !== "queued"
+        );
+        promotedDispatchBundle = { project, sources: projectSources, latestRuns: promotedRuns };
         const promotedMap = new Map(promotedRuns.map((run) => [run.id, run]));
         store.runs = store.runs.map((run) => promotedMap.get(run.id) ?? run);
       }
@@ -3473,6 +3491,11 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
           { project, sources: projectSources, latestRuns: projectRuns },
           projectRuns
         );
+        const previousById = new Map(projectRuns.map((run) => [run.id, run.status]));
+        promotedRunsToDispatch = promotedRuns.filter(
+          (run) => run.status === "queued" && previousById.get(run.id) !== "queued"
+        );
+        promotedDispatchBundle = { project, sources: projectSources, latestRuns: promotedRuns };
         for (const promotedRun of promotedRuns.filter((run) => run.status !== "blocked")) {
           await client.query(
             `
@@ -3490,6 +3513,14 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
 
     return nextRun;
   });
+
+  if (promotedDispatchBundle && promotedRunsToDispatch.length > 0) {
+    await Promise.allSettled(
+      promotedRunsToDispatch.map((run) =>
+        dispatchAnalyticsRunSafely(run, promotedDispatchBundle as AnalyticsProjectBundle)
+      )
+    );
+  }
 
   return updatedRun;
 }
