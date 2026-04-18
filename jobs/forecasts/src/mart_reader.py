@@ -43,6 +43,11 @@ class MartReader:
             or os.environ.get("BQ_EXPERIMENT_DAILY_TABLE")
             or "mart_experiment_daily"
         )
+        self.revenue_metrics_table = (
+            os.environ.get("BQ_REVENUE_METRICS_TABLE")
+            or self._derive_companion_table("revenue_metrics")
+            or "mart_revenue_metrics"
+        )
         self.input_path = input_path or os.environ.get("FORECAST_INPUT_PATH")
 
         if not self.project_id:
@@ -60,6 +65,14 @@ class MartReader:
             logger.warning("google-cloud-bigquery not installed — BigQuery reader unavailable")
             self._client = None
             self._bq = None
+
+    def _derive_companion_table(self, suffix: str) -> str | None:
+        suffix_marker = "_experiment_daily"
+        if self.experiment_daily_table.endswith(suffix_marker):
+            prefix = self.experiment_daily_table[: -len(suffix_marker)]
+            if prefix:
+                return f"{prefix}_{suffix}"
+        return None
 
     def resolve_available_window(self, date_from: str, date_to: str) -> tuple[str, str]:
         if self._client is None:
@@ -110,41 +123,66 @@ class MartReader:
         if self._client is None:
             return self._read_from_local_input(metric_names)
 
-        union_query = "\nUNION ALL\n".join(
-            f"""
+        frames: list[pd.DataFrame] = []
+        for metric in metric_names:
+            metric_frame = self._read_metric_frame(metric, date_from, date_to)
+            if not metric_frame.empty:
+                frames.append(metric_frame)
+
+        if not frames:
+            return pd.DataFrame(columns=["date", "metric", "value"])
+
+        df = pd.concat(frames, ignore_index=True)
+        df["date"] = pd.to_datetime(df["date"])
+        return df.sort_values(["metric", "date"]).reset_index(drop=True)
+
+    def _read_metric_frame(self, metric: str, date_from: str, date_to: str) -> "pd.DataFrame":
+        import pandas as pd
+
+        if self._client is None:
+            return pd.DataFrame(columns=["date", "metric", "value"])
+
+        if metric == "revenue":
+            table_name = self.revenue_metrics_table
+            value_sql = "SUM(COALESCE(gross_revenue, 0))"
+        else:
+            table_name = self.experiment_daily_table
+            value_sql = ALLOWED_METRICS[metric]
+
+        query = f"""
             SELECT
               date,
-              '{metric}' AS metric,
-              CAST({ALLOWED_METRICS[metric]} AS FLOAT64) AS value
-            FROM `{self.project_id}.{self.mart_dataset}.{self.experiment_daily_table}`
+              @metric AS metric,
+              CAST({value_sql} AS FLOAT64) AS value
+            FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
             WHERE date BETWEEN @date_from AND @date_to
             GROUP BY date
-            """
-            for metric in metric_names
-        )
-
+        """
         job_config = self._bq.QueryJobConfig(
             query_parameters=[
+                self._bq.ScalarQueryParameter("metric", "STRING", metric),
                 self._bq.ScalarQueryParameter("date_from", "DATE", date_from),
                 self._bq.ScalarQueryParameter("date_to", "DATE", date_to),
             ]
         )
 
         logger.info(
-            "reading mart data: project=%s dataset=%s table=%s metrics=%s range=%s..%s",
+            "reading mart data: project=%s dataset=%s table=%s metric=%s range=%s..%s",
             self.project_id,
             self.mart_dataset,
-            self.experiment_daily_table,
-            metric_names,
+            table_name,
+            metric,
             date_from,
             date_to,
         )
-        df = self._client.query(union_query, job_config=job_config).to_dataframe()
-        if df.empty:
-            return pd.DataFrame(columns=["date", "metric", "value"])
-
-        df["date"] = pd.to_datetime(df["date"])
-        return df.sort_values(["metric", "date"]).reset_index(drop=True)
+        try:
+            return self._client.query(query, job_config=job_config).to_dataframe()
+        except Exception as error:
+            message = str(error)
+            if "Not found: Table" in message:
+                logger.warning("skipping metric %s because source table is unavailable: %s", metric, message)
+                return pd.DataFrame(columns=["date", "metric", "value"])
+            raise
 
     def _latest_available_date(self) -> date | None:
         if self._client is None:
