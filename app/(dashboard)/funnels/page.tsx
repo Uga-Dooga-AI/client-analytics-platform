@@ -11,6 +11,8 @@ import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-fil
 import { getLiveFunnelRows } from "@/lib/live-warehouse";
 import { listAnalyticsProjects } from "@/lib/platform/store";
 
+export const dynamic = "force-dynamic";
+
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
 function SectionHeader({

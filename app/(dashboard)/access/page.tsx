@@ -2,6 +2,8 @@ import { TopFilterRail } from "@/components/top-filter-rail";
 import { formatDateTime, formatRelativeTime } from "@/lib/dashboard-live";
 import { listAccessRequests, listAuditEntries, listUsers } from "@/lib/auth/store";
 
+export const dynamic = "force-dynamic";
+
 const ROLE_STYLE = {
   super_admin: { color: "#7c3aed", bg: "#ede9fe" },
   admin: { color: "var(--color-signal-blue)", bg: "var(--color-signal-blue-surface)" },

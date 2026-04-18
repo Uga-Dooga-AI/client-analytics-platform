@@ -6,6 +6,8 @@ import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-fil
 import { listAnalyticsProjectOptions } from "@/lib/platform/store";
 import { parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
 
+export const dynamic = "force-dynamic";
+
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
 
 export default async function SegmentsPage({
