@@ -160,25 +160,29 @@ class MartReader:
 
         if metric == "revenue":
             table_name = self.revenue_metrics_table
+            date_column = "date"
             value_sql = "SUM(COALESCE(gross_revenue, 0))"
         elif metric == "dau":
             table_name = self.daily_active_users_table
+            date_column = "date"
             value_sql = "SUM(COALESCE(dau, 0))"
         elif metric == "installs":
             table_name = self.installs_funnel_table
+            date_column = "install_date"
             value_sql = "SUM(COALESCE(installed, 0))"
         else:
             table_name = self.experiment_daily_table
+            date_column = "date"
             value_sql = ALLOWED_METRICS[metric]
 
         query = f"""
             SELECT
-              date,
+              {date_column} AS date,
               @metric AS metric,
               CAST({value_sql} AS FLOAT64) AS value
             FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
-            WHERE date BETWEEN @date_from AND @date_to
-            GROUP BY date
+            WHERE {date_column} BETWEEN @date_from AND @date_to
+            GROUP BY {date_column}
         """
         job_config = self._bq.QueryJobConfig(
             query_parameters=[
