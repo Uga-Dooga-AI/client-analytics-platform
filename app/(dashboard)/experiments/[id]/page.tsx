@@ -157,7 +157,9 @@ export default async function ExperimentDetailPage({
 
             <section style={{ background: "var(--color-panel-base)", border: "1px solid var(--color-border-soft)", borderRadius: 10, padding: 20 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>{detail.ciBand.label}</div>
-              <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>Mock shell for CI and forecast surfaces until serving marts go live.</div>
+              <div style={{ fontSize: 12, color: "var(--color-ink-500)", marginTop: 2 }}>
+                Confidence interval preview will remain informational until the serving marts are fully published.
+              </div>
 
               <div style={{ marginTop: 18, height: 12, borderRadius: 6, background: "var(--color-panel-soft)", position: "relative" }}>
                 <div style={{ position: "absolute", left: "50%", width: 1, height: "100%", background: "var(--color-border-strong)" }} />
@@ -202,7 +204,7 @@ export default async function ExperimentDetailPage({
               >
                 <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-900)" }}>Forecast trajectory</div>
                 <div style={{ fontSize: 11.5, color: "var(--color-ink-500)", marginTop: 4, lineHeight: 1.5 }}>
-                  This panel will switch from mock shell to forecast outputs once the project-scoped forecast serving table is populated and the batch compute job is deployed.
+                  Forecast trajectory will appear here once the project-scoped serving table is populated and the batch compute job publishes live outputs.
                 </div>
               </div>
             </section>
