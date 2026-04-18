@@ -13,6 +13,7 @@ Behavior:
 
 from __future__ import annotations
 
+import codecs
 import logging
 import os
 import time
@@ -238,8 +239,11 @@ class AppMetricaClient:
     def _iter_export_rows(response: requests.Response, endpoint: str) -> Iterator[dict]:
         response.raw.decode_content = True
         row_count = 0
+        decoded_stream = codecs.getreader("utf-8")(response.raw, errors="replace")
 
-        for row in ijson.items(response.raw, "data.item"):
+        # AppMetrica occasionally emits invalid UTF-8 bytes inside string payloads.
+        # Decode with replacement so one malformed value does not abort the whole slice.
+        for row in ijson.items(decoded_stream, "data.item"):
             row_count += 1
             yield row
 
