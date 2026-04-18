@@ -165,6 +165,6 @@ describe("analytics run orchestration", () => {
     });
 
     expect(forecastRun.status).toBe("blocked");
-    expect(forecastRun.message).toContain("Waiting for upstream data preparation");
+    expect(forecastRun.message).toContain("Waiting for bounds refresh");
   });
 });

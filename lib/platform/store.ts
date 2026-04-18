@@ -1699,8 +1699,8 @@ function sourcePayloadsFromInput(projectId: string, input: ReturnType<typeof ens
       secretPresent: Boolean(input.bigqueryServiceAccountJson),
       secretHint: secretHintForValue("bigquery_export", input.bigqueryServiceAccountJson),
       config: {
-        sourceProjectId: input.bigquerySourceProjectId || input.gcpProjectId,
-        sourceDataset: input.bigquerySourceDataset || input.rawDataset,
+        sourceProjectId: input.bigquerySourceProjectId,
+        sourceDataset: input.bigquerySourceDataset,
       },
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -2876,7 +2876,6 @@ function requiredSourceStatusesForRun(bundle: AnalyticsProjectBundle, runType: A
   if (runType === "ingestion" || runType === "backfill") {
     return [
       "appmetrica_logs",
-      "bigquery_export",
       ...getEnabledOptionalSpendSources(bundle),
     ] as AnalyticsSourceType[];
   }
@@ -2887,7 +2886,6 @@ function requiredSourceStatusesForRun(bundle: AnalyticsProjectBundle, runType: A
 
   if (runType === "forecast") {
     return [
-      "bigquery_export",
       "bounds_artifacts",
       ...getEnabledOptionalSpendSources(bundle),
     ] as AnalyticsSourceType[];
@@ -3058,6 +3056,15 @@ function buildRunMessage(
   }
 
   if (status === "blocked") {
+    if (input.runType === "bounds_refresh") {
+      return "Waiting for backfill or ingestion to finish before bounds refresh can start.";
+    }
+
+    const dependencies = runDependencies(input.runType);
+    if (dependencies.length === 1) {
+      return `Waiting for ${dependencies[0].replace(/_/g, " ")} to finish before this run can start.`;
+    }
+
     return `Waiting for upstream data preparation before ${input.runType.replace(/_/g, " ")} can start.`;
   }
 

@@ -38,6 +38,16 @@ _EVENT_FIELDS = [
     "application_id",
 ]
 
+_RUNTIME_CRITICAL_EVENT_NAMES = {
+    "activation",
+    "app_crash",
+    "c_ad_revenue",
+    "error",
+    "in_app_purchase",
+    "purchase",
+    "subscription_start",
+}
+
 _BASE_URL = "https://api.appmetrica.yandex.com/logs/v1/export"
 
 # Polling config
@@ -70,7 +80,9 @@ class AppMetricaClient:
             app_id:      AppMetrica application ID.
             date_from:   ISO date string "YYYY-MM-DD" (inclusive).
             date_to:     ISO date string "YYYY-MM-DD" (inclusive).
-            event_names: Optional filter. If given, only these events are fetched.
+            event_names: Optional filter. If given, the configured events are kept,
+                         but runtime-critical revenue / guardrail / experiment
+                         events are always preserved as well.
 
         Yields:
             Raw event dicts with keys matching _EVENT_FIELDS.
@@ -87,17 +99,11 @@ class AppMetricaClient:
             "fields": ",".join(_EVENT_FIELDS),
         }
         logger.info("fetch_events: app_id=%s %s → %s", app_id, date_from, date_to)
-        # AppMetrica field filters use equality semantics; passing multiple values as a
-        # comma-separated string does not create an OR filter. When multiple event names
-        # are configured, fetch the slice and filter locally.
-        if event_names and len(event_names) == 1:
-            params["event_name"] = event_names[0]
-
         rows = self._export_with_poll(endpoint="events.json", params=params)
         allowed_names = {name for name in (event_names or []) if name}
         for row in rows:
             normalized = self._normalize_row(row)
-            if allowed_names and normalized.get("event_name") not in allowed_names:
+            if allowed_names and not self._should_keep_event(normalized.get("event_name"), allowed_names):
                 continue
             yield normalized
 
@@ -236,3 +242,16 @@ class AppMetricaClient:
     def _normalize_row(row: dict) -> dict:
         """Replace empty strings with None for cleaner BQ loads."""
         return {k: (v if v != "" else None) for k, v in row.items()}
+
+    @staticmethod
+    def _should_keep_event(event_name: object, allowed_names: set[str]) -> bool:
+        if not isinstance(event_name, str) or not event_name:
+            return False
+
+        if event_name in allowed_names:
+            return True
+
+        if event_name in _RUNTIME_CRITICAL_EVENT_NAMES:
+            return True
+
+        return event_name.startswith("ab_")
