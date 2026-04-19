@@ -385,9 +385,16 @@ describe("forecast notebook live surface", () => {
     expect(revenueCall?.[2]?.find((param: { name: string; value: string }) => param.name === "events_to")?.value).toBe(
       "2026-04-18"
     );
+    expect(revenueCall?.[1]).toContain("corrupted_users AS");
+    expect(revenueCall?.[1]).toContain("WHERE bad.user_key IS NULL");
     expect(
       corruptedDaysCall?.[2]?.find((param: { name: string; value: string }) => param.name === "events_to")?.value
     ).toBe("2026-04-18");
+    expect(corruptedDaysCall?.[2]?.find((param: { name: string; value: string }) => param.name === "to")?.value).toBe(
+      "2026-04-18"
+    );
+    expect(corruptedDaysCall?.[1]).toContain("corrupted_users AS");
+    expect(corruptedDaysCall?.[1]).toContain("FROM clean_events");
   });
 
   it("tracks slice filters and custom horizons in the combination payload", async () => {
@@ -541,5 +548,17 @@ describe("forecast notebook live surface", () => {
     );
 
     expect(predicted).toBe(60);
+  });
+
+  it("limits corrupted-day detection to the notebook event cutoff window", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+
+    const corruptedDays = __testables.detectCorruptedDays(
+      [{ event_date: "2026-04-18", event_count: 100 }],
+      "2026-04-18",
+      "2026-04-18"
+    );
+
+    expect(corruptedDays).toEqual([]);
   });
 });

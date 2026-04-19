@@ -360,7 +360,7 @@ export async function getForecastNotebookSurface({
       loadInstallDescriptors(context, filters, installSql),
       loadCohortSizes(context, filters, selection, installSql),
       loadRevenueRows(context, filters, selection, horizonDays, installSql),
-      loadCorruptedDayCounts(context, filters, selection, horizonDays),
+      loadCorruptedDayCounts(context, filters, selection, installSql),
       loadSpendRows(context, filters, selection),
     ]);
 
@@ -794,6 +794,13 @@ async function loadRevenueRows(
             OR (@revenue_mode = 'total' AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start'))
           )
         GROUP BY 1, 2
+      ),
+      corrupted_users AS (
+        SELECT DISTINCT i.user_key
+        FROM installs_filtered i
+        INNER JOIN events e
+          ON e.user_key = i.user_key
+        WHERE e.event_date < i.cohort_date
       )
       SELECT
         CAST(i.cohort_date AS STRING) AS cohort_date,
@@ -807,10 +814,13 @@ async function loadRevenueRows(
         DATE_DIFF(e.event_date, i.cohort_date, DAY) AS lifetime_day,
         SUM(e.revenue) AS revenue
       FROM installs_filtered i
+      LEFT JOIN corrupted_users bad
+        ON bad.user_key = i.user_key
       INNER JOIN events e
         ON e.user_key = i.user_key
        AND e.event_date >= i.cohort_date
        AND e.event_date <= DATE_ADD(i.cohort_date, INTERVAL @max_horizon DAY)
+      WHERE bad.user_key IS NULL
       GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
       ORDER BY cohort_date, lifetime_day
     `,
@@ -827,38 +837,70 @@ async function loadCorruptedDayCounts(
   context: ProjectQueryContext,
   filters: DashboardFilters,
   selection: ForecastNotebookSelection,
-  horizonDays: readonly number[]
+  installSql: InstallSqlConfig
 ) {
-  const maxHorizon = Math.max(...PAYBACK_CURVE_POINTS, ...horizonDays, 720);
   const eventsTo = currentDataCutoffIso();
   const rows = await executeBigQuery<EventDayCountRow>(
     context,
     `
+      WITH installs AS (
+        SELECT
+          DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) AS cohort_date,
+          LOWER(CAST(os_name AS STRING)) AS platform,
+          ${installSql.userKeySql} AS user_key
+        FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
+        WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@to)
+          AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@to)
+          AND (@platform = 'all' OR LOWER(CAST(os_name AS STRING)) = @platform)
+      ),
+      events AS (
+        SELECT
+          COALESCE(NULLIF(CAST(profile_id AS STRING), ''), CAST(appmetrica_device_id AS STRING)) AS user_key,
+          DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) AS event_date
+        FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
+        WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@events_to)
+          AND DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@events_to)
+          AND (
+            (@revenue_mode = 'ads' AND event_name = 'c_ad_revenue')
+            OR (@revenue_mode = 'iap' AND event_name IN ('purchase', 'in_app_purchase', 'subscription_start'))
+            OR (@revenue_mode = 'total' AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start'))
+          )
+      ),
+      corrupted_users AS (
+        SELECT DISTINCT i.user_key
+        FROM installs i
+        INNER JOIN events e
+          ON e.user_key = i.user_key
+        WHERE e.event_date < i.cohort_date
+      ),
+      clean_events AS (
+        SELECT
+          CAST(e.event_date AS STRING) AS event_date
+        FROM installs i
+        INNER JOIN events e
+          ON e.user_key = i.user_key
+         AND e.event_date >= i.cohort_date
+        LEFT JOIN corrupted_users bad
+          ON bad.user_key = i.user_key
+        WHERE bad.user_key IS NULL
+      )
       SELECT
-        CAST(DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) AS STRING) AS event_date,
+        event_date,
         COUNT(*) AS event_count
-      FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
-      WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@events_to)
-        AND DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@events_to)
-        AND (
-          (@revenue_mode = 'ads' AND event_name = 'c_ad_revenue')
-          OR (@revenue_mode = 'iap' AND event_name IN ('purchase', 'in_app_purchase', 'subscription_start'))
-          OR (@revenue_mode = 'total' AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start'))
-        )
-        AND (@platform = 'all' OR LOWER(CAST(os_name AS STRING)) = @platform)
+      FROM clean_events
       GROUP BY 1
       ORDER BY event_date
     `,
     [
       { name: "from", type: "DATE", value: filters.from },
+      { name: "to", type: "DATE", value: filters.to },
       { name: "events_to", type: "DATE", value: eventsTo },
       { name: "platform", type: "STRING", value: filters.platform },
       { name: "revenue_mode", type: "STRING", value: selection.revenueMode },
-      { name: "max_horizon", type: "INT64", value: maxHorizon },
     ]
   );
 
-  return detectCorruptedDays(rows, filters.from);
+  return detectCorruptedDays(rows, filters.from, eventsTo);
 }
 
 async function loadSpendRows(
@@ -3035,7 +3077,7 @@ function inferNotebookEmptyReason({
   return null;
 }
 
-function detectCorruptedDays(rows: EventDayCountRow[], from: string) {
+function detectCorruptedDays(rows: EventDayCountRow[], from: string, to: string) {
   const countsByDay = new Map<string, number>();
   for (const row of rows) {
     if (row.event_date) {
@@ -3044,7 +3086,7 @@ function detectCorruptedDays(rows: EventDayCountRow[], from: string) {
   }
 
   const start = new Date(`${from}T00:00:00Z`);
-  const end = new Date();
+  const end = new Date(`${to}T00:00:00Z`);
   const counts: Array<{ date: string; count: number }> = [];
 
   for (let cursor = new Date(start); cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
@@ -3279,6 +3321,7 @@ function formatPlatformLabel(value: string) {
 export const __testables = {
   boundsKey,
   buildBoundsForCohortSize,
+  detectCorruptedDays,
   fallbackYoungCohortPrediction,
   getNotebookBounds,
   normalizeBoundsCohortSize,
