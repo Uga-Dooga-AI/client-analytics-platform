@@ -15,21 +15,34 @@ import {
   serializeDashboardFilters,
   TAG_OPTIONS,
   type DashboardFilters,
+  type DashboardGroupByKey,
   type DashboardRangeKey,
 } from "@/lib/dashboard-filters";
 import { getSegmentLabel, getSegmentOptions, type SavedUserSegment } from "@/lib/segments";
 
 const DEMO_ACCESS_ENABLED = process.env.NEXT_PUBLIC_DEMO_ACCESS_ENABLED === "true";
 
-export function TopFilterRail({ title }: { title: string }) {
+export function TopFilterRail({
+  title,
+  allowedGroupByKeys,
+}: {
+  title: string;
+  allowedGroupByKeys?: DashboardGroupByKey[];
+}) {
   return (
     <Suspense fallback={<TopFilterRailFrame title={title} />}>
-      <TopFilterRailContent title={title} />
+      <TopFilterRailContent title={title} allowedGroupByKeys={allowedGroupByKeys} />
     </Suspense>
   );
 }
 
-function TopFilterRailContent({ title }: { title: string }) {
+function TopFilterRailContent({
+  title,
+  allowedGroupByKeys,
+}: {
+  title: string;
+  allowedGroupByKeys?: DashboardGroupByKey[];
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -44,6 +57,15 @@ function TopFilterRailContent({ title }: { title: string }) {
   );
   const stitchRoute = getStitchRoute(pathname);
   const stitchStatus = stitchRoute ? getStitchStatusMeta(stitchRoute.status) : null;
+  const supportsCustomDayStep =
+    pathname === "/forecasts" || pathname === "/acquisition" || pathname === "/cohorts";
+  const groupByOptions = useMemo(() => {
+    const scopedOptions = allowedGroupByKeys
+      ? GROUP_BY_OPTIONS.filter((option) => allowedGroupByKeys.includes(option.key))
+      : GROUP_BY_OPTIONS;
+
+    return scopedOptions.length > 0 ? scopedOptions : GROUP_BY_OPTIONS;
+  }, [allowedGroupByKeys]);
   const projectOptions = useMemo(() => {
     const base = getProjectOptions(pathname);
     if (DEMO_ACCESS_ENABLED) {
@@ -127,6 +149,14 @@ function TopFilterRailContent({ title }: { title: string }) {
     router.replace(`${pathname}?${nextQuery}`, { scroll: false });
   }
 
+  useEffect(() => {
+    if (groupByOptions.some((option) => option.key === filters.groupBy)) {
+      return;
+    }
+
+    commitFilters({ groupBy: groupByOptions[0]?.key ?? "none" });
+  }, [filters.groupBy, groupByOptions, pathname]);
+
   function handleRangeChange(nextRange: DashboardRangeKey) {
     commitFilters(getRangePatch(nextRange));
   }
@@ -143,7 +173,9 @@ function TopFilterRailContent({ title }: { title: string }) {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "minmax(180px, 1.2fr) repeat(5, minmax(124px, 0.78fr)) minmax(196px, 1fr)",
+              gridTemplateColumns: supportsCustomDayStep
+                ? "minmax(180px, 1.2fr) repeat(6, minmax(116px, 0.74fr)) minmax(196px, 1fr)"
+                : "minmax(180px, 1.2fr) repeat(5, minmax(124px, 0.78fr)) minmax(196px, 1fr)",
               gap: 10,
               alignItems: "end",
             }}
@@ -165,10 +197,28 @@ function TopFilterRailContent({ title }: { title: string }) {
               value={filters.granularityKey}
               onChange={(value) => {
                 const option = GRANULARITY_OPTIONS.find((item) => item.key === value) ?? GRANULARITY_OPTIONS[1];
-                commitFilters({ granularityKey: option.key, granularityDays: option.days });
+                commitFilters({
+                  granularityKey: option.key,
+                  granularityDays: option.key === "custom" ? filters.granularityDays : option.days,
+                });
               }}
               options={GRANULARITY_OPTIONS.map((option) => ({ value: option.key, label: option.label }))}
             />
+            {supportsCustomDayStep ? (
+              <NumberField
+                label="Step days"
+                value={filters.granularityDays}
+                disabled={filters.granularityKey !== "custom"}
+                min={1}
+                max={28}
+                onChange={(value) =>
+                  commitFilters({
+                    granularityKey: "custom",
+                    granularityDays: Math.max(1, Math.min(28, Math.round(value || 1))),
+                  })
+                }
+              />
+            ) : null}
             <FilterField
               label="Platform"
               value={filters.platform}
@@ -185,7 +235,7 @@ function TopFilterRailContent({ title }: { title: string }) {
               label="Group by"
               value={filters.groupBy}
               onChange={(value) => commitFilters({ groupBy: value as DashboardFilters["groupBy"] })}
-              options={GROUP_BY_OPTIONS.map((option) => ({ value: option.key, label: option.label }))}
+              options={groupByOptions.map((option) => ({ value: option.key, label: option.label }))}
             />
             <FilterField
               label="Tag"
@@ -287,6 +337,41 @@ function DateField({
     <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <span style={FIELD_LABEL_STYLE}>{label}</span>
       <input type="date" value={value} onChange={(event) => onChange(event.target.value)} style={FIELD_STYLE} />
+    </label>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  disabled = false,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  min: number;
+  max: number;
+  disabled?: boolean;
+}) {
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={FIELD_LABEL_STYLE}>{label}</span>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(Number(event.target.value))}
+        style={{
+          ...FIELD_STYLE,
+          opacity: disabled ? 0.6 : 1,
+          cursor: disabled ? "not-allowed" : "text",
+        }}
+      />
     </label>
   );
 }

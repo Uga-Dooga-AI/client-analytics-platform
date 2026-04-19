@@ -131,6 +131,10 @@ function latestLiveDate(values: Array<string | null | undefined>) {
   return filtered.at(-1) ?? null;
 }
 
+function describeSelectedWindow(from: string, to: string) {
+  return from === to ? from : `${from} → ${to}`;
+}
+
 export default async function OverviewPage({
   searchParams,
 }: {
@@ -144,8 +148,12 @@ export default async function OverviewPage({
   ]);
 
   const scopedBundles = scopeBundles(bundles, filters.projectKey);
-  const liveMetrics = await getLiveOverviewMetrics(scopedBundles);
+  const liveMetrics = await getLiveOverviewMetrics(scopedBundles, {
+    from: filters.from,
+    to: filters.to,
+  });
   const selectedProjectLabel = getProjectLabel(filters.projectKey);
+  const selectedWindowLabel = describeSelectedWindow(filters.from, filters.to);
   const scopedSources = scopedBundles.flatMap((bundle) =>
     bundle.sources.map((source) => ({
       projectName: bundle.project.displayName,
@@ -159,11 +167,17 @@ export default async function OverviewPage({
   const latestSuccessfulRun = flattenRuns(scopedBundles).find(
     ({ run }) => run.status === "succeeded"
   )?.run;
-  const installs7d = liveMetrics.reduce((sum, item) => sum + item.installs7d, 0);
-  const activeDevices7d = liveMetrics.reduce((sum, item) => sum + item.activeDevices7d, 0);
-  const revenue7d = liveMetrics.reduce((sum, item) => sum + item.revenue7d, 0);
+  const installs = liveMetrics.reduce((sum, item) => sum + item.installs, 0);
+  const activeDevices = liveMetrics.reduce((sum, item) => sum + item.activeDevices, 0);
+  const revenue = liveMetrics.reduce((sum, item) => sum + item.revenue, 0);
+  const spend = liveMetrics.reduce((sum, item) => sum + item.spend, 0);
   const latestWarehouseDate = latestLiveDate(
-    liveMetrics.flatMap((item) => [item.lastInstallDate, item.lastSessionDate, item.lastRevenueDate])
+    liveMetrics.flatMap((item) => [
+      item.lastInstallDate,
+      item.lastSessionDate,
+      item.lastRevenueDate,
+      item.lastSpendDate,
+    ])
   );
 
   return (
@@ -184,7 +198,7 @@ export default async function OverviewPage({
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
             gap: 1,
             background: "var(--color-border-soft)",
             border: "1px solid var(--color-border-soft)",
@@ -226,7 +240,7 @@ export default async function OverviewPage({
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
             gap: 1,
             background: "var(--color-border-soft)",
             border: "1px solid var(--color-border-soft)",
@@ -235,19 +249,40 @@ export default async function OverviewPage({
           }}
         >
           <KpiCard
-            label="Live installs · 7d"
-            value={formatInteger(installs7d)}
-            sub={liveMetrics.length > 0 ? "From AppMetrica raw installs in warehouse" : "No live warehouse rows yet"}
+            label="Live installs"
+            value={formatInteger(installs)}
+            sub={
+              liveMetrics.length > 0
+                ? `From AppMetrica raw installs in selected range (${selectedWindowLabel})`
+                : "No live warehouse rows yet"
+            }
           />
           <KpiCard
-            label="Live active devices · 7d"
-            value={formatInteger(activeDevices7d)}
-            sub={liveMetrics.length > 0 ? "Distinct session starts in the last 7 days" : "Waiting for session data"}
+            label="Live active devices"
+            value={formatInteger(activeDevices)}
+            sub={
+              liveMetrics.length > 0
+                ? `Distinct session starts in selected range (${selectedWindowLabel})`
+                : "Waiting for session data"
+            }
           />
           <KpiCard
-            label="Live revenue · 7d"
-            value={formatMoney(revenue7d)}
-            sub={liveMetrics.length > 0 ? "Parsed from AppMetrica raw revenue events in warehouse" : "Waiting for revenue events in warehouse"}
+            label="Live revenue"
+            value={formatMoney(revenue)}
+            sub={
+              liveMetrics.length > 0
+                ? `Parsed from AppMetrica raw revenue events in selected range (${selectedWindowLabel})`
+                : "Waiting for revenue events in warehouse"
+            }
+          />
+          <KpiCard
+            label="Live spend"
+            value={formatMoney(spend)}
+            sub={
+              liveMetrics.length > 0
+                ? `Summed from configured spend mirrors in selected range (${selectedWindowLabel})`
+                : "Waiting for spend mirror data"
+            }
           />
           <KpiCard
             label="Latest warehouse day"
@@ -620,14 +655,14 @@ export default async function OverviewPage({
             <div style={{ padding: 18 }}>
               <SectionHeader
                 title="Live analytics by project"
-                subtitle="Direct BigQuery reads from the shared warehouse and source export datasets."
+                subtitle={`Direct BigQuery reads from the shared warehouse for ${selectedWindowLabel}.`}
               />
             </div>
 
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  {["Project", "Installs 7d", "Active devices 7d", "Revenue 7d", "Latest live date"].map((column) => (
+                  {["Project", "Installs", "Active devices", "Revenue", "Spend", "Latest live date"].map((column) => (
                     <th
                       key={column}
                       style={{
@@ -665,16 +700,24 @@ export default async function OverviewPage({
                       </div>
                     </td>
                     <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                      {formatInteger(item.installs7d)}
+                      {formatInteger(item.installs)}
                     </td>
                     <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                      {formatInteger(item.activeDevices7d)}
+                      {formatInteger(item.activeDevices)}
                     </td>
                     <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                      {formatMoney(item.revenue7d)}
+                      {formatMoney(item.revenue)}
                     </td>
                     <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                      {latestLiveDate([item.lastRevenueDate, item.lastSessionDate, item.lastInstallDate]) ?? "No data"}
+                      {formatMoney(item.spend)}
+                    </td>
+                    <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                      {latestLiveDate([
+                        item.lastRevenueDate,
+                        item.lastSessionDate,
+                        item.lastInstallDate,
+                        item.lastSpendDate,
+                      ]) ?? "No data"}
                     </td>
                   </tr>
                 ))}

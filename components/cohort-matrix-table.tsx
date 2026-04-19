@@ -23,7 +23,9 @@ export function CohortMatrixTable({
     );
   }
 
-  const allValues = rows.flatMap((row) => row.cells.map((cell) => cell.value));
+  const allValues = rows.flatMap((row) =>
+    row.cells.map((cell) => cell.value).filter((value): value is number => typeof value === "number")
+  );
   const maxValue = Math.max(...allValues, 1);
   const dayColumns = rows[0] ? rows[0].cells.map((cell) => cell.label) : [];
 
@@ -81,17 +83,25 @@ export function CohortMatrixTable({
                   <td key={`${row.cohortDate}-${cell.label}`} style={{ ...BASE_CELL_STYLE, minWidth: 102 }}>
                     <div
                       style={{
-                        background: `rgba(37, 99, 235, ${0.08 + (cell.value / maxValue) * 0.2})`,
-                        border: "1px solid rgba(37, 99, 235, 0.12)",
+                        background:
+                          typeof cell.value === "number"
+                            ? `rgba(37, 99, 235, ${0.08 + (cell.value / maxValue) * 0.2})`
+                            : "var(--color-panel-soft)",
+                        border:
+                          typeof cell.value === "number"
+                            ? "1px solid rgba(37, 99, 235, 0.12)"
+                            : "1px solid var(--color-border-soft)",
                         borderRadius: 8,
                         padding: "8px 9px",
                       }}
                     >
                       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-ink-950)" }}>
-                        {cell.value.toFixed(0)}%
+                        {typeof cell.value === "number" ? `${cell.value.toFixed(0)}%` : "—"}
                       </div>
                       <div style={{ marginTop: 2, fontSize: 10.5, color: "var(--color-ink-500)", lineHeight: 1.35 }}>
-                        {cell.lower.toFixed(0)}-{cell.upper.toFixed(0)}%
+                        {typeof cell.lower === "number" && typeof cell.upper === "number"
+                          ? `${cell.lower.toFixed(0)}-${cell.upper.toFixed(0)}%`
+                          : "No forecast"}
                         {typeof cell.actual === "number" ? ` · act ${cell.actual.toFixed(0)}%` : ""}
                       </div>
                     </div>

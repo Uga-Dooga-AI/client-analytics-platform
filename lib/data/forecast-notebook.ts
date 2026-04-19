@@ -1,0 +1,3087 @@
+import "server-only";
+
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
+import type {
+  AcquisitionBreakdownRow,
+  CohortMatrixRow,
+  ComparisonConfidenceChartData,
+  RevenueModeKey,
+} from "@/lib/data/acquisition";
+import {
+  DEFAULT_FORECAST_HORIZON_DAYS,
+  type ForecastHorizonDay,
+} from "@/lib/data/forecast-horizons";
+import type {
+  DashboardFilters,
+  DashboardGroupByKey,
+} from "@/lib/dashboard-filters";
+import {
+  executeBigQuery,
+  loadBigQueryContexts,
+  type BigQueryQueryParam,
+  type ProjectQueryContext,
+} from "@/lib/live-warehouse";
+import type { AnalyticsProjectBundle, AnalyticsSourceRecord } from "@/lib/platform/store";
+import type { SliceOption } from "@/lib/slice-catalog";
+
+export type ForecastNotebookSelection = {
+  revenueMode: RevenueModeKey;
+  country: string;
+  source: string;
+  company: string;
+  campaign: string;
+  creative: string;
+};
+
+export type ForecastNotebookSummary = {
+  spend: number;
+  installs: number;
+  cpi: number;
+  d30Roas: number;
+  d60Roas: number;
+  d120Roas: number;
+  paybackDays: number;
+  cohortCount: number;
+  confidence: string;
+};
+
+export type ForecastNotebookData = {
+  summary: ForecastNotebookSummary;
+  horizonCharts: ComparisonConfidenceChartData[];
+  paybackChart: ComparisonConfidenceChartData;
+  breakdownRows: AcquisitionBreakdownRow[];
+  cohortMatrix: CohortMatrixRow[];
+  notes: string[];
+};
+
+export type ForecastNotebookCatalog = {
+  countries: SliceOption[];
+  sources: SliceOption[];
+  companies: SliceOption[];
+  campaigns: SliceOption[];
+  creatives: SliceOption[];
+};
+
+export type ForecastNotebookSurface = {
+  catalog: ForecastNotebookCatalog;
+  data: ForecastNotebookData;
+  diagnostics: ForecastNotebookDiagnostics;
+};
+
+export type ForecastNotebookDiagnostics = {
+  contextStatus: "ready" | "missing_credentials" | "query_failed";
+  errorMessage: string | null;
+  descriptorRowCount: number;
+  selectedDescriptorRowCount: number;
+  cohortSizeRowCount: number;
+  revenueRowCount: number;
+  spendRowCount: number;
+  corruptedDayCount: number;
+  rawCohortCount: number;
+  processedCohortCount: number;
+  visibleLineCount: number;
+  visibleCohortCount: number;
+  emptyReason: string | null;
+};
+
+type ForecastNotebookInput = {
+  bundle: AnalyticsProjectBundle;
+  projectLabel: string;
+  filters: DashboardFilters;
+  selection: ForecastNotebookSelection;
+  horizonDays?: ForecastHorizonDay[];
+};
+
+type InstallDescriptorRow = {
+  platform: string | null;
+  country: string | null;
+  source: string | null;
+  company: string | null;
+  campaign: string | null;
+  creative: string | null;
+  count: number | null;
+  first_seen: string | null;
+  last_seen: string | null;
+};
+
+type CohortSizeRow = {
+  cohort_date: string | null;
+  platform: string | null;
+  country: string | null;
+  source: string | null;
+  company: string | null;
+  campaign: string | null;
+  creative: string | null;
+  cohort_size: number | null;
+};
+
+type RevenueRow = {
+  cohort_date: string | null;
+  platform: string | null;
+  country: string | null;
+  source: string | null;
+  company: string | null;
+  campaign: string | null;
+  creative: string | null;
+  event_date: string | null;
+  lifetime_day: number | null;
+  revenue: number | null;
+};
+
+type EventDayCountRow = {
+  event_date: string | null;
+  event_count: number | null;
+};
+
+type MirrorSchemaRow = {
+  table_name: string | null;
+  column_name: string | null;
+};
+
+type TableColumnRow = {
+  column_name: string | null;
+};
+
+type MirrorSpendRow = {
+  cohort_date: string | null;
+  source: string | null;
+  company: string | null;
+  country: string | null;
+  store: string | null;
+  campaign_id: string | null;
+  creative_id: string | null;
+  spend: number | null;
+  installs: number | null;
+};
+
+type RawCohortRecord = {
+  cohortDate: string;
+  groupValue: string;
+  country: string;
+  source: string;
+  company: string;
+  campaign: string;
+  creative: string;
+  store: string;
+  cohortSize: number;
+  spend: number;
+  installs: number;
+  dailyRevenue: Map<number, number>;
+};
+
+type ProcessedCohort = {
+  cohortDate: string;
+  groupValue: string;
+  spend: number;
+  installs: number;
+  cohortSize: number;
+  cohortNumDays: number;
+  cohortLifetime: number;
+  isCorrupted: number;
+  totalRevenue: number[];
+};
+
+type PredictedPoint = {
+  predictedRevenue: number | null;
+  lowerRevenue: number | null;
+  upperRevenue: number | null;
+  actual: number | null;
+};
+
+type CurvePrediction = {
+  trueRevenue: number[];
+  predictedFor: Map<number, number>;
+  points: Map<number, PredictedPoint>;
+};
+
+type BoundsTrainingRecord = {
+  cohortDate: string;
+  cohortSize: number;
+  trueRevenue: number[];
+  trueFor: Map<number, number>;
+  predictedForByCutoff: Map<string, number>;
+  badByCutoff: Set<number>;
+};
+
+type GroupedLine = {
+  value: string;
+  label: string;
+  cohorts: ProcessedCohort[];
+};
+
+type LinePredictionResources = {
+  predictionsByCohortDate: Map<string, CurvePrediction>;
+  boundsByCohortSize: Map<number, Map<string, readonly [number, number]>>;
+  trainingPredictionCount: number;
+};
+
+type RepairedRevenueSeries = {
+  daily: number[];
+  isCorrupted: number;
+};
+
+type InstallSqlConfig = {
+  sourceSql: string;
+  campaignSql: string;
+  creativeSql: string;
+  companySql: string;
+  userKeySql: string;
+};
+
+type AggregatedPoint = {
+  predicted: number | null;
+  lower: number | null;
+  upper: number | null;
+  actual: number | null;
+};
+
+type CurveEstimateTask = {
+  id: string;
+  totalRevenue: number[];
+  cutoff: number;
+  horizon: number;
+};
+
+const PAYBACK_CURVE_POINTS = [1, 3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 240, 270, 360, 720] as const;
+const GROUP_COLORS = ["#2563eb", "#d97706", "#059669", "#dc2626", "#7c3aed", "#0891b2", "#ea580c", "#4f46e5"];
+const NOTEBOOK_HISTORY_MIN_DAY = 4;
+const BOUNDS_MAX_CUTOFF = 91;
+const BOUNDS_MIN_PREDICTIONS = 10;
+const BOUNDS_SIZE_SMOOTH_COEFF = 1.2;
+const NOTEBOOK_FALLBACK_CUTOFF = 6;
+const NOTEBOOK_BOUNDS_HISTORY_DAYS = [
+  4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+  35, 42, 49, 56, 63, 70, 77, 84, 91,
+] as const;
+const NOTEBOOK_BOUNDS_PREDICTION_PERIODS = [
+  7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 40,
+  50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360,
+] as const;
+
+const MIRROR_CAMPAIGN_ID_COLUMN_CANDIDATES = ["campaign_id", "campaignid", "campaign"];
+const MIRROR_CAMPAIGN_NAME_COLUMN_CANDIDATES = [
+  "campaign_name",
+  "campaign",
+  "campaign_name_1",
+  "campaignname",
+];
+const MIRROR_CREATIVE_ID_COLUMN_CANDIDATES = [
+  "creative_pack_id",
+  "creative_id",
+  "ad_group_ad_ad_id",
+  "creative",
+];
+const MIRROR_CREATIVE_NAME_COLUMN_CANDIDATES = [
+  "creative_pack_name",
+  "creative_name",
+  "creative",
+  "ad_name",
+  "asset_name",
+  "ad_group_ad_ad_name",
+];
+const MIRROR_DATE_COLUMN_CANDIDATES = ["date", "run_date", "segments_date", "day"];
+const MIRROR_COUNTRY_COLUMN_CANDIDATES = [
+  "country",
+  "country_code",
+  "country_iso_code",
+  "country_name",
+  "country_code_1",
+];
+const MIRROR_STORE_COLUMN_CANDIDATES = ["store", "platform", "os_name", "source_app_store"];
+const MIRROR_SPEND_COLUMN_CANDIDATES = ["spend", "cost", "cost_micros", "amount_micros"];
+const MIRROR_INSTALLS_COLUMN_CANDIDATES = ["installs", "all_conversions", "conversions"];
+
+const STORE_SQL = `
+  CASE
+    WHEN LOWER(CAST(os_name AS STRING)) = 'android' THEN 'google'
+    WHEN LOWER(CAST(os_name AS STRING)) = 'ios' THEN 'apple'
+    ELSE LOWER(CAST(os_name AS STRING))
+  END
+`;
+
+export async function getForecastNotebookSurface({
+  bundle,
+  projectLabel,
+  filters,
+  selection,
+  horizonDays = [...DEFAULT_FORECAST_HORIZON_DAYS],
+}: ForecastNotebookInput): Promise<ForecastNotebookSurface> {
+  const contexts = await loadBigQueryContexts([bundle]);
+  const context = contexts.get(bundle.project.id);
+  if (!context) {
+    return {
+      catalog: buildEmptyCatalog(),
+      data: buildEmptyData("BigQuery credentials are unavailable for this project."),
+      diagnostics: buildEmptyDiagnostics("missing_credentials", "BigQuery credentials are unavailable for this project."),
+    };
+  }
+  try {
+    const installSql = await discoverInstallSqlConfig(context);
+    const [descriptorRows, cohortSizeRows, revenueRows, corruptedDayRows, spendRows] = await Promise.all([
+      loadInstallDescriptors(context, filters, installSql),
+      loadCohortSizes(context, filters, selection, installSql),
+      loadRevenueRows(context, filters, selection, horizonDays, installSql),
+      loadCorruptedDayCounts(context, filters, selection, horizonDays),
+      loadSpendRows(context, filters, selection),
+    ]);
+
+    const catalog = buildCatalog(descriptorRows, {
+      platform: filters.platform,
+      country: selection.country,
+      source: selection.source,
+      company: selection.company,
+      campaign: selection.campaign,
+      creative: selection.creative,
+    });
+
+    const groupBy = supportedGroupBy(filters.groupBy);
+    const selectedDescriptorRows = applySelectionToDescriptors(descriptorRows, {
+      platform: filters.platform,
+      country: selection.country,
+      source: selection.source,
+      company: selection.company,
+      campaign: selection.campaign,
+      creative: selection.creative,
+    });
+    const notes = buildCatalogNotes(descriptorRows, selectedDescriptorRows, spendRows, selection);
+
+    const rawCohorts = buildRawCohorts({
+      cohortSizeRows,
+      revenueRows,
+      spendRows,
+      filters,
+      selection,
+      groupBy,
+    });
+
+    const processedCohorts = processRawCohorts(
+      rawCohorts,
+      filters.from,
+      filters.to,
+      filters.granularityDays,
+      new Set(corruptedDayRows)
+    );
+
+    const allRequestedHorizons = uniqueSortedNumbers([
+      ...horizonDays,
+      ...PAYBACK_CURVE_POINTS,
+      30,
+      60,
+      120,
+      240,
+      360,
+      720,
+    ]);
+    const groupedLines = buildGroupedLines(processedCohorts, groupBy);
+    const predictionResources = await buildPredictionResources(
+      groupedLines,
+      allRequestedHorizons,
+      filters.granularityDays
+    );
+    const visibleCohortCount = groupedLines
+      .flatMap((line) => line.cohorts)
+      .filter((cohort) => cohort.cohortSize > 0).length;
+
+    const data = buildNotebookData({
+      projectLabel,
+      filters,
+      selection,
+      horizonDays,
+      lines: groupedLines,
+      notes,
+      predictionResources,
+    });
+
+    return {
+      catalog,
+      data,
+      diagnostics: {
+        contextStatus: "ready",
+        errorMessage: null,
+        descriptorRowCount: descriptorRows.length,
+        selectedDescriptorRowCount: selectedDescriptorRows.length,
+        cohortSizeRowCount: cohortSizeRows.length,
+        revenueRowCount: revenueRows.length,
+        spendRowCount: spendRows.length,
+        corruptedDayCount: corruptedDayRows.length,
+        rawCohortCount: rawCohorts.size,
+        processedCohortCount: processedCohorts.length,
+        visibleLineCount: groupedLines.length,
+        visibleCohortCount,
+        emptyReason: inferNotebookEmptyReason({
+          selectedDescriptorRowCount: selectedDescriptorRows.length,
+          cohortSizeRowCount: cohortSizeRows.length,
+          revenueRowCount: revenueRows.length,
+          rawCohortCount: rawCohorts.size,
+          visibleCohortCount,
+          spendRowCount: spendRows.length,
+        }),
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown forecast runtime error";
+    return {
+      catalog: buildEmptyCatalog(),
+      data: buildEmptyData(`Forecast live query failed: ${message}`),
+      diagnostics: buildEmptyDiagnostics("query_failed", message),
+    };
+  }
+}
+
+async function discoverInstallSqlConfig(context: ProjectQueryContext): Promise<InstallSqlConfig> {
+  const rows = await executeBigQuery<TableColumnRow>(
+    context,
+    `
+      SELECT LOWER(column_name) AS column_name
+      FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.INFORMATION_SCHEMA.COLUMNS\`
+      WHERE table_name = @table_name
+    `,
+    [{ name: "table_name", type: "STRING", value: context.rawInstallsTable }]
+  );
+
+  const columns = new Set(
+    rows
+      .map((row) => row.column_name?.trim().toLowerCase())
+      .filter((value): value is string => Boolean(value))
+  );
+
+  const clickExpr = columns.has("click_url_parameters")
+    ? "CAST(click_url_parameters AS STRING)"
+    : "CAST(NULL AS STRING)";
+  const trackerExpr = columns.has("tracker_name")
+    ? "CAST(tracker_name AS STRING)"
+    : "CAST(NULL AS STRING)";
+  const trackingIdExpr = columns.has("tracking_id")
+    ? "CAST(tracking_id AS STRING)"
+    : "CAST(NULL AS STRING)";
+  const profileExpr = columns.has("profile_id")
+    ? "CAST(profile_id AS STRING)"
+    : "CAST(NULL AS STRING)";
+  const deviceExpr = columns.has("appmetrica_device_id")
+    ? "CAST(appmetrica_device_id AS STRING)"
+    : "CAST(NULL AS STRING)";
+
+  const sourceSql = buildSourceSql(clickExpr, trackerExpr);
+  const campaignSql = buildCampaignSql(clickExpr, trackerExpr, trackingIdExpr);
+  const creativeSql = buildCreativeSql(clickExpr);
+
+  return {
+    sourceSql,
+    campaignSql,
+    creativeSql,
+    companySql: buildCompanySql(sourceSql),
+    userKeySql: `COALESCE(NULLIF(${profileExpr}, ''), ${deviceExpr})`,
+  };
+}
+
+function buildSourceSql(clickExpr: string, trackerExpr: string) {
+  return `
+    CASE
+      WHEN ${clickExpr} = 'Google Play' THEN 'organic'
+      WHEN ${clickExpr} IN ('Unconfigured AdWords', 'AutocreatedGoogle Ads', 'Autocreated Google Ads') THEN 'google_ads'
+      WHEN LOWER(COALESCE(${trackerExpr}, '')) = 'google play' THEN 'organic'
+      WHEN LOWER(COALESCE(${trackerExpr}, '')) IN ('unconfigured adwords', 'autocreatedgoogle ads', 'autocreated google ads') THEN 'google_ads'
+      WHEN LOWER(COALESCE(${trackerExpr}, '')) IN ('', 'unknown') THEN 'unknown'
+      ELSE LOWER(${trackerExpr})
+    END
+  `;
+}
+
+function buildCampaignSql(clickExpr: string, trackerExpr: string, trackingIdExpr: string) {
+  return `
+    CASE
+      WHEN ${clickExpr} = 'Google Play' THEN 'organic'
+      WHEN ${clickExpr} IN ('Unconfigured AdWords', 'AutocreatedGoogle Ads', 'Autocreated Google Ads') THEN 'google_ads'
+      WHEN ${clickExpr} = 'unknown' THEN 'unknown'
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'gclid=') THEN REGEXP_EXTRACT(${clickExpr}, r'gclid=([^&]+)')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'c=[^&]+&c_ifa=') THEN REGEXP_EXTRACT(${clickExpr}, r'c=([^&]+)&c_ifa=')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'c=[^&]+&campaign_name=') THEN REGEXP_EXTRACT(${clickExpr}, r'c=([^&]+)&campaign_name=')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'appmetrica_tracking_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'appmetrica_tracking_id=([^&]+)&ym_tracking_id=')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'afpub_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'afpub_id=([^&]+)&click_id=')
+      WHEN NULLIF(${trackingIdExpr}, '') IS NOT NULL THEN ${trackingIdExpr}
+      WHEN LOWER(COALESCE(${trackerExpr}, '')) = 'google play' THEN 'organic'
+      WHEN LOWER(COALESCE(${trackerExpr}, '')) IN ('unconfigured adwords', 'autocreatedgoogle ads', 'autocreated google ads') THEN 'google_ads'
+      ELSE 'unknown'
+    END
+  `;
+}
+
+function buildCreativeSql(clickExpr: string) {
+  return `
+    CASE
+      WHEN ${clickExpr} IN ('Google Play', 'Unconfigured AdWords', 'AutocreatedGoogle Ads', 'Autocreated Google Ads', 'unknown') THEN 'unknown'
+      WHEN NULLIF(${clickExpr}, '') IS NULL THEN 'unknown'
+      WHEN REGEXP_CONTAINS(${clickExpr}, r'custom_creative_pack_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'custom_creative_pack_id=([^&]+)')
+      ELSE 'unknown'
+    END
+  `;
+}
+
+function buildCompanySql(sourceSql: string) {
+  return `
+    CASE
+      WHEN ${sourceSql} = 'organic' THEN 'Organic'
+      WHEN ${sourceSql} = 'unknown' THEN 'Unknown'
+      WHEN ${sourceSql} = 'google_ads' OR REGEXP_CONTAINS(${sourceSql}, r'google') THEN 'Google Ads'
+      WHEN REGEXP_CONTAINS(${sourceSql}, r'unity') THEN 'Unity Ads'
+      ELSE REGEXP_REPLACE(INITCAP(REPLACE(${sourceSql}, '_', ' ')), r'\\bAds\\b', 'Ads')
+    END
+  `;
+}
+
+export function buildForecastNotebookTrackingPayload(
+  projectLabel: string,
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection,
+  horizonDays: ForecastHorizonDay[] = [...DEFAULT_FORECAST_HORIZON_DAYS]
+) {
+  const compactFilters: Record<string, unknown> = {
+    granularityDays: filters.granularityDays,
+    revenueMode: selection.revenueMode,
+    horizonDays,
+  };
+
+  if (filters.platform !== "all") {
+    compactFilters.platform = filters.platform;
+  }
+  if (filters.segment !== "all") {
+    compactFilters.segment = filters.segment;
+  }
+  if (filters.groupBy !== "none") {
+    compactFilters.groupBy = filters.groupBy;
+  }
+  if (filters.tag !== "all") {
+    compactFilters.tag = filters.tag;
+  }
+  if (selection.country !== "all") {
+    compactFilters.country = selection.country;
+  }
+  if (selection.source !== "all") {
+    compactFilters.source = selection.source;
+  }
+  if (selection.company !== "all") {
+    compactFilters.company = selection.company;
+  }
+  if (selection.campaign !== "all") {
+    compactFilters.campaign = selection.campaign;
+  }
+  if (selection.creative !== "all") {
+    compactFilters.creative = selection.creative;
+  }
+
+  const labelParts = [
+    projectLabel,
+    selection.revenueMode,
+    `step ${filters.granularityDays}d`,
+    horizonDays.map((day) => `D${day}`).join("/"),
+  ];
+  if (filters.platform !== "all") {
+    labelParts.push(formatPlatformLabel(filters.platform));
+  }
+  if (selection.country !== "all") {
+    labelParts.push(selection.country);
+  }
+  if (selection.source !== "all") {
+    labelParts.push(selection.source);
+  }
+  if (selection.campaign !== "all") {
+    labelParts.push(selection.campaign);
+  }
+  if (selection.creative !== "all") {
+    labelParts.push(selection.creative);
+  }
+
+  return {
+    label: labelParts.join(" · "),
+    filters: compactFilters,
+  };
+}
+
+async function loadInstallDescriptors(
+  context: ProjectQueryContext,
+  filters: DashboardFilters,
+  installSql: InstallSqlConfig
+) {
+  return executeBigQuery<InstallDescriptorRow>(
+    context,
+    `
+      WITH installs AS (
+        SELECT
+          LOWER(CAST(os_name AS STRING)) AS platform,
+          COALESCE(NULLIF(UPPER(CAST(country_iso_code AS STRING)), ''), 'UNKNOWN') AS country,
+          ${installSql.sourceSql} AS source,
+          ${installSql.companySql} AS company,
+          ${installSql.campaignSql} AS campaign,
+          ${installSql.creativeSql} AS creative,
+          DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) AS install_date
+        FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
+        WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@to)
+          AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@to)
+          AND (@platform = 'all' OR LOWER(CAST(os_name AS STRING)) = @platform)
+      )
+      SELECT
+        platform,
+        country,
+        source,
+        company,
+        campaign,
+        creative,
+        COUNT(*) AS count,
+        CAST(MIN(install_date) AS STRING) AS first_seen,
+        CAST(MAX(install_date) AS STRING) AS last_seen
+      FROM installs
+      GROUP BY 1, 2, 3, 4, 5, 6
+    `,
+    [
+      { name: "from", type: "DATE", value: filters.from },
+      { name: "to", type: "DATE", value: filters.to },
+      { name: "platform", type: "STRING", value: filters.platform },
+    ]
+  );
+}
+
+async function loadCohortSizes(
+  context: ProjectQueryContext,
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection,
+  installSql: InstallSqlConfig
+) {
+  return executeBigQuery<CohortSizeRow>(
+    context,
+    `
+      WITH installs AS (
+        SELECT
+          DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) AS cohort_date,
+          LOWER(CAST(os_name AS STRING)) AS platform,
+          COALESCE(NULLIF(UPPER(CAST(country_iso_code AS STRING)), ''), 'UNKNOWN') AS country,
+          ${installSql.sourceSql} AS source,
+          ${installSql.companySql} AS company,
+          ${installSql.campaignSql} AS campaign,
+          ${installSql.creativeSql} AS creative,
+          ${installSql.userKeySql} AS user_key
+        FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
+        WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@to)
+          AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@to)
+          AND (@platform = 'all' OR LOWER(CAST(os_name AS STRING)) = @platform)
+      )
+      SELECT
+        CAST(cohort_date AS STRING) AS cohort_date,
+        platform,
+        country,
+        source,
+        company,
+        campaign,
+        creative,
+        COUNT(DISTINCT user_key) AS cohort_size
+      FROM installs
+      WHERE (@country = 'all' OR country = @country)
+        AND (@source = 'all' OR source = @source)
+        AND (@company = 'all' OR company = @company)
+        AND (@campaign = 'all' OR campaign = @campaign)
+        AND (@creative = 'all' OR creative = @creative)
+      GROUP BY 1, 2, 3, 4, 5, 6, 7
+    `,
+    buildSelectionParams(filters, selection)
+  );
+}
+
+async function loadRevenueRows(
+  context: ProjectQueryContext,
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection,
+  horizonDays: readonly number[],
+  installSql: InstallSqlConfig
+) {
+  const maxHorizon = Math.max(...PAYBACK_CURVE_POINTS, ...horizonDays, 720);
+  const eventsTo = currentDataCutoffIso();
+  return executeBigQuery<RevenueRow>(
+    context,
+    `
+      WITH installs AS (
+        SELECT
+          DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) AS cohort_date,
+          LOWER(CAST(os_name AS STRING)) AS platform,
+          COALESCE(NULLIF(UPPER(CAST(country_iso_code AS STRING)), ''), 'UNKNOWN') AS country,
+          ${STORE_SQL} AS store,
+          ${installSql.sourceSql} AS source,
+          ${installSql.companySql} AS company,
+          ${installSql.campaignSql} AS campaign,
+          ${installSql.creativeSql} AS creative,
+          ${installSql.userKeySql} AS user_key
+        FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
+        WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@to)
+          AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@to)
+          AND (@platform = 'all' OR LOWER(CAST(os_name AS STRING)) = @platform)
+      ),
+      installs_filtered AS (
+        SELECT *
+        FROM installs
+        WHERE (@country = 'all' OR country = @country)
+          AND (@source = 'all' OR source = @source)
+          AND (@company = 'all' OR company = @company)
+          AND (@campaign = 'all' OR campaign = @campaign)
+          AND (@creative = 'all' OR creative = @creative)
+      ),
+      events AS (
+        SELECT
+          COALESCE(NULLIF(CAST(profile_id AS STRING), ''), CAST(appmetrica_device_id AS STRING)) AS user_key,
+          DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) AS event_date,
+          SUM(
+            COALESCE(
+              SAFE_CAST(JSON_VALUE(event_json, '$.price') AS FLOAT64),
+              SAFE_CAST(JSON_VALUE(event_json, '$.revenue') AS FLOAT64),
+              SAFE_CAST(JSON_VALUE(event_json, '$.value') AS FLOAT64),
+              0
+            )
+          ) AS revenue
+        FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
+        WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@events_to)
+          AND DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@events_to)
+          AND (
+            (@revenue_mode = 'ads' AND event_name = 'c_ad_revenue')
+            OR (@revenue_mode = 'iap' AND event_name IN ('purchase', 'in_app_purchase', 'subscription_start'))
+            OR (@revenue_mode = 'total' AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start'))
+          )
+        GROUP BY 1, 2
+      )
+      SELECT
+        CAST(i.cohort_date AS STRING) AS cohort_date,
+        i.platform,
+        i.country,
+        i.source,
+        i.company,
+        i.campaign,
+        i.creative,
+        CAST(e.event_date AS STRING) AS event_date,
+        DATE_DIFF(e.event_date, i.cohort_date, DAY) AS lifetime_day,
+        SUM(e.revenue) AS revenue
+      FROM installs_filtered i
+      INNER JOIN events e
+        ON e.user_key = i.user_key
+       AND e.event_date >= i.cohort_date
+       AND e.event_date <= DATE_ADD(i.cohort_date, INTERVAL @max_horizon DAY)
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+      ORDER BY cohort_date, lifetime_day
+    `,
+    [
+      ...buildSelectionParams(filters, selection),
+      { name: "events_to", type: "DATE", value: eventsTo },
+      { name: "max_horizon", type: "INT64", value: maxHorizon },
+      { name: "revenue_mode", type: "STRING", value: selection.revenueMode },
+    ]
+  );
+}
+
+async function loadCorruptedDayCounts(
+  context: ProjectQueryContext,
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection,
+  horizonDays: readonly number[]
+) {
+  const maxHorizon = Math.max(...PAYBACK_CURVE_POINTS, ...horizonDays, 720);
+  const eventsTo = currentDataCutoffIso();
+  const rows = await executeBigQuery<EventDayCountRow>(
+    context,
+    `
+      SELECT
+        CAST(DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) AS STRING) AS event_date,
+        COUNT(*) AS event_count
+      FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
+      WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@events_to)
+        AND DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@events_to)
+        AND (
+          (@revenue_mode = 'ads' AND event_name = 'c_ad_revenue')
+          OR (@revenue_mode = 'iap' AND event_name IN ('purchase', 'in_app_purchase', 'subscription_start'))
+          OR (@revenue_mode = 'total' AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start'))
+        )
+        AND (@platform = 'all' OR LOWER(CAST(os_name AS STRING)) = @platform)
+      GROUP BY 1
+      ORDER BY event_date
+    `,
+    [
+      { name: "from", type: "DATE", value: filters.from },
+      { name: "events_to", type: "DATE", value: eventsTo },
+      { name: "platform", type: "STRING", value: filters.platform },
+      { name: "revenue_mode", type: "STRING", value: selection.revenueMode },
+      { name: "max_horizon", type: "INT64", value: maxHorizon },
+    ]
+  );
+
+  return detectCorruptedDays(rows, filters.from);
+}
+
+async function loadSpendRows(
+  context: ProjectQueryContext,
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection
+) {
+  const mirrorSources = context.bundle.sources.filter(
+    (source) =>
+      (source.sourceType === "unity_ads_spend" || source.sourceType === "google_ads_spend") &&
+      source.config.enabled === true &&
+      source.config.mode === "bigquery"
+  );
+
+  const settled = await Promise.allSettled(
+    mirrorSources.map(async (source) => {
+      const schema = await discoverMirrorSpendSchema(context, source, filters);
+      if (!schema) {
+        return [] as MirrorSpendRow[];
+      }
+
+      return executeBigQuery<MirrorSpendRow>(
+        context,
+        `
+          ${schema.query}
+        `,
+        [
+          { name: "from", type: "DATE", value: filters.from },
+          { name: "to", type: "DATE", value: filters.to },
+        ]
+      );
+    })
+  );
+
+  return settled.flatMap((entry) => (entry.status === "fulfilled" ? entry.value : []));
+}
+
+function buildSelectionParams(
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection
+): BigQueryQueryParam[] {
+  return [
+    { name: "from", type: "DATE", value: filters.from },
+    { name: "to", type: "DATE", value: filters.to },
+    { name: "platform", type: "STRING", value: filters.platform },
+    { name: "country", type: "STRING", value: selection.country },
+    { name: "source", type: "STRING", value: selection.source },
+    { name: "company", type: "STRING", value: selection.company },
+    { name: "campaign", type: "STRING", value: selection.campaign },
+    { name: "creative", type: "STRING", value: selection.creative },
+  ];
+}
+
+async function discoverMirrorSpendSchema(
+  context: ProjectQueryContext,
+  source: AnalyticsSourceRecord,
+  filters: DashboardFilters
+) {
+  const sourceProjectId =
+    typeof source.config.sourceProjectId === "string" ? source.config.sourceProjectId : "";
+  const sourceDataset =
+    typeof source.config.sourceDataset === "string" ? source.config.sourceDataset : "";
+  const tablePattern =
+    typeof source.config.tablePattern === "string" ? source.config.tablePattern : "";
+
+  if (!sourceProjectId || !sourceDataset || !tablePattern) {
+    return null;
+  }
+
+  const rows = await executeBigQuery<MirrorSchemaRow>(
+    context,
+    `
+      SELECT
+        table_name,
+        LOWER(column_name) AS column_name
+      FROM \`${sourceProjectId}.${sourceDataset}.INFORMATION_SCHEMA.COLUMNS\`
+      WHERE table_name LIKE @table_pattern
+    `,
+    [{ name: "table_pattern", type: "STRING", value: tablePattern.replace(/\*/g, "%") }]
+  );
+
+  const columnsByTable = rows.reduce<Map<string, Set<string>>>((acc, row) => {
+    const tableName = row.table_name?.trim();
+    const columnName = row.column_name?.trim().toLowerCase();
+    if (!tableName || !columnName) {
+      return acc;
+    }
+    const current = acc.get(tableName) ?? new Set<string>();
+    current.add(columnName);
+    acc.set(tableName, current);
+    return acc;
+  }, new Map());
+
+  const tableNames = selectMirrorTables(Array.from(columnsByTable.keys()), filters.from, filters.to);
+  if (tableNames.length === 0) {
+    return null;
+  }
+
+  const sourceCompany = source.sourceType === "google_ads_spend" ? "Google Ads" : "Unity Ads";
+  const sourceKey = source.sourceType === "google_ads_spend" ? "google_ads" : "unity_ads";
+
+  const selects = tableNames.flatMap((tableName) => {
+    const columns = columnsByTable.get(tableName) ?? new Set<string>();
+    const spendColumn = firstExistingCandidate(columns, MIRROR_SPEND_COLUMN_CANDIDATES);
+    if (!spendColumn) {
+      return [];
+    }
+
+    const installsColumn = firstExistingCandidate(columns, MIRROR_INSTALLS_COLUMN_CANDIDATES);
+    const countryColumn = firstExistingCandidate(columns, MIRROR_COUNTRY_COLUMN_CANDIDATES);
+    const storeColumn = firstExistingCandidate(columns, MIRROR_STORE_COLUMN_CANDIDATES);
+    const dateColumn = firstExistingCandidate(columns, MIRROR_DATE_COLUMN_CANDIDATES);
+    const campaignIdColumn = firstExistingCandidate(columns, MIRROR_CAMPAIGN_ID_COLUMN_CANDIDATES);
+    const campaignNameColumn = firstExistingCandidate(columns, MIRROR_CAMPAIGN_NAME_COLUMN_CANDIDATES);
+    const creativeIdColumn = firstExistingCandidate(columns, MIRROR_CREATIVE_ID_COLUMN_CANDIDATES);
+    const creativeNameColumn = firstExistingCandidate(columns, MIRROR_CREATIVE_NAME_COLUMN_CANDIDATES);
+    const parsedTableDate = toIsoDateFromKey(parseMirrorTableDate(tableName));
+    const tableRef = `\`${sourceProjectId}.${sourceDataset}.${sanitizeTableIdentifier(tableName)}\``;
+
+    const cohortDateExpr = dateColumn
+      ? `CAST(SAFE_CAST(${dateColumn} AS DATE) AS STRING)`
+      : parsedTableDate
+        ? `'${parsedTableDate}'`
+        : "CAST(NULL AS STRING)";
+    const countryExpr = countryColumn
+      ? `COALESCE(NULLIF(UPPER(CAST(${countryColumn} AS STRING)), ''), 'UNKNOWN')`
+      : "'UNKNOWN'";
+    const storeExpr =
+      source.sourceType === "google_ads_spend"
+        ? "'google'"
+        : storeColumn
+          ? `
+            CASE
+              WHEN LOWER(CAST(${storeColumn} AS STRING)) LIKE '%android%' OR LOWER(CAST(${storeColumn} AS STRING)) = 'google' THEN 'google'
+              WHEN LOWER(CAST(${storeColumn} AS STRING)) LIKE '%ios%' OR LOWER(CAST(${storeColumn} AS STRING)) = 'apple' THEN 'apple'
+              ELSE LOWER(CAST(${storeColumn} AS STRING))
+            END
+          `
+          : "'unknown'";
+    const campaignExpr = campaignIdColumn
+      ? `NULLIF(TRIM(CAST(${campaignIdColumn} AS STRING)), '')`
+      : campaignNameColumn
+        ? `NULLIF(TRIM(CAST(${campaignNameColumn} AS STRING)), '')`
+        : "'unknown'";
+    const creativeExpr = creativeIdColumn
+      ? `NULLIF(TRIM(CAST(${creativeIdColumn} AS STRING)), '')`
+      : creativeNameColumn
+        ? `NULLIF(TRIM(CAST(${creativeNameColumn} AS STRING)), '')`
+        : "'unknown'";
+    const spendExpr =
+      spendColumn.includes("micros")
+        ? `SAFE_CAST(${spendColumn} AS FLOAT64) / 1000000`
+        : `SAFE_CAST(${spendColumn} AS FLOAT64)`;
+    const installsExpr = installsColumn
+      ? `SAFE_CAST(${installsColumn} AS FLOAT64)`
+      : "0";
+
+    return [
+      `
+        SELECT
+          ${cohortDateExpr} AS cohort_date,
+          '${sourceKey}' AS source,
+          '${sourceCompany}' AS company,
+          ${countryExpr} AS country,
+          ${storeExpr} AS store,
+          ${campaignExpr} AS campaign_id,
+          ${creativeExpr} AS creative_id,
+          SUM(COALESCE(${spendExpr}, 0)) AS spend,
+          SUM(COALESCE(${installsExpr}, 0)) AS installs
+        FROM ${tableRef}
+        WHERE (${cohortDateExpr}) BETWEEN CAST(@from AS STRING) AND CAST(@to AS STRING)
+        GROUP BY 1, 2, 3, 4, 5, 6, 7
+      `,
+    ];
+  });
+
+  if (selects.length === 0) {
+    return null;
+  }
+
+  return {
+    query: `
+      WITH raw_spend AS (
+        ${selects.join("\nUNION ALL\n")}
+      )
+      SELECT
+        cohort_date,
+        source,
+        company,
+        country,
+        store,
+        campaign_id,
+        creative_id,
+        SUM(spend) AS spend,
+        SUM(installs) AS installs
+      FROM raw_spend
+      WHERE cohort_date IS NOT NULL
+      GROUP BY 1, 2, 3, 4, 5, 6, 7
+    `,
+    company: sourceCompany,
+    source: sourceKey,
+  };
+}
+
+function buildCatalog(
+  rows: InstallDescriptorRow[],
+  selection: {
+    platform: string;
+    country: string;
+    source: string;
+    company: string;
+    campaign: string;
+    creative: string;
+  }
+): ForecastNotebookCatalog {
+  const normalized = rows.map((row) => ({
+    platform: row.platform ?? "unknown",
+    country: row.country ?? "UNKNOWN",
+    source: row.source ?? "unknown",
+    company: row.company ?? "Unknown",
+    campaign: row.campaign ?? "unknown",
+    creative: row.creative ?? "unknown",
+    count: Number(row.count ?? 0),
+  }));
+
+  const filteredCountries = normalized.filter(
+    (row) =>
+      (selection.platform === "all" || row.platform === selection.platform) &&
+      (selection.source === "all" || row.source === selection.source) &&
+      (selection.company === "all" || row.company === selection.company) &&
+      (selection.campaign === "all" || row.campaign === selection.campaign) &&
+      (selection.creative === "all" || row.creative === selection.creative)
+  );
+  const filteredSources = normalized.filter(
+    (row) =>
+      (selection.platform === "all" || row.platform === selection.platform) &&
+      (selection.country === "all" || row.country === selection.country) &&
+      (selection.company === "all" || row.company === selection.company) &&
+      (selection.campaign === "all" || row.campaign === selection.campaign) &&
+      (selection.creative === "all" || row.creative === selection.creative)
+  );
+  const filteredCompanies = normalized.filter(
+    (row) =>
+      (selection.platform === "all" || row.platform === selection.platform) &&
+      (selection.country === "all" || row.country === selection.country) &&
+      (selection.source === "all" || row.source === selection.source) &&
+      (selection.campaign === "all" || row.campaign === selection.campaign) &&
+      (selection.creative === "all" || row.creative === selection.creative)
+  );
+  const filteredCampaigns = normalized.filter(
+    (row) =>
+      (selection.platform === "all" || row.platform === selection.platform) &&
+      (selection.country === "all" || row.country === selection.country) &&
+      (selection.source === "all" || row.source === selection.source) &&
+      (selection.company === "all" || row.company === selection.company) &&
+      (selection.creative === "all" || row.creative === selection.creative)
+  );
+  const filteredCreatives = normalized.filter(
+    (row) =>
+      (selection.platform === "all" || row.platform === selection.platform) &&
+      (selection.country === "all" || row.country === selection.country) &&
+      (selection.source === "all" || row.source === selection.source) &&
+      (selection.company === "all" || row.company === selection.company) &&
+      (selection.campaign === "all" || row.campaign === selection.campaign)
+  );
+
+  return {
+    countries: buildOptions(filteredCountries, "country", "All countries", formatCountryLabel),
+    sources: buildOptions(filteredSources, "source", "All traffic sources", formatSourceLabel),
+    companies: buildOptions(filteredCompanies, "company", "All companies", (value) => value),
+    campaigns: buildOptions(filteredCampaigns, "campaign", "All campaigns", (value) => value),
+    creatives: buildOptions(filteredCreatives, "creative", "All creatives", (value) => value),
+  };
+}
+
+function applySelectionToDescriptors(
+  rows: InstallDescriptorRow[],
+  selection: {
+    platform: string;
+    country: string;
+    source: string;
+    company: string;
+    campaign: string;
+    creative: string;
+  }
+) {
+  return rows.filter((row) => {
+    const platform = row.platform ?? "unknown";
+    const country = row.country ?? "UNKNOWN";
+    const source = row.source ?? "unknown";
+    const company = row.company ?? "Unknown";
+    const campaign = row.campaign ?? "unknown";
+    const creative = row.creative ?? "unknown";
+
+    if (selection.platform !== "all" && platform !== selection.platform) {
+      return false;
+    }
+    if (selection.country !== "all" && country !== selection.country) {
+      return false;
+    }
+    if (selection.source !== "all" && source !== selection.source) {
+      return false;
+    }
+    if (selection.company !== "all" && company !== selection.company) {
+      return false;
+    }
+    if (selection.campaign !== "all" && campaign !== selection.campaign) {
+      return false;
+    }
+    if (selection.creative !== "all" && creative !== selection.creative) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function buildCatalogNotes(
+  allRows: InstallDescriptorRow[],
+  selectedRows: InstallDescriptorRow[],
+  spendRows: MirrorSpendRow[],
+  selection: ForecastNotebookSelection
+) {
+  const notes: string[] = [];
+  if (allRows.length === 0) {
+    notes.push("No AppMetrica install rows were found for the selected date window.");
+  }
+  if (selectedRows.length === 0) {
+    notes.push("The selected slice has no AppMetrica cohort rows in the current date window.");
+  }
+  if (spendRows.length === 0) {
+    notes.push("No paid spend rows were found in the configured spend mirrors for this window. ROAS will stay at 0 where spend is absent.");
+  }
+  if (selection.campaign !== "all" || selection.creative !== "all") {
+    notes.push("Campaign and creative filters are now driven by AppMetrica install attributes, not synthetic mirror-only labels.");
+  }
+  return notes;
+}
+
+function buildRawCohorts({
+  cohortSizeRows,
+  revenueRows,
+  spendRows,
+  filters,
+  selection,
+  groupBy,
+}: {
+  cohortSizeRows: CohortSizeRow[];
+  revenueRows: RevenueRow[];
+  spendRows: MirrorSpendRow[];
+  filters: DashboardFilters;
+  selection: ForecastNotebookSelection;
+  groupBy: DashboardGroupByKey;
+}) {
+  const spendByFallbackKey = buildSpendLookup(spendRows);
+  const raw = new Map<string, RawCohortRecord>();
+
+  for (const row of cohortSizeRows) {
+    const cohortDate = row.cohort_date ?? filters.from;
+    const source = row.source ?? "unknown";
+    const company = row.company ?? "Unknown";
+    const campaign = row.campaign ?? "unknown";
+    const creative = row.creative ?? "unknown";
+    const country = row.country ?? "UNKNOWN";
+    const platform = row.platform ?? "unknown";
+    const store = platform === "ios" ? "apple" : platform === "android" ? "google" : platform;
+    const groupValue = resolveGroupValue(groupBy, {
+      platform,
+      country,
+      source,
+      company,
+      campaign,
+      creative,
+    });
+    const record = ensureRawCohort(raw, {
+      cohortDate,
+      groupValue,
+      country,
+      source,
+      company,
+      campaign,
+      creative,
+      store,
+    });
+    record.cohortSize += Number(row.cohort_size ?? 0);
+
+    const spendMatch = lookupSpend(spendByFallbackKey, {
+      cohortDate,
+      source,
+      country,
+      store,
+      company,
+      campaign,
+      creative,
+    });
+    record.spend += spendMatch.spend;
+    record.installs += spendMatch.installs;
+  }
+
+  for (const row of revenueRows) {
+    if (row.lifetime_day == null || row.lifetime_day < 0) {
+      continue;
+    }
+
+    const cohortDate = row.cohort_date ?? filters.from;
+    const source = row.source ?? "unknown";
+    const company = row.company ?? "Unknown";
+    const campaign = row.campaign ?? "unknown";
+    const creative = row.creative ?? "unknown";
+    const country = row.country ?? "UNKNOWN";
+    const platform = row.platform ?? "unknown";
+    const store = platform === "ios" ? "apple" : platform === "android" ? "google" : platform;
+    const groupValue = resolveGroupValue(groupBy, {
+      platform,
+      country,
+      source,
+      company,
+      campaign,
+      creative,
+    });
+    const record = ensureRawCohort(raw, {
+      cohortDate,
+      groupValue,
+      country,
+      source,
+      company,
+      campaign,
+      creative,
+      store,
+    });
+    record.dailyRevenue.set(
+      row.lifetime_day,
+      (record.dailyRevenue.get(row.lifetime_day) ?? 0) + Number(row.revenue ?? 0)
+    );
+  }
+
+  for (const record of raw.values()) {
+    if (record.installs <= 0) {
+      record.installs = record.cohortSize;
+    }
+  }
+
+  return raw;
+}
+
+function processRawCohorts(
+  rawCohorts: Map<string, RawCohortRecord>,
+  from: string,
+  to: string,
+  stepDays: number,
+  corruptedDays: Set<string>
+) {
+  const groupedByLine = new Map<string, RawCohortRecord[]>();
+  for (const cohort of rawCohorts.values()) {
+    const current = groupedByLine.get(cohort.groupValue) ?? [];
+    current.push(cohort);
+    groupedByLine.set(cohort.groupValue, current);
+  }
+
+  const processed: ProcessedCohort[] = [];
+  const todayIso = currentDataCutoffIso();
+
+  for (const [groupValue, cohorts] of groupedByLine.entries()) {
+    const ratios = calculateRevenueRatios(cohorts);
+    const repaired = cohorts.map((cohort) => {
+      const repairedRevenue = repairCohortRevenue(cohort, corruptedDays, todayIso, ratios);
+      return {
+        ...cohort,
+        repairedDaily: repairedRevenue.daily,
+        repairedDailyCorrupted: repairedRevenue.isCorrupted,
+      };
+    });
+
+    const buckets = bucketDates(from, to, stepDays);
+    const byBucket = new Map<string, Array<(typeof repaired)[number]>>();
+    for (const bucket of buckets) {
+      byBucket.set(bucket, []);
+    }
+
+    for (const cohort of repaired) {
+      const bucket = alignToBucket(cohort.cohortDate, from, stepDays);
+      const current = byBucket.get(bucket) ?? [];
+      current.push(cohort);
+      byBucket.set(bucket, current);
+    }
+
+    for (const bucket of buckets) {
+      const bucketCohorts = byBucket.get(bucket) ?? [];
+      if (bucketCohorts.length === 0) {
+        processed.push({
+          cohortDate: bucket,
+          groupValue,
+          spend: 0,
+          installs: 0,
+          cohortSize: 0,
+          cohortNumDays: 0,
+          cohortLifetime: dayDiff(bucket, todayIso),
+          isCorrupted: 0,
+          totalRevenue: [],
+        });
+        continue;
+      }
+
+      const minLifetime = Math.min(...bucketCohorts.map((cohort) => cohort.repairedDaily.length - 1));
+      const revenueByDay = new Array(
+        Math.max(0, ...bucketCohorts.map((cohort) => cohort.repairedDaily.length))
+      ).fill(0);
+      let spend = 0;
+      let installs = 0;
+      let cohortSize = 0;
+      let isCorrupted = 0;
+
+      for (const cohort of bucketCohorts) {
+        spend += cohort.spend;
+        installs += cohort.installs;
+        cohortSize += cohort.cohortSize;
+        isCorrupted += cohort.repairedDailyCorrupted;
+        cohort.repairedDaily.forEach((value, index) => {
+          revenueByDay[index] += value;
+        });
+      }
+
+      const totalRevenue: number[] = [];
+      let running = 0;
+      for (const value of revenueByDay) {
+        running += value;
+        totalRevenue.push(running);
+      }
+
+      processed.push({
+        cohortDate: bucket,
+        groupValue,
+        spend,
+        installs,
+        cohortSize,
+        cohortNumDays: bucketCohorts.length,
+        cohortLifetime: minLifetime,
+        isCorrupted,
+        totalRevenue,
+      });
+    }
+  }
+
+  return processed;
+}
+
+function buildGroupedLines(
+  cohorts: ProcessedCohort[],
+  groupBy: DashboardGroupByKey
+): GroupedLine[] {
+  const byGroup = new Map<string, ProcessedCohort[]>();
+  for (const cohort of cohorts) {
+    const current = byGroup.get(cohort.groupValue) ?? [];
+    current.push(cohort);
+    byGroup.set(cohort.groupValue, current);
+  }
+
+  if (byGroup.size === 0) {
+    return [];
+  }
+
+  return Array.from(byGroup.entries())
+    .map(([value, groupCohorts]) => ({
+      value,
+      label: formatGroupLabel(groupBy, value),
+      cohorts: groupCohorts.sort((left, right) => left.cohortDate.localeCompare(right.cohortDate)),
+    }))
+    .sort((left, right) => {
+      const leftSpend = left.cohorts.reduce((sum, cohort) => sum + cohort.spend, 0);
+      const rightSpend = right.cohorts.reduce((sum, cohort) => sum + cohort.spend, 0);
+      if (rightSpend !== leftSpend) {
+        return rightSpend - leftSpend;
+      }
+      return left.label.localeCompare(right.label);
+    })
+    .slice(0, groupBy === "none" ? 1 : 8);
+}
+
+async function buildPredictionResources(
+  lines: GroupedLine[],
+  horizons: number[],
+  runDateFreq: number
+) {
+  const resources = new Map<string, LinePredictionResources>();
+  const requiredHorizons = uniqueSortedNumbers(horizons);
+  const allCohorts = lines.flatMap((line) => line.cohorts);
+  const maxRequiredHorizon = Math.max(90, ...requiredHorizons);
+  const predictionPeriods = uniqueSortedNumbers([
+    ...NOTEBOOK_BOUNDS_PREDICTION_PERIODS.filter((period) => period <= Math.max(360, maxRequiredHorizon)),
+    ...requiredHorizons.filter((period) => period >= 7),
+  ]);
+  const historyDays = [...NOTEBOOK_BOUNDS_HISTORY_DAYS];
+  const curveTasks: CurveEstimateTask[] = [];
+
+  for (const cohort of allCohorts) {
+    const canEstimateCurve =
+      cohort.cohortSize > 0 &&
+      cohort.cohortNumDays === runDateFreq &&
+      cohort.isCorrupted === 0 &&
+      cohort.cohortLifetime >= NOTEBOOK_HISTORY_MIN_DAY &&
+      cohort.totalRevenue.length >= NOTEBOOK_HISTORY_MIN_DAY;
+
+    if (canEstimateCurve) {
+      curveTasks.push({
+        id: `live:${cohort.groupValue}:${cohort.cohortDate}`,
+        totalRevenue: cohort.totalRevenue,
+        cutoff: cohort.cohortLifetime,
+        horizon: maxRequiredHorizon,
+      });
+    }
+
+    if (
+      cohort.cohortNumDays !== runDateFreq ||
+      cohort.cohortSize <= 0 ||
+      cohort.isCorrupted !== 0 ||
+      cohort.cohortLifetime < NOTEBOOK_HISTORY_MIN_DAY ||
+      cohort.totalRevenue.length < NOTEBOOK_HISTORY_MIN_DAY
+    ) {
+      continue;
+    }
+
+    for (const cutoff of historyDays) {
+      if (cutoff < cohort.totalRevenue.length) {
+        curveTasks.push({
+          id: `train:${cohort.groupValue}:${cohort.cohortDate}:${cutoff}`,
+          totalRevenue: cohort.totalRevenue,
+          cutoff,
+          horizon: Math.max(maxRequiredHorizon, 90),
+        });
+      }
+    }
+  }
+
+  const estimatedCurves = estimateCurvesWithNotebook(curveTasks);
+  const trainingRecords = buildBoundsTrainingRecords(
+    allCohorts,
+    historyDays,
+    predictionPeriods,
+    maxRequiredHorizon,
+    runDateFreq,
+    estimatedCurves
+  );
+
+  for (const line of lines) {
+    resources.set(
+      line.value,
+      await buildLinePredictionResources(
+        line.cohorts,
+        requiredHorizons,
+        runDateFreq,
+        historyDays,
+        predictionPeriods,
+        maxRequiredHorizon,
+        trainingRecords,
+        estimatedCurves
+      )
+    );
+  }
+  return resources;
+}
+
+async function buildLinePredictionResources(
+  cohorts: ProcessedCohort[],
+  requiredHorizons: number[],
+  runDateFreq: number,
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[],
+  maxRequiredHorizon: number,
+  trainingRecords: BoundsTrainingRecord[],
+  estimatedCurves: Map<string, number[] | null>
+): Promise<LinePredictionResources> {
+  const boundsByCohortSize = new Map<number, Map<string, readonly [number, number]>>();
+  const predictionsByCohortDate = new Map<string, CurvePrediction>();
+  const history: CurvePrediction[] = [];
+
+  for (const cohort of cohorts) {
+    const points = new Map<number, PredictedPoint>();
+    const predictedFor = new Map<number, number>();
+    const cacheEntry: CurvePrediction = {
+      trueRevenue: cohort.totalRevenue,
+      predictedFor,
+      points,
+    };
+
+    const canEstimateCurve =
+      cohort.cohortSize > 0 &&
+      cohort.cohortNumDays === runDateFreq &&
+      cohort.isCorrupted === 0 &&
+      cohort.cohortLifetime >= NOTEBOOK_HISTORY_MIN_DAY &&
+      cohort.totalRevenue.length >= NOTEBOOK_HISTORY_MIN_DAY;
+    const estimatedCurve = canEstimateCurve
+      ? estimatedCurves.get(`live:${cohort.groupValue}:${cohort.cohortDate}`) ?? null
+      : null;
+    const predictedCurve = estimatedCurve ? [...estimatedCurve] : null;
+    if (predictedCurve && predictedCurve[predictedCurve.length - 1]! < predictedCurve[predictedCurve.length - 2]!) {
+      straightenPrediction(predictedCurve);
+    }
+    const curveAllowed = predictedCurve && !isExplodingCurve(predictedCurve);
+    const canUseYoungFallback =
+      !canEstimateCurve &&
+      cohort.cohortNumDays === runDateFreq &&
+      cohort.isCorrupted === 0 &&
+      history.length >= 3;
+    const shouldAppendToHistory = Boolean(curveAllowed) || canUseYoungFallback;
+
+    for (const horizon of requiredHorizons) {
+      if (cohort.cohortLifetime >= horizon && cohort.totalRevenue[horizon] != null) {
+        const actual = cohort.totalRevenue[horizon] ?? 0;
+        points.set(horizon, {
+          predictedRevenue: actual,
+          lowerRevenue: actual,
+          upperRevenue: actual,
+          actual,
+        });
+        continue;
+      }
+
+      if (cohort.cohortSize <= 0 || cohort.cohortNumDays <= 0) {
+        points.set(horizon, {
+          predictedRevenue: 0,
+          lowerRevenue: 0,
+          upperRevenue: 0,
+          actual: null,
+        });
+        continue;
+      }
+
+      if (cohort.isCorrupted !== 0) {
+        points.set(horizon, {
+          predictedRevenue: null,
+          lowerRevenue: null,
+          upperRevenue: null,
+          actual: null,
+        });
+        continue;
+      }
+
+      let predictedRevenue: number | null = null;
+      let cutoffToLook = NOTEBOOK_FALLBACK_CUTOFF;
+      let allowBounds = false;
+
+      if (curveAllowed && horizon < predictedCurve.length) {
+        predictedRevenue = predictedCurve[horizon] ?? 0;
+        cutoffToLook = nearestHistoryDay(cohort.cohortLifetime);
+        allowBounds = true;
+      }
+
+      if (canUseYoungFallback) {
+        predictedRevenue = fallbackYoungCohortPrediction(
+          cohort.totalRevenue,
+          cohort.cohortLifetime,
+          horizon,
+          history
+        );
+        cutoffToLook = NOTEBOOK_FALLBACK_CUTOFF;
+        allowBounds = predictedRevenue !== null;
+      }
+
+      const bounds = allowBounds
+        ? getNotebookBounds(
+            boundsByCohortSize,
+            trainingRecords,
+            cohort.cohortSize,
+            cutoffToLook,
+            horizon,
+            maxRequiredHorizon,
+            historyDays,
+            predictionPeriods
+          )
+        : ([0, 0] as const);
+      const lowerRevenue =
+        predictedRevenue == null
+          ? null
+          : Math.max(0, predictedRevenue + (predictedRevenue * bounds[0]) / 100);
+      const upperRevenue =
+        predictedRevenue == null
+          ? null
+          : Math.max(lowerRevenue ?? 0, predictedRevenue + (predictedRevenue * bounds[1]) / 100);
+      points.set(horizon, {
+        predictedRevenue,
+        lowerRevenue,
+        upperRevenue,
+        actual: null,
+      });
+      if (predictedRevenue !== null) {
+        predictedFor.set(horizon, predictedRevenue);
+      }
+    }
+
+    predictionsByCohortDate.set(cohort.cohortDate, cacheEntry);
+    if (shouldAppendToHistory) {
+      history.push(cacheEntry);
+    }
+  }
+
+  return {
+    predictionsByCohortDate,
+    boundsByCohortSize,
+    trainingPredictionCount: trainingRecords.length,
+  };
+}
+
+function buildBoundsTrainingRecords(
+  cohorts: ProcessedCohort[],
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[],
+  maxRequiredHorizon: number,
+  runDateFreq: number,
+  estimatedCurves: Map<string, number[] | null>
+) {
+  const records: BoundsTrainingRecord[] = [];
+
+  for (const cohort of cohorts) {
+    if (
+      cohort.cohortNumDays !== runDateFreq ||
+      cohort.cohortSize <= 0 ||
+      cohort.isCorrupted !== 0 ||
+      cohort.cohortLifetime < NOTEBOOK_HISTORY_MIN_DAY ||
+      cohort.totalRevenue.length < NOTEBOOK_HISTORY_MIN_DAY
+    ) {
+      continue;
+    }
+
+    const trueFor = new Map<number, number>();
+    const predictedForByCutoff = new Map<string, number>();
+    const badByCutoff = new Set<number>();
+
+    for (const period of predictionPeriods) {
+      if (cohort.totalRevenue.length > period && cohort.totalRevenue[period] != null) {
+        trueFor.set(period, cohort.totalRevenue[period] ?? 0);
+      }
+    }
+
+    for (const cutoff of historyDays) {
+      if (cutoff >= cohort.totalRevenue.length) {
+        continue;
+      }
+      const predictedCurve =
+        estimatedCurves.get(`train:${cohort.groupValue}:${cohort.cohortDate}:${cutoff}`) ?? null;
+      if (!predictedCurve) {
+        continue;
+      }
+      if (predictedCurve[predictedCurve.length - 1]! < predictedCurve[predictedCurve.length - 2]!) {
+        continue;
+      }
+      if ((predictedCurve[60] ?? 0) > (predictedCurve[90] ?? Number.POSITIVE_INFINITY)) {
+        badByCutoff.add(cutoff);
+      }
+      for (const period of predictionPeriods) {
+        if (cutoff < period && period < predictedCurve.length) {
+          predictedForByCutoff.set(boundsKey(period, cutoff), predictedCurve[period] ?? 0);
+        }
+      }
+    }
+
+    if (predictedForByCutoff.size === 0) {
+      continue;
+    }
+
+    records.push({
+      cohortDate: cohort.cohortDate,
+      cohortSize: cohort.cohortSize,
+      trueRevenue: cohort.totalRevenue,
+      trueFor,
+      predictedForByCutoff,
+      badByCutoff,
+    });
+  }
+
+  return records;
+}
+
+function fallbackYoungCohortPrediction(
+  totalRevenue: number[],
+  cohortLifetime: number,
+  horizon: number,
+  history: CurvePrediction[]
+) {
+  const currentRevenue = totalRevenue[cohortLifetime] ?? 0;
+  if (history.length < 3) {
+    return null;
+  }
+
+  const collectedPredictions: number[] = [];
+  const collectedRevenues: number[] = [];
+
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const previous = history[index];
+    if (!previous || previous.trueRevenue.length <= 4) {
+      continue;
+    }
+
+    const predicted = previous.predictedFor.get(horizon);
+    if (predicted == null) {
+      if (previous.trueRevenue.length > horizon) {
+        const realizedAtCurrentLifetime = previous.trueRevenue[cohortLifetime] ?? 0;
+        if (realizedAtCurrentLifetime > 0) {
+          collectedPredictions.push(previous.trueRevenue[horizon] ?? 0);
+          collectedRevenues.push(realizedAtCurrentLifetime);
+        }
+      }
+      continue;
+    }
+
+    const realizedAtCurrentLifetime = previous.trueRevenue[cohortLifetime] ?? 0;
+    if (realizedAtCurrentLifetime <= 0) {
+      continue;
+    }
+
+    collectedPredictions.push(predicted);
+    collectedRevenues.push(realizedAtCurrentLifetime);
+    if (collectedPredictions.length >= 3) {
+      break;
+    }
+  }
+
+  if (collectedPredictions.length < 3) {
+    return null;
+  }
+
+  const denominator = collectedRevenues.reduce((sum, value) => sum + value, 0);
+  if (denominator <= 0) {
+    return null;
+  }
+
+  const coefficient = collectedPredictions.reduce((sum, value) => sum + value, 0) / denominator;
+  return currentRevenue * coefficient;
+}
+
+function getNotebookBounds(
+  cache: Map<number, Map<string, readonly [number, number]>>,
+  trainingRecords: BoundsTrainingRecord[],
+  cohortSize: number,
+  cutoff: number,
+  horizon: number,
+  maxPredictionHorizon: number,
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[]
+) {
+  const normalizedCohortSize = Math.max(1, Math.round(cohortSize));
+  for (const sizeToLook of cohortSizesToLook(normalizedCohortSize)) {
+    let boundsTable = cache.get(sizeToLook);
+    if (!boundsTable) {
+      boundsTable = buildBoundsForCohortSize(
+        trainingRecords,
+        sizeToLook,
+        maxPredictionHorizon,
+        historyDays,
+        predictionPeriods
+      );
+      cache.set(sizeToLook, boundsTable);
+    }
+
+    const key = boundsKey(horizon, nearestHistoryDay(cutoff));
+    const found = boundsTable.get(key);
+    if (found) {
+      return found;
+    }
+  }
+
+  return [-15, 15] as const;
+}
+
+function buildBoundsForCohortSize(
+  trainingRecords: BoundsTrainingRecord[],
+  cohortSize: number,
+  maxPredictionHorizon: number,
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[]
+) {
+  const minSize = Math.floor(cohortSize / BOUNDS_SIZE_SMOOTH_COEFF);
+  const maxSize = Math.ceil(cohortSize * BOUNDS_SIZE_SMOOTH_COEFF) + 1;
+  const smoothRecords = trainingRecords.filter(
+    (record) => record.cohortSize >= minSize && record.cohortSize <= maxSize
+  );
+  const table = new Map<string, readonly [number, number]>();
+  if (smoothRecords.length < BOUNDS_MIN_PREDICTIONS) {
+    return table;
+  }
+
+  const rawBounds = getErrorBoundsFromRecords(smoothRecords, historyDays, predictionPeriods);
+  for (const [key, value] of rawBounds.entries()) {
+    table.set(key, value);
+  }
+
+  const expandedHistoryMax = Math.min(BOUNDS_MAX_CUTOFF, Math.max(...historyDays));
+  for (const period of predictionPeriods) {
+    const knownCutoffs = historyDays.filter((cutoff) => cutoff < period && table.has(boundsKey(period, cutoff)));
+    if (knownCutoffs.length === 0) {
+      continue;
+    }
+
+    const lowerValues = knownCutoffs.map((cutoff) => table.get(boundsKey(period, cutoff))?.[0] ?? 0);
+    const upperValues = knownCutoffs.map((cutoff) => table.get(boundsKey(period, cutoff))?.[1] ?? 0);
+    const daysToExtend = Math.min(expandedHistoryMax, period - 1);
+    const expanded = interpolateAcrossHistory(knownCutoffs, lowerValues, upperValues, daysToExtend);
+
+    for (const [historyDay, bounds] of expanded.entries()) {
+      const key = boundsKey(period, historyDay);
+      if (!table.has(key)) {
+        table.set(key, bounds);
+      }
+    }
+  }
+
+  const fullPredictionPeriods = rangeInclusive(7, Math.max(365, maxPredictionHorizon));
+  for (const cutoff of rangeInclusive(NOTEBOOK_HISTORY_MIN_DAY, BOUNDS_MAX_CUTOFF)) {
+    const knownPeriods = predictionPeriods.filter((period) => cutoff < period && table.has(boundsKey(period, cutoff)));
+    if (knownPeriods.length <= 1) {
+      continue;
+    }
+
+    const lowerValues = knownPeriods.map((period) => table.get(boundsKey(period, cutoff))?.[0] ?? 0);
+    const upperValues = knownPeriods.map((period) => table.get(boundsKey(period, cutoff))?.[1] ?? 0);
+    const expanded = interpolateAcrossPredictionPeriods(
+      knownPeriods,
+      lowerValues,
+      upperValues,
+      fullPredictionPeriods[fullPredictionPeriods.length - 1] ?? Math.max(365, maxPredictionHorizon)
+    );
+
+    for (const [period, bounds] of expanded.entries()) {
+      const key = boundsKey(period, cutoff);
+      if (!table.has(key)) {
+        table.set(key, bounds);
+      }
+    }
+  }
+
+  return table;
+}
+
+function getErrorBoundsFromRecords(
+  records: BoundsTrainingRecord[],
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[]
+) {
+  const bounds = new Map<string, readonly [number, number]>();
+
+  for (const period of predictionPeriods) {
+    for (const cutoff of historyDays) {
+      if (cutoff >= period) {
+        continue;
+      }
+
+      const errors: number[] = [];
+      for (const record of records) {
+        if (record.badByCutoff.has(cutoff)) {
+          continue;
+        }
+        const actual = record.trueFor.get(period);
+        const predicted = record.predictedForByCutoff.get(boundsKey(period, cutoff));
+        if (actual == null || predicted == null || actual <= 0) {
+          continue;
+        }
+        errors.push(((actual - predicted) / actual) * 100);
+      }
+
+      if (errors.length === 0) {
+        continue;
+      }
+
+      const sorted = errors.sort((left, right) => left - right);
+      bounds.set(boundsKey(period, cutoff), [quantile(sorted, 0.5), quantile(sorted, 0.95)]);
+    }
+  }
+
+  return bounds;
+}
+
+function interpolateAcrossHistory(
+  knownCutoffs: number[],
+  lowerValues: number[],
+  upperValues: number[],
+  daysToExtend: number
+) {
+  const bounds = new Map<number, readonly [number, number]>();
+  const firstCutoff = knownCutoffs[0];
+  const lastCutoff = knownCutoffs[knownCutoffs.length - 1];
+  if (firstCutoff == null || lastCutoff == null) {
+    return bounds;
+  }
+
+  const interpolatedLower = new Array(lastCutoff + 1).fill(Number.NaN);
+  const interpolatedUpper = new Array(lastCutoff + 1).fill(Number.NaN);
+  knownCutoffs.forEach((cutoff, index) => {
+    interpolatedLower[cutoff] = lowerValues[index] ?? 0;
+    interpolatedUpper[cutoff] = upperValues[index] ?? 0;
+  });
+
+  const lowerSeries = interpolateSeries(interpolatedLower.slice(firstCutoff));
+  const upperSeries = interpolateSeries(interpolatedUpper.slice(firstCutoff));
+  let finalLower = lowerSeries;
+  let finalUpper = upperSeries;
+
+  if (daysToExtend > lastCutoff) {
+    const extendBy = daysToExtend - lastCutoff;
+    const baseWindow = Math.max(1, Math.trunc(lastCutoff / 3));
+    finalLower = extrapolateSeries(lowerSeries, baseWindow, extendBy);
+    finalUpper = extrapolateSeries(upperSeries, baseWindow, extendBy);
+  }
+
+  const historyDays = rangeInclusive(firstCutoff, daysToExtend);
+  historyDays.forEach((historyDay, index) => {
+    bounds.set(historyDay, [finalLower[index] ?? 0, finalUpper[index] ?? 0]);
+  });
+  return bounds;
+}
+
+function interpolateAcrossPredictionPeriods(
+  knownPeriods: number[],
+  lowerValues: number[],
+  upperValues: number[],
+  maxPredictionHorizon: number
+) {
+  const bounds = new Map<number, readonly [number, number]>();
+  const firstPeriod = knownPeriods[0];
+  const lastPeriod = knownPeriods[knownPeriods.length - 1];
+  if (firstPeriod == null || lastPeriod == null) {
+    return bounds;
+  }
+
+  const interpolatedLower = new Array(lastPeriod + 1).fill(Number.NaN);
+  const interpolatedUpper = new Array(lastPeriod + 1).fill(Number.NaN);
+  knownPeriods.forEach((period, index) => {
+    interpolatedLower[period] = lowerValues[index] ?? 0;
+    interpolatedUpper[period] = upperValues[index] ?? 0;
+  });
+
+  const lowerSeries = interpolateSeries(interpolatedLower.slice(firstPeriod));
+  const upperSeries = interpolateSeries(interpolatedUpper.slice(firstPeriod));
+  let finalLower = lowerSeries;
+  let finalUpper = upperSeries;
+
+  if (maxPredictionHorizon > lastPeriod) {
+    const extendBy = maxPredictionHorizon - lastPeriod;
+    const baseWindow = Math.max(1, Math.trunc(lastPeriod / 3));
+    finalLower = extrapolateSeries(lowerSeries, baseWindow, extendBy);
+    finalUpper = extrapolateSeries(upperSeries, baseWindow, extendBy);
+  }
+
+  const predictionPeriods = rangeInclusive(firstPeriod, maxPredictionHorizon);
+  predictionPeriods.forEach((period, index) => {
+    bounds.set(period, [finalLower[index] ?? 0, finalUpper[index] ?? 0]);
+  });
+  return bounds;
+}
+
+function boundsKey(period: number, cutoff: number) {
+  return `for_${period}_on_${cutoff}`;
+}
+
+function nearestHistoryDay(day: number) {
+  return clamp(Math.round(day), NOTEBOOK_HISTORY_MIN_DAY, BOUNDS_MAX_CUTOFF);
+}
+
+function buildNotebookData({
+  projectLabel,
+  filters,
+  selection,
+  horizonDays,
+  lines,
+  notes,
+  predictionResources,
+}: {
+  projectLabel: string;
+  filters: DashboardFilters;
+  selection: ForecastNotebookSelection;
+  horizonDays: readonly number[];
+  lines: GroupedLine[];
+  notes: string[];
+  predictionResources: Map<string, LinePredictionResources>;
+}): ForecastNotebookData {
+  if (lines.length === 0) {
+    return buildEmptyData(
+      notes[0] ?? "No live cohorts matched the selected forecast slice."
+    );
+  }
+
+  const totalTrainingPredictions = Array.from(predictionResources.values()).reduce(
+    (sum, resource) => sum + resource.trainingPredictionCount,
+    0
+  );
+  const horizonCharts = horizonDays.map((horizonDay) =>
+    buildHorizonChart(projectLabel, filters, selection, lines, horizonDay, predictionResources)
+  );
+  const paybackChart = buildPaybackChart(projectLabel, selection, lines, predictionResources);
+  const breakdownRows = lines.map((line) => buildBreakdownRow(line, predictionResources));
+  const summary = buildSummary(lines, predictionResources);
+  const cohortMatrix = buildCohortMatrix(lines, horizonDays, predictionResources);
+
+  const confidenceFromSamples =
+    totalTrainingPredictions >= BOUNDS_MIN_PREDICTIONS
+      ? `${totalTrainingPredictions} notebook-style historical cohort predictions`
+      : "Low historical sample count; notebook bounds are wider";
+
+  return {
+    summary: {
+      ...summary,
+      confidence: confidenceFromSamples,
+    },
+    horizonCharts,
+    paybackChart,
+    breakdownRows,
+    cohortMatrix,
+    notes: [
+      `Forecast surface for ${projectLabel} now reads live AppMetrica cohorts and real spend mirrors. Synthetic preview rows were removed.`,
+      `Notebook curve fit uses cumulative cohort revenue and empirical bounds from historical forecast error samples in the current product runtime.`,
+      `Selected revenue mode: ${selection.revenueMode}. Day step: ${filters.granularityDays}d. Visible horizons: ${horizonDays.map((day) => `D${day}`).join(", ")}.`,
+      ...notes,
+    ],
+  };
+}
+
+function buildHorizonChart(
+  projectLabel: string,
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection,
+  lines: GroupedLine[],
+  horizonDay: number,
+  predictionResources: Map<string, LinePredictionResources>
+): ComparisonConfidenceChartData {
+  return {
+    id: `forecast-horizon-${horizonDay}`,
+    title: `ROAS by cohort date · D${horizonDay}`,
+    subtitle: `${projectLabel} · ${selection.revenueMode} · notebook-style cohort-date ROAS using live cohort revenue and spend.`,
+    unit: "%",
+    yAxis: {
+      min: 0,
+      referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
+    },
+    groups: lines.map((line, index) => ({
+      label: line.label,
+      color: GROUP_COLORS[index % GROUP_COLORS.length],
+      actualColor: GROUP_COLORS[index % GROUP_COLORS.length],
+      series: line.cohorts.map((cohort) => {
+        const point = getPredictionPoint(cohort, horizonDay, predictionResources);
+        return {
+          label: formatLabelDate(cohort.cohortDate),
+          value: point.predicted,
+          lower: point.lower,
+          upper: point.upper,
+          actual: point.actual,
+        };
+      }),
+    })),
+  };
+}
+
+function buildPaybackChart(
+  projectLabel: string,
+  selection: ForecastNotebookSelection,
+  lines: GroupedLine[],
+  predictionResources: Map<string, LinePredictionResources>
+): ComparisonConfidenceChartData {
+  return {
+    id: "forecast-payback-curve",
+    title: `Payback curve by lifetime day · ${selection.revenueMode}`,
+    subtitle: `${projectLabel} · cumulative ROAS trajectory aggregated from the same live cohorts used for the date charts.`,
+    unit: "%",
+    yAxis: {
+      min: 0,
+      referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
+    },
+    groups: lines.map((line, index) => ({
+      label: line.label,
+      color: GROUP_COLORS[index % GROUP_COLORS.length],
+      actualColor: GROUP_COLORS[index % GROUP_COLORS.length],
+      series: PAYBACK_CURVE_POINTS.map((dayPoint) => {
+        const aggregate = aggregatePaybackPoint(line.cohorts, dayPoint, predictionResources);
+        return {
+          label: `D${dayPoint}`,
+          value: aggregate.predicted,
+          lower: aggregate.lower,
+          upper: aggregate.upper,
+          actual: aggregate.actual,
+        };
+      }),
+    })),
+  };
+}
+
+function buildBreakdownRow(
+  line: GroupedLine,
+  predictionResources: Map<string, LinePredictionResources>
+): AcquisitionBreakdownRow {
+  const spend = line.cohorts.reduce((sum, cohort) => sum + cohort.spend, 0);
+  const installs = line.cohorts.reduce((sum, cohort) => sum + cohort.installs, 0);
+  const d30 = aggregatePaybackPoint(line.cohorts, 30, predictionResources);
+  const d60 = aggregatePaybackPoint(line.cohorts, 60, predictionResources);
+  const d120 = aggregatePaybackPoint(line.cohorts, 120, predictionResources);
+  const resource = predictionResources.get(line.value);
+
+  return {
+    label: line.label,
+    dimension: "none",
+    platform: "Mixed",
+    spend: Number(spend.toFixed(0)),
+    installs: Number(installs.toFixed(0)),
+    cohorts: line.cohorts.filter((cohort) => cohort.cohortSize > 0).length,
+    cpi: installs > 0 ? Number((spend / installs).toFixed(2)) : 0,
+    revenuePerUser:
+      installs > 0
+        ? Number((((resolvePointValue(d120) ?? 0) / 100) * spend / installs).toFixed(2))
+        : 0,
+    d30Roas: Number((resolvePointValue(d30) ?? 0).toFixed(1)),
+    d60Roas: Number((resolvePointValue(d60) ?? 0).toFixed(1)),
+    d120Roas: Number((resolvePointValue(d120) ?? 0).toFixed(1)),
+    d7Retention: 0,
+    d30Retention: 0,
+    sessionMinutes: 0,
+    adShare: 0,
+    paybackDays: inferPaybackDayFromCurve(line.cohorts, predictionResources),
+    confidence:
+      (resource?.trainingPredictionCount ?? 0) >= BOUNDS_MIN_PREDICTIONS
+        ? "Empirical bounds"
+        : "Low sample",
+  };
+}
+
+function buildSummary(
+  lines: GroupedLine[],
+  predictionResources: Map<string, LinePredictionResources>
+) {
+  const allCohorts = lines.flatMap((line) => line.cohorts);
+  const spend = allCohorts.reduce((sum, cohort) => sum + cohort.spend, 0);
+  const installs = allCohorts.reduce((sum, cohort) => sum + cohort.installs, 0);
+  const d30 = aggregatePaybackPoint(allCohorts, 30, predictionResources);
+  const d60 = aggregatePaybackPoint(allCohorts, 60, predictionResources);
+  const d120 = aggregatePaybackPoint(allCohorts, 120, predictionResources);
+
+  return {
+    spend: Number(spend.toFixed(0)),
+    installs: Number(installs.toFixed(0)),
+    cpi: installs > 0 ? Number((spend / installs).toFixed(2)) : 0,
+    d30Roas: Number((resolvePointValue(d30) ?? 0).toFixed(1)),
+    d60Roas: Number((resolvePointValue(d60) ?? 0).toFixed(1)),
+    d120Roas: Number((resolvePointValue(d120) ?? 0).toFixed(1)),
+    paybackDays: inferPaybackDayFromCurve(allCohorts, predictionResources),
+    cohortCount: allCohorts.filter((cohort) => cohort.cohortSize > 0).length,
+    confidence: "",
+  };
+}
+
+function buildCohortMatrix(
+  lines: GroupedLine[],
+  horizons: readonly number[],
+  predictionResources: Map<string, LinePredictionResources>
+): CohortMatrixRow[] {
+  const selectedLine = lines[0];
+  if (!selectedLine) {
+    return [];
+  }
+
+  return selectedLine.cohorts.map((cohort) => ({
+    cohortDate: cohort.cohortDate,
+    spend: Number(cohort.spend.toFixed(0)),
+    installs: Number(cohort.installs.toFixed(0)),
+    cpi: cohort.installs > 0 ? Number((cohort.spend / cohort.installs).toFixed(2)) : 0,
+    cells: horizons.map((horizon) => {
+      const point = getPredictionPoint(cohort, horizon, predictionResources);
+      return {
+        label: `D${horizon}`,
+        value: point.predicted,
+        lower: point.lower,
+        upper: point.upper,
+        actual: point.actual,
+      };
+    }),
+  }));
+}
+
+function getPredictionPoint(
+  cohort: ProcessedCohort,
+  horizon: number,
+  predictionResources: Map<string, LinePredictionResources>
+): AggregatedPoint {
+  if (cohort.spend <= 0) {
+    const zeroBucket = cohort.cohortSize <= 0 || cohort.cohortNumDays <= 0;
+    return {
+      predicted: zeroBucket ? 0 : null,
+      lower: zeroBucket ? 0 : null,
+      upper: zeroBucket ? 0 : null,
+      actual: zeroBucket && cohort.cohortLifetime >= horizon ? 0 : null,
+    };
+  }
+
+  const prediction = predictCohort(cohort, horizon, predictionResources);
+  const realizedRevenue = prediction.actual ?? prediction.predictedRevenue;
+  if (realizedRevenue == null || prediction.lowerRevenue == null || prediction.upperRevenue == null) {
+    return {
+      predicted: null,
+      lower: null,
+      upper: null,
+      actual: null,
+    };
+  }
+  return {
+    predicted: Number(((realizedRevenue / cohort.spend) * 100).toFixed(2)),
+    lower: Number((prediction.lowerRevenue / cohort.spend * 100).toFixed(2)),
+    upper: Number((prediction.upperRevenue / cohort.spend * 100).toFixed(2)),
+    actual:
+      prediction.actual == null
+        ? null
+        : Number(((prediction.actual / cohort.spend) * 100).toFixed(2)),
+  };
+}
+
+function aggregatePaybackPoint(
+  cohorts: ProcessedCohort[],
+  horizon: number,
+  predictionResources: Map<string, LinePredictionResources>
+) {
+  const totalSpend = cohorts.reduce((sum, cohort) => sum + cohort.spend, 0);
+  if (totalSpend <= 0) {
+    return { predicted: 0, lower: 0, upper: 0, actual: null };
+  }
+
+  let predictedRevenue = 0;
+  let lowerRevenue = 0;
+  let upperRevenue = 0;
+  let predictedSpend = 0;
+  let actualRevenue = 0;
+  let actualSpend = 0;
+
+  for (const cohort of cohorts) {
+    const point = predictCohort(cohort, horizon, predictionResources);
+    if (point.actual != null) {
+      predictedRevenue += point.actual;
+      lowerRevenue += point.actual;
+      upperRevenue += point.actual;
+      predictedSpend += cohort.spend;
+      actualRevenue += point.actual;
+      actualSpend += cohort.spend;
+      continue;
+    }
+    if (point.predictedRevenue == null || point.lowerRevenue == null || point.upperRevenue == null) {
+      continue;
+    }
+    predictedRevenue += point.predictedRevenue;
+    lowerRevenue += point.lowerRevenue;
+    upperRevenue += point.upperRevenue;
+    predictedSpend += cohort.spend;
+  }
+
+  return {
+    predicted: predictedSpend > 0 ? Number(((predictedRevenue / predictedSpend) * 100).toFixed(2)) : null,
+    lower: predictedSpend > 0 ? Number(((lowerRevenue / predictedSpend) * 100).toFixed(2)) : null,
+    upper: predictedSpend > 0 ? Number(((upperRevenue / predictedSpend) * 100).toFixed(2)) : null,
+    actual: actualSpend > 0 ? Number(((actualRevenue / actualSpend) * 100).toFixed(2)) : null,
+  };
+}
+
+function predictCohort(
+  cohort: ProcessedCohort,
+  horizon: number,
+  predictionResources: Map<string, LinePredictionResources>
+) {
+  const resource = predictionResources.get(cohort.groupValue);
+  if (!resource) {
+    return {
+      predictedRevenue: null,
+      lowerRevenue: null,
+      upperRevenue: null,
+      actual: null,
+    };
+  }
+
+  const cached = resource.predictionsByCohortDate.get(cohort.cohortDate)?.points.get(horizon);
+  if (!cached) {
+    return {
+      predictedRevenue: null,
+      lowerRevenue: null,
+      upperRevenue: null,
+      actual: null,
+    };
+  }
+
+  return cached;
+}
+
+function calculateRevenueRatios(cohorts: RawCohortRecord[]) {
+  const ratios12: number[] = [];
+  const ratios13: number[] = [];
+
+  for (const cohort of cohorts) {
+    const day1 = cohort.dailyRevenue.get(0);
+    const day2 = cohort.dailyRevenue.get(1);
+    const day3 = cohort.dailyRevenue.get(2);
+    if (day1 != null && day2 != null) {
+      ratios12.push(day2 / day1);
+    }
+    if (day1 != null && day3 != null) {
+      ratios13.push(day3 / day1);
+    }
+  }
+
+  return {
+    d1d2: safeRatioAggregate(ratios12),
+    d1d3: safeRatioAggregate(ratios13),
+  };
+}
+
+function repairCohortRevenue(
+  cohort: RawCohortRecord,
+  corruptedDays: Set<string>,
+  todayIso: string,
+  ratios: { d1d2: number; d1d3: number }
+): RepairedRevenueSeries {
+  const lifetime = Math.max(0, dayDiff(cohort.cohortDate, todayIso));
+  const revenue = new Array(lifetime + 1).fill(0).map((_, day) => {
+    const date = addDays(cohort.cohortDate, day);
+    return corruptedDays.has(date) ? Number.NaN : cohort.dailyRevenue.get(day) ?? 0;
+  });
+
+  let repairedDailyCorrupted = 0;
+  if (revenue.every((value) => Number.isNaN(value))) {
+    repairedDailyCorrupted = 1;
+    return {
+      daily: revenue.map(() => 0),
+      isCorrupted: repairedDailyCorrupted,
+    };
+  }
+
+  if (revenue.length > 3) {
+    if (Number.isNaN(revenue[0]) && Number.isNaN(revenue[1]) && !Number.isNaN(revenue[2])) {
+      revenue[0] = revenue[2] / (ratios.d1d3 || 1);
+      revenue[1] = (revenue[2] / (ratios.d1d3 || 1)) * (ratios.d1d2 || 1);
+    } else if (Number.isNaN(revenue[0]) && !Number.isNaN(revenue[1])) {
+      revenue[0] = revenue[1] / (ratios.d1d2 || 1);
+    } else if (Number.isNaN(revenue[1]) && !Number.isNaN(revenue[0])) {
+      revenue[1] = revenue[0] * (ratios.d1d2 || 1);
+    }
+
+    interpolateInPlace(revenue);
+  } else if (revenue.some((value) => Number.isNaN(value))) {
+    repairedDailyCorrupted = 1;
+  }
+
+  return {
+    daily: revenue.map((value) => (Number.isNaN(value) ? 0 : value)),
+    isCorrupted: repairedDailyCorrupted,
+  };
+}
+
+function estimateCurvesWithNotebook(tasks: CurveEstimateTask[]) {
+  const output = new Map<string, number[] | null>();
+  if (tasks.length === 0) {
+    return output;
+  }
+
+  const scriptPath = join(process.cwd(), "scripts", "notebook_estimate_curve.py");
+  const localVenvPython = join(process.cwd(), ".venv", "bin", "python3");
+  const pythonBin =
+    process.env.ANALYTICS_NOTEBOOK_PYTHON_BIN ??
+    (existsSync(localVenvPython) ? localVenvPython : "python3");
+
+  try {
+    const result = spawnSync(pythonBin, [scriptPath], {
+      input: JSON.stringify({ tasks }),
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 64,
+    });
+
+    if (result.status !== 0) {
+      throw new Error(result.stderr?.trim() || result.stdout?.trim() || `python exited with ${result.status}`);
+    }
+
+    const parsed = JSON.parse(result.stdout || "{}") as {
+      curves?: Record<string, number[] | null>;
+    };
+    for (const task of tasks) {
+      output.set(task.id, parsed.curves?.[task.id] ?? null);
+    }
+    return output;
+  } catch (error) {
+    if (process.env.NODE_ENV === "production") {
+      throw error;
+    }
+
+    for (const task of tasks) {
+      output.set(task.id, estimateCurveFallback(task.totalRevenue, task.cutoff, task.horizon));
+    }
+    return output;
+  }
+}
+
+function estimateCurveFallback(totalRevenue: number[], cutoff: number, horizon: number) {
+  if (cutoff < NOTEBOOK_HISTORY_MIN_DAY || totalRevenue.length < cutoff) {
+    return null;
+  }
+
+  const observed = totalRevenue.slice(0, cutoff);
+  if (observed.length < NOTEBOOK_HISTORY_MIN_DAY) {
+    return null;
+  }
+  if ((observed[0] ?? 0) === 0) {
+    return new Array(horizon + 1).fill(0);
+  }
+
+  const x = observed.map((_, index) => index + 1);
+  const y = observed[0] > 0 ? observed.map((value) => value / observed[0]) : [...observed];
+  const weights = x.map((value, index) => {
+    const maxValue = Math.max(x[x.length - 1] ?? 15, 15);
+    const base = 0.58 + 1.42 * (((maxValue - x[x.length - 1 - index] + 1) / maxValue) ** 2);
+    return index === 0 ? 0 : base;
+  });
+
+  let bestA = 1;
+  let bestB = 0.2;
+  let bestC = -0.01;
+  let bestScore = Number.POSITIVE_INFINITY;
+  let bStart = 0;
+  let bEnd = 3;
+  let cStart = -3;
+  let cEnd = 0;
+
+  for (const refinementStep of [0.2, 0.05, 0.01]) {
+    for (let b = bStart; b <= bEnd + 1e-9; b += refinementStep) {
+      for (let c = cStart; c <= cEnd + 1e-9; c += refinementStep) {
+        const base = x.map((value) => value ** (b * value ** c));
+        const ratios = base.map((value, index) => (value === 0 ? 0 : y[index]! / value));
+        const a = weightedMedian(
+          ratios.filter((value) => Number.isFinite(value)),
+          ratios
+            .map((value, index) => (Number.isFinite(value) ? Math.max(base[index] * (weights[index] ?? 1), 1e-9) : 0))
+            .filter((weight) => weight > 0)
+        );
+
+        const score = base.reduce((sum, value, index) => {
+          const predicted = a * value;
+          return sum + Math.abs(predicted - (y[index] ?? 0)) * (weights[index] ?? 1);
+        }, 0);
+
+        if (score < bestScore) {
+          bestScore = score;
+          bestA = a;
+          bestB = b;
+          bestC = c;
+        }
+      }
+    }
+
+    bStart = clamp(bestB - refinementStep, 0, 3);
+    bEnd = clamp(bestB + refinementStep, 0, 3);
+    cStart = clamp(bestC - refinementStep, -3, 0);
+    cEnd = clamp(bestC + refinementStep, -3, 0);
+  }
+
+  const curve = Array.from({ length: horizon + 1 }, (_, index) => {
+    const value = index + 1;
+    const base = value ** (bestB * value ** bestC);
+    return bestA * base * (observed[0] ?? 0);
+  });
+  return curve;
+}
+
+function isExplodingCurve(curve: number[]) {
+  if (curve.length < 3) {
+    return false;
+  }
+  const middle = curve[Math.floor(curve.length / 2)] ?? 0;
+  const last = curve[curve.length - 1] ?? 0;
+  return middle > 0 && last / middle > 2;
+}
+
+function straightenPrediction(curve: number[]) {
+  let maxIndex = 0;
+  for (let index = 1; index < curve.length; index += 1) {
+    if ((curve[index] ?? 0) > (curve[maxIndex] ?? 0)) {
+      maxIndex = index;
+    }
+  }
+  for (let index = maxIndex; index < curve.length; index += 1) {
+    curve[index] = curve[maxIndex] ?? curve[index] ?? 0;
+  }
+}
+
+function buildSpendLookup(rows: MirrorSpendRow[]) {
+  const lookup = new Map<string, { spend: number; installs: number }>();
+  for (const row of rows) {
+    const spend = Number(row.spend ?? 0);
+    const installs = Number(row.installs ?? 0);
+    const keys = buildSpendKeys({
+      cohortDate: row.cohort_date ?? "",
+      source: row.source ?? "unknown",
+      country: row.country ?? "UNKNOWN",
+      store: row.store ?? "unknown",
+      company: row.company ?? "Unknown",
+      campaign: row.campaign_id ?? "unknown",
+      creative: row.creative_id ?? "unknown",
+    });
+    for (const key of keys) {
+      const current = lookup.get(key) ?? { spend: 0, installs: 0 };
+      current.spend += spend;
+      current.installs += installs;
+      lookup.set(key, current);
+    }
+  }
+  return lookup;
+}
+
+function lookupSpend(
+  lookup: Map<string, { spend: number; installs: number }>,
+  input: {
+    cohortDate: string;
+    source: string;
+    country: string;
+    store: string;
+    company: string;
+    campaign: string;
+    creative: string;
+  }
+) {
+  for (const key of buildSpendKeys(input)) {
+    const match = lookup.get(key);
+    if (match) {
+      return match;
+    }
+  }
+  return { spend: 0, installs: 0 };
+}
+
+function buildSpendKeys(input: {
+  cohortDate: string;
+  source: string;
+  country: string;
+  store: string;
+  company: string;
+  campaign: string;
+  creative: string;
+}) {
+  return [
+    `${input.cohortDate}|${input.source}|${input.country}|${input.store}|${input.company}|${input.campaign}|${input.creative}`,
+    `${input.cohortDate}|${input.source}|${input.country}|${input.store}|${input.company}|${input.campaign}|*`,
+    `${input.cohortDate}|${input.source}|${input.country}|${input.store}|${input.company}|*|*`,
+    `${input.cohortDate}|${input.source}|${input.country}|*|${input.company}|*|*`,
+    `${input.cohortDate}|${input.source}|*|*|${input.company}|*|*`,
+  ];
+}
+
+function ensureRawCohort(
+  map: Map<string, RawCohortRecord>,
+  input: {
+    cohortDate: string;
+    groupValue: string;
+    country: string;
+    source: string;
+    company: string;
+    campaign: string;
+    creative: string;
+    store: string;
+  }
+) {
+  const key = [
+    input.cohortDate,
+    input.groupValue,
+    input.country,
+    input.source,
+    input.company,
+    input.campaign,
+    input.creative,
+    input.store,
+  ].join("|");
+
+  const current = map.get(key);
+  if (current) {
+    return current;
+  }
+
+  const next: RawCohortRecord = {
+    cohortDate: input.cohortDate,
+    groupValue: input.groupValue,
+    country: input.country,
+    source: input.source,
+    company: input.company,
+    campaign: input.campaign,
+    creative: input.creative,
+    store: input.store,
+    cohortSize: 0,
+    spend: 0,
+    installs: 0,
+    dailyRevenue: new Map<number, number>(),
+  };
+  map.set(key, next);
+  return next;
+}
+
+function resolveGroupValue(
+  groupBy: DashboardGroupByKey,
+  row: {
+    platform: string;
+    country: string;
+    source: string;
+    company: string;
+    campaign: string;
+    creative: string;
+  }
+) {
+  switch (groupBy) {
+    case "platform":
+      return row.platform;
+    case "country":
+      return row.country;
+    case "source":
+      return row.source;
+    case "company":
+      return row.company;
+    case "campaign":
+      return row.campaign;
+    case "creative":
+      return row.creative;
+    default:
+      return "selected_scope";
+  }
+}
+
+function buildOptions<T extends keyof { [key: string]: string }>(
+  rows: Array<Record<T, string> & { count: number }>,
+  key: T,
+  allLabel: string,
+  formatter: (value: string) => string
+) {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    counts.set(row[key], (counts.get(row[key]) ?? 0) + row.count);
+  }
+
+  const options = Array.from(counts.entries())
+    .map(([value, count]) => ({
+      value,
+      label: formatter(value),
+      count,
+    }))
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+      return left.label.localeCompare(right.label);
+    });
+
+  return [
+    { value: "all", label: allLabel, count: options.reduce((sum, option) => sum + option.count, 0) },
+    ...options,
+  ] satisfies SliceOption[];
+}
+
+function buildEmptyCatalog(): ForecastNotebookCatalog {
+  return {
+    countries: [{ value: "all", label: "All countries", count: 0 }],
+    sources: [{ value: "all", label: "All traffic sources", count: 0 }],
+    companies: [{ value: "all", label: "All companies", count: 0 }],
+    campaigns: [{ value: "all", label: "All campaigns", count: 0 }],
+    creatives: [{ value: "all", label: "All creatives", count: 0 }],
+  };
+}
+
+function buildEmptyData(note: string): ForecastNotebookData {
+  return {
+    summary: {
+      spend: 0,
+      installs: 0,
+      cpi: 0,
+      d30Roas: 0,
+      d60Roas: 0,
+      d120Roas: 0,
+      paybackDays: 0,
+      cohortCount: 0,
+      confidence: "No live cohort data",
+    },
+    horizonCharts: [],
+    paybackChart: {
+      id: "forecast-payback-curve",
+      title: "Payback curve by lifetime day",
+      subtitle: note,
+      unit: "%",
+      groups: [],
+      yAxis: {
+        min: 0,
+        referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
+      },
+    },
+    breakdownRows: [],
+    cohortMatrix: [],
+    notes: [note],
+  };
+}
+
+function buildEmptyDiagnostics(
+  contextStatus: ForecastNotebookDiagnostics["contextStatus"],
+  errorMessage: string
+): ForecastNotebookDiagnostics {
+  return {
+    contextStatus,
+    errorMessage,
+    descriptorRowCount: 0,
+    selectedDescriptorRowCount: 0,
+    cohortSizeRowCount: 0,
+    revenueRowCount: 0,
+    spendRowCount: 0,
+    corruptedDayCount: 0,
+    rawCohortCount: 0,
+    processedCohortCount: 0,
+    visibleLineCount: 0,
+    visibleCohortCount: 0,
+    emptyReason: errorMessage,
+  };
+}
+
+function inferNotebookEmptyReason({
+  selectedDescriptorRowCount,
+  cohortSizeRowCount,
+  revenueRowCount,
+  rawCohortCount,
+  visibleCohortCount,
+  spendRowCount,
+}: {
+  selectedDescriptorRowCount: number;
+  cohortSizeRowCount: number;
+  revenueRowCount: number;
+  rawCohortCount: number;
+  visibleCohortCount: number;
+  spendRowCount: number;
+}) {
+  if (selectedDescriptorRowCount === 0) {
+    return "The selected slice has no AppMetrica installs in the current date window.";
+  }
+  if (cohortSizeRowCount === 0) {
+    return "No cohort rows were built for the selected slice. Installs exist, but cohort aggregation returned nothing.";
+  }
+  if (revenueRowCount === 0) {
+    return "Install cohorts exist, but no monetization events matched the current revenue mode and date window.";
+  }
+  if (rawCohortCount === 0 || visibleCohortCount === 0) {
+    return "Live rows were loaded, but nothing survived the cohort processing pipeline for the current slice.";
+  }
+  if (spendRowCount === 0) {
+    return "Revenue cohorts are present, but spend mirrors returned no rows for this window. ROAS stays at 0 where spend is absent.";
+  }
+  return null;
+}
+
+function detectCorruptedDays(rows: EventDayCountRow[], from: string) {
+  const countsByDay = new Map<string, number>();
+  for (const row of rows) {
+    if (row.event_date) {
+      countsByDay.set(row.event_date, Number(row.event_count ?? 0));
+    }
+  }
+
+  const start = new Date(`${from}T00:00:00Z`);
+  const end = new Date();
+  const counts: Array<{ date: string; count: number }> = [];
+
+  for (let cursor = new Date(start); cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+    const date = cursor.toISOString().slice(0, 10);
+    counts.push({ date, count: countsByDay.get(date) ?? 0 });
+  }
+
+  return counts
+    .filter((entry, index) => {
+      const window = counts.slice(Math.max(0, index - 2), Math.min(counts.length, index + 3));
+      const mean = window.reduce((sum, item) => sum + item.count, 0) / Math.max(1, window.length);
+      return entry.count === 0 || entry.count < mean * 0.3;
+    })
+    .map((entry) => entry.date);
+}
+
+function bucketDates(from: string, to: string, stepDays: number) {
+  const domain: string[] = [];
+  const start = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  for (let cursor = new Date(start); cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + stepDays)) {
+    domain.push(cursor.toISOString().slice(0, 10));
+  }
+  return domain;
+}
+
+function alignToBucket(date: string, from: string, stepDays: number) {
+  const delta = Math.max(0, dayDiff(from, date));
+  const bucketOffset = Math.floor(delta / stepDays) * stepDays;
+  return addDays(from, bucketOffset);
+}
+
+function dayDiff(from: string, to: string) {
+  const start = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  return Math.max(0, Math.round((end.getTime() - start.getTime()) / 86400000));
+}
+
+function addDays(date: string, days: number) {
+  const next = new Date(`${date}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next.toISOString().slice(0, 10);
+}
+
+function interpolateInPlace(values: number[]) {
+  let leftIndex = -1;
+  for (let index = 0; index < values.length; index += 1) {
+    if (!Number.isNaN(values[index]!)) {
+      leftIndex = index;
+      continue;
+    }
+
+    let rightIndex = index + 1;
+    while (rightIndex < values.length && Number.isNaN(values[rightIndex]!)) {
+      rightIndex += 1;
+    }
+
+    if (leftIndex === -1 && rightIndex >= values.length) {
+      values[index] = 0;
+    } else if (leftIndex === -1) {
+      values[index] = values[rightIndex] ?? 0;
+    } else if (rightIndex >= values.length) {
+      values[index] = values[leftIndex] ?? 0;
+    } else {
+      const span = rightIndex - leftIndex;
+      const leftValue = values[leftIndex] ?? 0;
+      const rightValue = values[rightIndex] ?? leftValue;
+      values[index] = leftValue + ((rightValue - leftValue) * (index - leftIndex)) / span;
+    }
+  }
+}
+
+function interpolateSeries(values: number[]) {
+  const interpolated = [...values];
+  interpolateInPlace(interpolated);
+  return interpolated.map((value) => (Number.isNaN(value) ? 0 : value));
+}
+
+function extrapolateSeries(values: number[], historyWindow: number, extendBy: number) {
+  if (values.length === 0 || extendBy <= 0) {
+    return [...values];
+  }
+
+  const safeWindow = Math.max(1, Math.min(historyWindow, values.length));
+  const fitValues = values.slice(-safeWindow);
+  const baseline = fitValues[0] === 0 ? 1 : fitValues[0];
+  const normalized = fitValues.map((value) => value / baseline);
+  const xValues = rangeInclusive(1, fitValues.length);
+
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+  for (let index = 0; index < xValues.length; index += 1) {
+    const x = xValues[index] ?? 0;
+    const y = normalized[index] ?? 0;
+    sumX += x;
+    sumY += y;
+    sumXY += x * y;
+    sumXX += x * x;
+  }
+
+  const n = xValues.length;
+  const denominator = (n * sumXX) - (sumX * sumX);
+  const slope = denominator === 0 ? 0 : ((n * sumXY) - (sumX * sumY)) / denominator;
+  const intercept = n === 0 ? 0 : (sumY - (slope * sumX)) / n;
+  const extended = [...values];
+
+  for (let index = 1; index <= extendBy; index += 1) {
+    const x = fitValues.length + index;
+    extended.push((baseline * ((slope * x) + intercept)) || 0);
+  }
+
+  return extended;
+}
+
+function rangeInclusive(start: number, end: number) {
+  if (end < start) {
+    return [] as number[];
+  }
+  return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+}
+
+function currentDataCutoffIso() {
+  return new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function cohortSizesToLook(target: number) {
+  const sizes = [target];
+  for (let delta = 1; delta < 1000; delta += 1) {
+    const lower = target - delta;
+    const upper = target + delta;
+    if (lower >= 1) {
+      sizes.push(lower);
+    }
+    if (upper <= 1000) {
+      sizes.push(upper);
+    }
+  }
+  return sizes;
+}
+
+function safeRatioAggregate(values: number[]) {
+  const filtered = values.filter((value) => Number.isFinite(value));
+  if (filtered.length >= 3) {
+    const mean = filtered.reduce((sum, value) => sum + value, 0) / filtered.length;
+    const std = Math.sqrt(filtered.reduce((sum, value) => sum + (value - mean) ** 2, 0) / filtered.length);
+    const bounded = filtered.filter((value) => Math.abs(value - mean) < 2 * std);
+    return median(bounded.length > 0 ? bounded : filtered);
+  }
+  if (filtered.length === 1) {
+    return filtered[0] ?? 1;
+  }
+  if (filtered.length === 0) {
+    return 1;
+  }
+  return filtered.reduce((sum, value) => sum + value, 0) / filtered.length;
+}
+
+function median(values: number[]) {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
+    : (sorted[middle] ?? 0);
+}
+
+function weightedMedian(values: number[], weights: number[]) {
+  if (values.length === 0 || weights.length === 0) {
+    return 1;
+  }
+  const pairs = values.map((value, index) => ({ value, weight: weights[index] ?? 0 })).sort((left, right) => left.value - right.value);
+  const totalWeight = pairs.reduce((sum, pair) => sum + pair.weight, 0);
+  let running = 0;
+  for (const pair of pairs) {
+    running += pair.weight;
+    if (running >= totalWeight / 2) {
+      return pair.value;
+    }
+  }
+  return pairs[pairs.length - 1]?.value ?? 1;
+}
+
+function quantile(sortedValues: number[], q: number) {
+  if (sortedValues.length === 0) {
+    return 0;
+  }
+  const position = (sortedValues.length - 1) * q;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) {
+    return sortedValues[lower] ?? 0;
+  }
+  const weight = position - lower;
+  return ((sortedValues[lower] ?? 0) * (1 - weight)) + ((sortedValues[upper] ?? 0) * weight);
+}
+
+function inferPaybackDayFromCurve(
+  cohorts: ProcessedCohort[],
+  predictionResources: Map<string, LinePredictionResources>
+) {
+  for (const day of PAYBACK_CURVE_POINTS) {
+    const point = aggregatePaybackPoint(cohorts, day, predictionResources);
+    const paybackValue = point.actual ?? point.predicted;
+    if (paybackValue != null && paybackValue >= 100) {
+      return day;
+    }
+  }
+  return PAYBACK_CURVE_POINTS[PAYBACK_CURVE_POINTS.length - 1] ?? 0;
+}
+
+function resolvePointValue(point: AggregatedPoint) {
+  return point.actual ?? point.predicted;
+}
+
+function formatCountryLabel(value: string) {
+  return value === "UNKNOWN" ? "Unknown country" : value;
+}
+
+function formatSourceLabel(value: string) {
+  if (value === "organic") {
+    return "Organic";
+  }
+  if (value === "google_ads") {
+    return "Google Ads";
+  }
+  return value
+    .split(/[\s_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatPlatformLabel(value: string) {
+  if (value === "ios") {
+    return "iOS";
+  }
+  if (value === "android") {
+    return "Android";
+  }
+  return value;
+}
+
+function formatGroupLabel(groupBy: DashboardGroupByKey, value: string) {
+  if (groupBy === "country") {
+    return formatCountryLabel(value);
+  }
+  if (groupBy === "source") {
+    return formatSourceLabel(value);
+  }
+  if (groupBy === "platform") {
+    return formatPlatformLabel(value);
+  }
+  if (groupBy === "none" && value === "selected_scope") {
+    return "Selected scope";
+  }
+  return value;
+}
+
+function formatLabelDate(value: string) {
+  const date = new Date(`${value}T00:00:00Z`);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
+function supportedGroupBy(requested: DashboardGroupByKey) {
+  const allowed = new Set<DashboardGroupByKey>(["none", "platform", "country", "source", "company", "campaign", "creative"]);
+  return allowed.has(requested) ? requested : "none";
+}
+
+function uniqueSortedNumbers(values: number[]) {
+  return Array.from(new Set(values.filter((value) => Number.isFinite(value) && value > 0))).sort((left, right) => left - right);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function firstExistingCandidate(columns: Set<string>, candidates: string[]) {
+  return candidates.find((candidate) => columns.has(candidate)) ?? null;
+}
+
+function sanitizeTableIdentifier(value: string) {
+  return value.replace(/[^a-zA-Z0-9_]/g, "");
+}
+
+function parseMirrorTableDate(tableName: string) {
+  const match = tableName.match(/(\d{8})$/);
+  return match ? match[1] : null;
+}
+
+function toIsoDateFromKey(dateKey: string | null) {
+  if (!dateKey || !/^\d{8}$/.test(dateKey)) {
+    return null;
+  }
+  return `${dateKey.slice(0, 4)}-${dateKey.slice(4, 6)}-${dateKey.slice(6, 8)}`;
+}
+
+function selectMirrorTables(tableNames: string[], from: string, to: string) {
+  const fromKey = from.replace(/-/g, "");
+  const toKey = to.replace(/-/g, "");
+  const datedTables = tableNames
+    .map((tableName) => ({
+      tableName,
+      dateKey: parseMirrorTableDate(tableName),
+    }))
+    .filter((entry): entry is { tableName: string; dateKey: string } => Boolean(entry.dateKey))
+    .filter((entry) => entry.dateKey >= fromKey && entry.dateKey <= toKey)
+    .sort((left, right) => left.dateKey.localeCompare(right.dateKey));
+
+  if (datedTables.length > 0) {
+    return datedTables.map((entry) => entry.tableName);
+  }
+
+  return [...tableNames].sort((left, right) => left.localeCompare(right)).slice(-32);
+}

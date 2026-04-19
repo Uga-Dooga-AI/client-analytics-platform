@@ -9,6 +9,11 @@ export function ComparisonConfidenceChart({
   chart: ComparisonConfidenceChartData;
 }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [hiddenGroupLabels, setHiddenGroupLabels] = useState<Set<string>>(new Set());
+  const visibleGroups = useMemo(
+    () => chart.groups.filter((group) => !hiddenGroupLabels.has(group.label)),
+    [chart.groups, hiddenGroupLabels]
+  );
 
   if (chart.groups.length === 0 || chart.groups[0]?.series.length === 0) {
     return (
@@ -28,6 +33,24 @@ export function ComparisonConfidenceChart({
     );
   }
 
+  if (visibleGroups.length === 0) {
+    return (
+      <section
+        style={{
+          background: "var(--color-panel-base)",
+          border: "1px solid var(--color-border-soft)",
+          borderRadius: 10,
+          padding: 18,
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-ink-950)" }}>{chart.title}</div>
+        <div style={{ marginTop: 8, fontSize: 12.5, color: "var(--color-ink-500)" }}>
+          All lines are hidden. Re-enable at least one legend item to render the chart.
+        </div>
+      </section>
+    );
+  }
+
   const width = 560;
   const height = 256;
   const paddingLeft = 50;
@@ -37,9 +60,20 @@ export function ComparisonConfidenceChart({
   const chartWidth = width - paddingLeft - paddingRight;
   const chartHeight = height - paddingTop - paddingBottom;
 
-  const allPoints = chart.groups.flatMap((group) => group.series);
-  const upperBound = Math.max(...allPoints.map((point) => point.upper));
-  const lowerBound = Math.min(...allPoints.map((point) => point.lower));
+  const allPoints = visibleGroups.flatMap((group) => group.series);
+  const referenceLines = chart.yAxis?.referenceLines ?? [];
+  const upperCandidates = [
+    ...allPoints.map((point) => point.upper).filter(isFiniteNumber),
+    ...referenceLines.map((line) => line.value),
+    ...(typeof chart.yAxis?.max === "number" ? [chart.yAxis.max] : []),
+  ];
+  const lowerCandidates = [
+    ...allPoints.map((point) => point.lower).filter(isFiniteNumber),
+    ...referenceLines.map((line) => line.value),
+    ...(typeof chart.yAxis?.min === "number" ? [chart.yAxis.min] : []),
+  ];
+  const upperBound = upperCandidates.length > 0 ? Math.max(...upperCandidates) : (chart.yAxis?.max ?? 1);
+  const lowerBound = lowerCandidates.length > 0 ? Math.min(...lowerCandidates) : (chart.yAxis?.min ?? 0);
   const span = upperBound - lowerBound || 1;
   const tickValues = Array.from({ length: 4 }, (_, index) => lowerBound + (span / 3) * index);
   const domainCount = chart.groups[0].series.length;
@@ -64,16 +98,28 @@ export function ComparisonConfidenceChart({
     return {
       label: chart.groups[0]?.series[hoveredIndex]?.label ?? "",
       x: getX(hoveredIndex, domainCount),
-      items: chart.groups.map((group) => ({
+      items: visibleGroups.map((group) => ({
         label: group.label,
         color: group.color,
-        value: group.series[hoveredIndex]?.value ?? 0,
-        lower: group.series[hoveredIndex]?.lower ?? 0,
-        upper: group.series[hoveredIndex]?.upper ?? 0,
+        value: group.series[hoveredIndex]?.value ?? null,
+        lower: group.series[hoveredIndex]?.lower ?? null,
+        upper: group.series[hoveredIndex]?.upper ?? null,
         actual: group.series[hoveredIndex]?.actual ?? null,
       })),
     };
-  }, [chart.groups, domainCount, hoveredIndex]);
+  }, [chart.groups, domainCount, hoveredIndex, visibleGroups]);
+
+  function toggleGroup(groupLabel: string) {
+    setHiddenGroupLabels((current) => {
+      const next = new Set(current);
+      if (next.has(groupLabel)) {
+        next.delete(groupLabel);
+      } else {
+        next.add(groupLabel);
+      }
+      return next;
+    });
+  }
 
   return (
     <section
@@ -94,7 +140,28 @@ export function ComparisonConfidenceChart({
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-start", justifyContent: "flex-end" }}>
           {chart.groups.map((group) => (
-            <div key={group.label} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--color-ink-600)" }}>
+            <button
+              key={group.label}
+              type="button"
+              onClick={() => toggleGroup(group.label)}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 11.5,
+                color: "var(--color-ink-600)",
+                borderRadius: 999,
+                border: hiddenGroupLabels.has(group.label)
+                  ? "1px solid var(--color-border-soft)"
+                  : `1px solid ${group.color}`,
+                background: hiddenGroupLabels.has(group.label)
+                  ? "var(--color-panel-soft)"
+                  : "var(--color-panel-base)",
+                padding: "5px 10px",
+                cursor: "pointer",
+                opacity: hiddenGroupLabels.has(group.label) ? 0.55 : 1,
+              }}
+            >
               <span
                 style={{
                   width: 12,
@@ -105,7 +172,7 @@ export function ComparisonConfidenceChart({
                 }}
               />
               {group.label}
-            </div>
+            </button>
           ))}
         </div>
       </div>
@@ -136,16 +203,17 @@ export function ComparisonConfidenceChart({
               {tooltip.items.map((item) => (
                 <div key={`${tooltip.label}-${item.label}`} style={{ display: "grid", gridTemplateColumns: "12px 1fr", gap: 8 }}>
                   <span style={{ width: 10, height: 10, borderRadius: 999, background: item.color, marginTop: 4 }} />
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 600 }}>{item.label}</div>
-                    <div style={{ marginTop: 3, fontSize: 11.5, opacity: 0.86, lineHeight: 1.45 }}>
-                      Predicted {formatChartValue(item.value, chart.unit)} · band {formatChartValue(item.lower, chart.unit)}–
-                      {formatChartValue(item.upper, chart.unit)}
-                      {item.actual !== null ? ` · actual ${formatChartValue(item.actual, chart.unit)}` : ""}
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600 }}>{item.label}</div>
+                      <div style={{ marginTop: 3, fontSize: 11.5, opacity: 0.86, lineHeight: 1.45 }}>
+                        {item.value === null
+                          ? "No forecast for this point"
+                          : `Predicted ${formatChartValue(item.value, chart.unit)} · band ${formatChartValue(item.lower, chart.unit)}–${formatChartValue(item.upper, chart.unit)}`}
+                        {item.actual !== null ? ` · actual ${formatChartValue(item.actual, chart.unit)}` : ""}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
         ) : null}
@@ -171,6 +239,32 @@ export function ComparisonConfidenceChart({
             </g>
           ))}
 
+          {referenceLines.map((line) => (
+            <g key={`${chart.id}-reference-${line.value}`}>
+              <line
+                x1={paddingLeft}
+                y1={getY(line.value)}
+                x2={width - paddingRight}
+                y2={getY(line.value)}
+                stroke={line.color ?? "rgba(15, 23, 42, 0.3)"}
+                strokeWidth="1.5"
+                strokeDasharray={line.dasharray ?? "5 5"}
+              />
+              {line.label ? (
+                <text
+                  x={paddingLeft - 10}
+                  y={getY(line.value) - 6}
+                  textAnchor="end"
+                  fill={line.color ?? "var(--color-ink-600)"}
+                  fontSize="10.5"
+                  fontWeight="600"
+                >
+                  {line.label}
+                </text>
+              ) : null}
+            </g>
+          ))}
+
           {tooltip ? (
             <line
               x1={tooltip.x}
@@ -182,43 +276,35 @@ export function ComparisonConfidenceChart({
             />
           ) : null}
 
-          {chart.groups.map((group) => {
-            const upperPath = group.series
-              .map((point, index) => `${index === 0 ? "M" : "L"} ${getX(index, group.series.length)} ${getY(point.upper)}`)
-              .join(" ");
-            const lowerPath = [...group.series]
-              .reverse()
-              .map((point, reverseIndex) => {
-                const originalIndex = group.series.length - 1 - reverseIndex;
-                return `L ${getX(originalIndex, group.series.length)} ${getY(point.lower)}`;
-              })
-              .join(" ");
-            const bandPath = `${upperPath} ${lowerPath} Z`;
-            const predictedPath = group.series
-              .map((point, index) => `${index === 0 ? "M" : "L"} ${getX(index, group.series.length)} ${getY(point.value)}`)
-              .join(" ");
-            const actualPoints = group.series.filter((point) => typeof point.actual === "number");
-            const actualPath = actualPoints
-              .map((point, index) => {
-                const originalIndex = group.series.findIndex((entry) => entry.label === point.label);
-                return `${index === 0 ? "M" : "L"} ${getX(originalIndex, group.series.length)} ${getY(point.actual ?? 0)}`;
-              })
-              .join(" ");
+          {visibleGroups.map((group) => {
+            const bandPaths = buildBandPaths(group.series, group.series.length, getX, getY);
+            const predictedPaths = buildLinePaths(group.series, group.series.length, getX, getY, (point) => point.value);
+            const actualPaths = buildLinePaths(group.series, group.series.length, getX, getY, (point) => point.actual ?? null);
 
             return (
               <g key={group.label}>
-                <path d={bandPath} fill={toAlpha(group.color, 0.1)} />
-                <path
-                  d={predictedPath}
-                  fill="none"
-                  stroke={group.color}
-                  strokeWidth="2.6"
-                  strokeLinejoin="round"
-                  strokeLinecap="round"
-                />
-                {actualPath ? (
+                {bandPaths.map((path, index) => (
                   <path
-                    d={actualPath}
+                    key={`${group.label}-band-${index}`}
+                    d={path}
+                    fill={toAlpha(group.color, 0.1)}
+                  />
+                ))}
+                {predictedPaths.map((path, index) => (
+                  <path
+                    key={`${group.label}-predicted-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={group.color}
+                    strokeWidth="2.6"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                ))}
+                {actualPaths.map((path, index) => (
+                  <path
+                    key={`${group.label}-actual-${index}`}
+                    d={path}
                     fill="none"
                     stroke={group.actualColor ?? group.color}
                     strokeDasharray="4 4"
@@ -226,16 +312,19 @@ export function ComparisonConfidenceChart({
                     strokeLinejoin="round"
                     strokeLinecap="round"
                   />
-                ) : null}
+                ))}
                 {group.series.map((point, index) => {
                   const active = hoveredIndex === index;
+                  const actualValue = point.actual;
                   return (
                     <g key={`${group.label}-${point.label}`}>
-                      <circle cx={getX(index, group.series.length)} cy={getY(point.value)} r={active ? "5" : "3.3"} fill={group.color} />
-                      {typeof point.actual === "number" ? (
+                      {isFiniteNumber(point.value) ? (
+                        <circle cx={getX(index, group.series.length)} cy={getY(point.value)} r={active ? "5" : "3.3"} fill={group.color} />
+                      ) : null}
+                      {isFiniteNumber(actualValue) ? (
                         <circle
                           cx={getX(index, group.series.length)}
-                          cy={getY(point.actual)}
+                          cy={getY(actualValue)}
                           r={active ? "4" : "2.6"}
                           fill={group.actualColor ?? group.color}
                         />
@@ -295,7 +384,10 @@ function formatAxisTick(value: number, unit: string) {
   return `${value.toFixed(0)}${unit}`;
 }
 
-function formatChartValue(value: number, unit: string) {
+function formatChartValue(value: number | null, unit: string) {
+  if (!isFiniteNumber(value)) {
+    return "—";
+  }
   if (unit === "$") {
     return `$${value.toFixed(2)}`;
   }
@@ -324,4 +416,88 @@ function toAlpha(color: string, alpha: number) {
   const green = Number.parseInt(normalized.slice(3, 5), 16);
   const blue = Number.parseInt(normalized.slice(5, 7), 16);
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function buildLinePaths<T>(
+  points: T[],
+  count: number,
+  getX: (index: number, count: number) => number,
+  getY: (value: number) => number,
+  pickValue: (point: T) => number | null
+) {
+  const paths: string[] = [];
+  let current: Array<{ index: number; value: number }> = [];
+
+  points.forEach((point, index) => {
+    const value = pickValue(point);
+    if (isFiniteNumber(value)) {
+      current.push({ index, value });
+      return;
+    }
+    if (current.length > 0) {
+      paths.push(
+        current
+          .map((entry, entryIndex) => `${entryIndex === 0 ? "M" : "L"} ${getX(entry.index, count)} ${getY(entry.value)}`)
+          .join(" ")
+      );
+      current = [];
+    }
+  });
+
+  if (current.length > 0) {
+    paths.push(
+      current
+        .map((entry, entryIndex) => `${entryIndex === 0 ? "M" : "L"} ${getX(entry.index, count)} ${getY(entry.value)}`)
+        .join(" ")
+    );
+  }
+
+  return paths;
+}
+
+function buildBandPaths<T extends { upper: number | null; lower: number | null }>(
+  points: T[],
+  count: number,
+  getX: (index: number, count: number) => number,
+  getY: (value: number) => number
+) {
+  const paths: string[] = [];
+  let current: Array<{ index: number; upper: number; lower: number }> = [];
+
+  points.forEach((point, index) => {
+    if (isFiniteNumber(point.upper) && isFiniteNumber(point.lower)) {
+      current.push({ index, upper: point.upper, lower: point.lower });
+      return;
+    }
+    if (current.length > 0) {
+      paths.push(buildBandPath(current, count, getX, getY));
+      current = [];
+    }
+  });
+
+  if (current.length > 0) {
+    paths.push(buildBandPath(current, count, getX, getY));
+  }
+
+  return paths;
+}
+
+function buildBandPath(
+  segment: Array<{ index: number; upper: number; lower: number }>,
+  count: number,
+  getX: (index: number, count: number) => number,
+  getY: (value: number) => number
+) {
+  const upperPath = segment
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${getX(point.index, count)} ${getY(point.upper)}`)
+    .join(" ");
+  const lowerPath = [...segment]
+    .reverse()
+    .map((point) => `L ${getX(point.index, count)} ${getY(point.lower)}`)
+    .join(" ");
+  return `${upperPath} ${lowerPath} Z`;
 }

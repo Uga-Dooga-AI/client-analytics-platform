@@ -5,7 +5,7 @@ import "server-only";
 import { createSign } from "crypto";
 import { getPostgresPool } from "@/lib/db/postgres";
 import { decryptSecret } from "@/lib/platform/secrets";
-import type { AnalyticsProjectBundle } from "@/lib/platform/store";
+import type { AnalyticsProjectBundle, AnalyticsSourceRecord } from "@/lib/platform/store";
 
 type BigQuerySourceConfig = {
   sourceProjectId: string;
@@ -53,13 +53,23 @@ export type LiveOverviewProjectMetric = {
   projectId: string;
   projectName: string;
   projectSlug: string;
-  installs7d: number;
-  activeDevices7d: number;
-  revenue7d: number;
+  installs: number;
+  activeDevices: number;
+  revenue: number;
+  spend: number;
   lastInstallDate: string | null;
   lastSessionDate: string | null;
   lastRevenueDate: string | null;
+  lastSpendDate: string | null;
 };
+
+type MirrorSchemaRow = {
+  table_name: string | null;
+  column_name: string | null;
+};
+
+const MIRROR_DATE_COLUMN_CANDIDATES = ["date", "run_date", "segments_date", "day"];
+const MIRROR_SPEND_COLUMN_CANDIDATES = ["spend", "cost", "cost_micros", "amount_micros"];
 
 export type LiveTrackerRow = {
   projectId: string;
@@ -102,6 +112,21 @@ function projectTablePrefix(slug: string) {
 
 function quoteSqlString(value: string) {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function isIsoDate(value: string | null | undefined): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function normalizeWindow(window?: { from?: string | null; to?: string | null }) {
+  const fallbackTo = new Date().toISOString().slice(0, 10);
+  const fallbackFrom = fallbackTo;
+  const rawFrom = isIsoDate(window?.from) ? window!.from : fallbackFrom;
+  const rawTo = isIsoDate(window?.to) ? window!.to : fallbackTo;
+
+  return rawFrom <= rawTo
+    ? { from: rawFrom, to: rawTo }
+    : { from: rawTo, to: rawFrom };
 }
 
 function inferWarehouseLocation(region: string | null | undefined) {
@@ -360,118 +385,273 @@ export async function loadBigQueryContexts(
   return contexts;
 }
 
-export async function getLiveOverviewMetrics(bundles: AnalyticsProjectBundle[]) {
+export async function getLiveOverviewMetrics(
+  bundles: AnalyticsProjectBundle[],
+  window?: { from?: string | null; to?: string | null }
+) {
   const contexts = await loadBigQueryContexts(bundles);
+  const normalizedWindow = normalizeWindow(window);
   const settled = await Promise.allSettled(
     Array.from(contexts.values()).map(async (context) => {
+      const spendPromise = loadLiveOverviewSpendMetric(
+        context,
+        normalizedWindow.from,
+        normalizedWindow.to
+      );
       const rows = await executeBigQuery<{
-        installs_7d: number | null;
-        active_devices_7d: number | null;
-        revenue_7d: number | null;
+        installs: number | null;
+        active_devices: number | null;
+        revenue: number | null;
         last_install_date: string | null;
         last_session_date: string | null;
         last_revenue_date: string | null;
       }>(
         context,
         `
-          WITH install_anchor AS (
+          WITH install_window AS (
             SELECT
-              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_install_partition,
-              COALESCE(MAX(DATE(SAFE_CAST(install_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_install_date
+              COUNT(DISTINCT CAST(appmetrica_device_id AS STRING)) AS installs
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
+            WHERE _PARTITIONDATE
+              BETWEEN @window_from
+                  AND @window_to
+              AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
+              BETWEEN @window_from
+                  AND @window_to
           ),
-          install_stats AS (
+          install_latest AS (
             SELECT
-              COUNT(DISTINCT CAST(appmetrica_device_id AS STRING)) AS installs_7d,
               CAST(MAX(DATE(SAFE_CAST(install_datetime AS TIMESTAMP))) AS STRING) AS last_install_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
-            CROSS JOIN install_anchor
-            WHERE _PARTITIONDATE
-              BETWEEN DATE_SUB(install_anchor.max_install_partition, INTERVAL 6 DAY)
-                  AND install_anchor.max_install_partition
-              AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP))
-              BETWEEN DATE_SUB(install_anchor.max_install_date, INTERVAL 6 DAY)
-                  AND install_anchor.max_install_date
           ),
-          session_anchor AS (
+          session_window AS (
             SELECT
-              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_session_partition,
-              COALESCE(MAX(DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_session_date
+              COUNT(DISTINCT CAST(appmetrica_device_id AS STRING)) AS active_devices
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawSessionsTable}\`
+            WHERE _PARTITIONDATE
+              BETWEEN @window_from
+                  AND @window_to
+              AND DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))
+              BETWEEN @window_from
+                  AND @window_to
           ),
-          session_stats AS (
+          session_latest AS (
             SELECT
-              COUNT(DISTINCT CAST(appmetrica_device_id AS STRING)) AS active_devices_7d,
               CAST(MAX(DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))) AS STRING) AS last_session_date
             FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawSessionsTable}\`
-            CROSS JOIN session_anchor
-            WHERE _PARTITIONDATE
-              BETWEEN DATE_SUB(session_anchor.max_session_partition, INTERVAL 6 DAY)
-                  AND session_anchor.max_session_partition
-              AND DATE(SAFE_CAST(session_start_datetime AS TIMESTAMP))
-              BETWEEN DATE_SUB(session_anchor.max_session_date, INTERVAL 6 DAY)
-                  AND session_anchor.max_session_date
           ),
-          revenue_anchor AS (
+          revenue_window AS (
             SELECT
-              COALESCE(MAX(_PARTITIONDATE), CURRENT_DATE()) AS max_revenue_partition,
-              COALESCE(MAX(DATE(SAFE_CAST(event_datetime AS TIMESTAMP))), CURRENT_DATE()) AS max_revenue_date
-            FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
-            WHERE event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
-          ),
-          revenue_stats AS (
-            SELECT
-              ROUND(SUM(revenue_value), 2) AS revenue_7d,
-              CAST(MAX(event_date) AS STRING) AS last_revenue_date
+              ROUND(SUM(revenue_value), 2) AS revenue
             FROM (
               SELECT
-                DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) AS event_date,
                 COALESCE(
                   SAFE_CAST(JSON_VALUE(event_json, '$.price') AS FLOAT64),
                   SAFE_CAST(JSON_VALUE(event_json, '$.revenue') AS FLOAT64),
                   SAFE_CAST(JSON_VALUE(event_json, '$.value') AS FLOAT64),
                   0
                 ) AS revenue_value
-              FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`,
-                   revenue_anchor
+              FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
               WHERE _PARTITIONDATE
-                BETWEEN DATE_SUB(revenue_anchor.max_revenue_partition, INTERVAL 6 DAY)
-                    AND revenue_anchor.max_revenue_partition
+                BETWEEN @window_from
+                    AND @window_to
                 AND DATE(SAFE_CAST(event_datetime AS TIMESTAMP))
-                BETWEEN DATE_SUB(revenue_anchor.max_revenue_date, INTERVAL 6 DAY)
-                    AND revenue_anchor.max_revenue_date
+                BETWEEN @window_from
+                    AND @window_to
                 AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
             )
+          ),
+          revenue_latest AS (
+            SELECT
+              CAST(MAX(DATE(SAFE_CAST(event_datetime AS TIMESTAMP))) AS STRING) AS last_revenue_date
+            FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawEventsTable}\`
+            WHERE event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
           )
           SELECT
-            install_stats.installs_7d,
-            session_stats.active_devices_7d,
-            revenue_stats.revenue_7d,
-            install_stats.last_install_date,
-            session_stats.last_session_date,
-            revenue_stats.last_revenue_date
-          FROM install_stats
-          CROSS JOIN session_stats
-          CROSS JOIN revenue_stats
-        `
+            install_window.installs,
+            session_window.active_devices,
+            revenue_window.revenue,
+            install_latest.last_install_date,
+            session_latest.last_session_date,
+            revenue_latest.last_revenue_date
+          FROM install_window
+          CROSS JOIN session_window
+          CROSS JOIN revenue_window
+          CROSS JOIN install_latest
+          CROSS JOIN session_latest
+          CROSS JOIN revenue_latest
+        `,
+        [
+          { name: "window_from", type: "DATE", value: normalizedWindow.from },
+          { name: "window_to", type: "DATE", value: normalizedWindow.to },
+        ]
       );
+      const spendMetric = await spendPromise;
 
       const row = rows[0];
       return {
         projectId: context.bundle.project.id,
         projectName: context.bundle.project.displayName,
         projectSlug: context.bundle.project.slug,
-        installs7d: Number(row?.installs_7d ?? 0),
-        activeDevices7d: Number(row?.active_devices_7d ?? 0),
-        revenue7d: Number(row?.revenue_7d ?? 0),
+        installs: Number(row?.installs ?? 0),
+        activeDevices: Number(row?.active_devices ?? 0),
+        revenue: Number(row?.revenue ?? 0),
+        spend: spendMetric.spend,
         lastInstallDate: row?.last_install_date ?? null,
         lastSessionDate: row?.last_session_date ?? null,
         lastRevenueDate: row?.last_revenue_date ?? null,
+        lastSpendDate: spendMetric.lastSpendDate,
       } satisfies LiveOverviewProjectMetric;
     })
   );
 
   return settled.flatMap((entry) => (entry.status === "fulfilled" ? [entry.value] : []));
+}
+
+async function loadLiveOverviewSpendMetric(
+  context: ProjectQueryContext,
+  from: string,
+  to: string
+) {
+  const mirrorSources = context.bundle.sources.filter(
+    (source) =>
+      (source.sourceType === "unity_ads_spend" || source.sourceType === "google_ads_spend") &&
+      source.config.enabled === true &&
+      source.config.mode === "bigquery"
+  );
+
+  if (mirrorSources.length === 0) {
+    return { spend: 0, lastSpendDate: null };
+  }
+
+  const settled = await Promise.allSettled(
+    mirrorSources.map((source) => queryOverviewSpendSource(context, source, from, to))
+  );
+
+  let spend = 0;
+  const lastSpendDates: string[] = [];
+
+  for (const entry of settled) {
+    if (entry.status !== "fulfilled") {
+      continue;
+    }
+    spend += entry.value.spend;
+    if (entry.value.lastSpendDate) {
+      lastSpendDates.push(entry.value.lastSpendDate);
+    }
+  }
+
+  return {
+    spend: Number(spend.toFixed(2)),
+    lastSpendDate: lastSpendDates.sort().at(-1) ?? null,
+  };
+}
+
+async function queryOverviewSpendSource(
+  context: ProjectQueryContext,
+  source: AnalyticsSourceRecord,
+  from: string,
+  to: string
+) {
+  const sourceProjectId =
+    typeof source.config.sourceProjectId === "string" ? source.config.sourceProjectId : "";
+  const sourceDataset =
+    typeof source.config.sourceDataset === "string" ? source.config.sourceDataset : "";
+  const tablePattern =
+    typeof source.config.tablePattern === "string" ? source.config.tablePattern : "";
+
+  if (!sourceProjectId || !sourceDataset || !tablePattern) {
+    return { spend: 0, lastSpendDate: null };
+  }
+
+  const rows = await executeBigQuery<MirrorSchemaRow>(
+    context,
+    `
+      SELECT
+        table_name,
+        LOWER(column_name) AS column_name
+      FROM \`${sourceProjectId}.${sourceDataset}.INFORMATION_SCHEMA.COLUMNS\`
+      WHERE table_name LIKE @table_pattern
+    `,
+    [{ name: "table_pattern", type: "STRING", value: tablePattern.replace(/\*/g, "%") }]
+  );
+
+  const columnsByTable = rows.reduce<Map<string, Set<string>>>((acc, row) => {
+    const tableName = row.table_name?.trim();
+    const columnName = row.column_name?.trim().toLowerCase();
+    if (!tableName || !columnName) {
+      return acc;
+    }
+    const current = acc.get(tableName) ?? new Set<string>();
+    current.add(columnName);
+    acc.set(tableName, current);
+    return acc;
+  }, new Map());
+
+  const tableNames = selectMirrorTables(Array.from(columnsByTable.keys()), from, to);
+  if (tableNames.length === 0) {
+    return { spend: 0, lastSpendDate: null };
+  }
+
+  const selects = tableNames.flatMap((tableName) => {
+    const columns = columnsByTable.get(tableName) ?? new Set<string>();
+    const spendColumn = firstExistingCandidate(columns, MIRROR_SPEND_COLUMN_CANDIDATES);
+    if (!spendColumn) {
+      return [];
+    }
+
+    const dateColumn = firstExistingCandidate(columns, MIRROR_DATE_COLUMN_CANDIDATES);
+    const parsedTableDate = toIsoDateFromKey(parseMirrorTableDate(tableName));
+    const tableRef = `\`${sourceProjectId}.${sourceDataset}.${sanitizeTableIdentifier(tableName)}\``;
+    const spendDateExpr = dateColumn
+      ? `CAST(SAFE_CAST(${dateColumn} AS DATE) AS STRING)`
+      : parsedTableDate
+        ? `'${parsedTableDate}'`
+        : "CAST(NULL AS STRING)";
+    const spendExpr =
+      spendColumn.includes("micros")
+        ? `SAFE_CAST(${spendColumn} AS FLOAT64) / 1000000`
+        : `SAFE_CAST(${spendColumn} AS FLOAT64)`;
+
+    return [
+      `
+        SELECT
+          ${spendDateExpr} AS spend_date,
+          SUM(COALESCE(${spendExpr}, 0)) AS spend
+        FROM ${tableRef}
+        WHERE (${spendDateExpr}) BETWEEN CAST(@window_from AS STRING) AND CAST(@window_to AS STRING)
+        GROUP BY 1
+      `,
+    ];
+  });
+
+  if (selects.length === 0) {
+    return { spend: 0, lastSpendDate: null };
+  }
+
+  const result = await executeBigQuery<{ spend: number | null; last_spend_date: string | null }>(
+    context,
+    `
+      WITH raw_spend AS (
+        ${selects.join("\nUNION ALL\n")}
+      )
+      SELECT
+        ROUND(SUM(spend), 2) AS spend,
+        CAST(MAX(spend_date) AS STRING) AS last_spend_date
+      FROM raw_spend
+      WHERE spend_date IS NOT NULL
+    `,
+    [
+      { name: "window_from", type: "DATE", value: from },
+      { name: "window_to", type: "DATE", value: to },
+    ]
+  );
+
+  const row = result[0];
+  return {
+    spend: Number(row?.spend ?? 0),
+    lastSpendDate: row?.last_spend_date ?? null,
+  };
 }
 
 export async function getLiveTrackerRows(bundles: AnalyticsProjectBundle[]) {
@@ -709,4 +889,43 @@ export async function getLiveFunnelRows(bundles: AnalyticsProjectBundle[]) {
   );
 
   return settled.flatMap((entry) => (entry.status === "fulfilled" ? entry.value : []));
+}
+
+function firstExistingCandidate(columns: Set<string>, candidates: string[]) {
+  return candidates.find((candidate) => columns.has(candidate)) ?? null;
+}
+
+function sanitizeTableIdentifier(value: string) {
+  return value.replace(/[^a-zA-Z0-9_]/g, "");
+}
+
+function parseMirrorTableDate(tableName: string) {
+  const match = tableName.match(/(\d{8})$/);
+  return match ? match[1] : null;
+}
+
+function toIsoDateFromKey(dateKey: string | null) {
+  if (!dateKey || !/^\d{8}$/.test(dateKey)) {
+    return null;
+  }
+  return `${dateKey.slice(0, 4)}-${dateKey.slice(4, 6)}-${dateKey.slice(6, 8)}`;
+}
+
+function selectMirrorTables(tableNames: string[], from: string, to: string) {
+  const fromKey = from.replace(/-/g, "");
+  const toKey = to.replace(/-/g, "");
+  const datedTables = tableNames
+    .map((tableName) => ({
+      tableName,
+      dateKey: parseMirrorTableDate(tableName),
+    }))
+    .filter((entry): entry is { tableName: string; dateKey: string } => Boolean(entry.dateKey))
+    .filter((entry) => entry.dateKey >= fromKey && entry.dateKey <= toKey)
+    .sort((left, right) => left.dateKey.localeCompare(right.dateKey));
+
+  if (datedTables.length > 0) {
+    return datedTables.map((entry) => entry.tableName);
+  }
+
+  return [...tableNames].sort((left, right) => left.localeCompare(right)).slice(-32);
 }
