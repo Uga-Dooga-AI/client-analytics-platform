@@ -17,7 +17,7 @@ import codecs
 import logging
 import os
 import time
-from typing import Iterator
+from collections.abc import Callable, Iterator
 
 import ijson
 import requests
@@ -65,8 +65,13 @@ _MAX_ATTEMPTS = 30
 
 
 class AppMetricaClient:
-    def __init__(self, token: str | None = None) -> None:
+    def __init__(
+        self,
+        token: str | None = None,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self.token = token or os.environ.get("APPMETRICA_TOKEN")
+        self.progress_callback = progress_callback
         if not self.token:
             logger.warning("APPMETRICA_TOKEN not set — running in stub mode")
 
@@ -107,6 +112,9 @@ class AppMetricaClient:
             "fields": ",".join(_EVENT_FIELDS),
         }
         logger.info("fetch_events: app_id=%s %s → %s", app_id, date_from, date_to)
+        self._notify_progress(
+            f"AppMetrica export requested: resource=events app_id={app_id} range={date_from}..{date_to}"
+        )
         rows = self._export_with_poll(endpoint="events.json", params=params)
         allowed_names = {name for name in (event_names or []) if name}
         for row in rows:
@@ -144,6 +152,9 @@ class AppMetricaClient:
         }
 
         logger.info("fetch_installs: app_id=%s %s → %s", app_id, date_from, date_to)
+        self._notify_progress(
+            f"AppMetrica export requested: resource=installations app_id={app_id} range={date_from}..{date_to}"
+        )
         rows = self._export_with_poll(endpoint="installations.json", params=params)
         for row in rows:
             yield self._normalize_row(row)
@@ -176,6 +187,9 @@ class AppMetricaClient:
         }
 
         logger.info("fetch_sessions: app_id=%s %s → %s", app_id, date_from, date_to)
+        self._notify_progress(
+            f"AppMetrica export requested: resource=sessions app_id={app_id} range={date_from}..{date_to}"
+        )
         rows = self._export_with_poll(endpoint="sessions_starts.json", params=params)
         for row in rows:
             normalized = self._normalize_row(row)
@@ -212,6 +226,9 @@ class AppMetricaClient:
                         "export not ready (202), attempt %d/%d — waiting %ds",
                         attempt, _MAX_ATTEMPTS, wait,
                     )
+                    self._notify_progress(
+                        f"AppMetrica export is still preparing: endpoint={endpoint} attempt={attempt}/{_MAX_ATTEMPTS} next_wait={wait}s"
+                    )
                     time.sleep(wait)
                     wait = min(wait * 2, _MAX_WAIT_S)
                     continue
@@ -219,6 +236,9 @@ class AppMetricaClient:
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get("Retry-After", wait))
                     logger.warning("rate limited (429), waiting %ds", retry_after)
+                    self._notify_progress(
+                        f"AppMetrica export hit rate limit: endpoint={endpoint} retry_after={retry_after}s"
+                    )
                     time.sleep(retry_after)
                     continue
 
@@ -229,11 +249,22 @@ class AppMetricaClient:
                     resp.status_code,
                     body_preview,
                 )
+                self._notify_progress(
+                    f"AppMetrica export failed: endpoint={endpoint} status={resp.status_code}"
+                )
                 resp.raise_for_status()
 
         raise RuntimeError(
             f"AppMetrica export did not complete after {_MAX_ATTEMPTS} attempts: {endpoint}"
         )
+
+    def _notify_progress(self, message: str) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(message)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("progress callback failed: %s", exc)
 
     @staticmethod
     def _iter_export_rows(response: requests.Response, endpoint: str) -> Iterator[dict]:

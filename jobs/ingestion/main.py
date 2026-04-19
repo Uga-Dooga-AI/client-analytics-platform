@@ -288,6 +288,36 @@ def main() -> None:
             gcs_prefix,
         )
 
+        total_slices = len(app_ids) * len(ingest_dates) * 3
+        progress_state: dict[str, object] = {
+            "completedSlices": 0,
+            "currentSlice": None,
+            "lastMessage": None,
+        }
+
+        def emit_run_progress(message: str) -> None:
+            if progress_state["lastMessage"] == message:
+                return
+            progress_state["lastMessage"] = message
+            payload: dict[str, object] = {
+                "processedDates": ingest_dates,
+                "appIds": app_ids,
+                "progress": {
+                    "completedSlices": int(progress_state["completedSlices"]),
+                    "totalSlices": total_slices,
+                },
+            }
+            if progress_state["currentSlice"] is not None:
+                payload["currentSlice"] = progress_state["currentSlice"]
+            patch_run_status(
+                runtime_context,
+                status="running",
+                message=message,
+                payload=payload,
+                source_type="appmetrica_logs",
+                source_status="syncing",
+            )
+
         if not app_ids:
             message = "No valid AppMetrica app ids are configured; ingestion exited without work."
             logger.info(message)
@@ -303,13 +333,14 @@ def main() -> None:
         from src.gcs_uploader import GCSUploader
         from src.bq_loader import BQLoader
 
-        client = AppMetricaClient()
+        client = AppMetricaClient(progress_callback=emit_run_progress)
         uploader = GCSUploader()
         loader = BQLoader()
         ensure_runtime_infrastructure(config, uploader, loader)
         force_reload = should_force_reload(runtime_context)
 
         failed: list[str] = []
+        slice_index = 0
 
         for ingest_date in ingest_dates:
             for app_id in app_ids:
@@ -318,6 +349,17 @@ def main() -> None:
                     ("installations", installs_table),
                     ("sessions", sessions_table),
                 ]:
+                    slice_index += 1
+                    progress_state["currentSlice"] = {
+                        "index": slice_index,
+                        "total": total_slices,
+                        "appId": app_id,
+                        "resource": resource,
+                        "date": ingest_date,
+                    }
+                    emit_run_progress(
+                        f"Ingestion is processing slice {slice_index}/{total_slices}: app_id={app_id} resource={resource} date={ingest_date}."
+                    )
                     try:
                         ingest_resource(
                             client=client,
@@ -332,6 +374,7 @@ def main() -> None:
                             run_id_prefix=run_id_prefix,
                             force_reload=force_reload,
                         )
+                        progress_state["completedSlices"] = int(progress_state["completedSlices"]) + 1
                     except Exception:
                         failed.append(f"{app_id}/{resource}/{ingest_date}")
 
@@ -341,7 +384,14 @@ def main() -> None:
                 runtime_context,
                 status="failed",
                 message=f"Ingestion failed for {len(failed)} app/resource slices.",
-                payload={"processedDates": ingest_dates, "failedSlices": failed},
+                payload={
+                    "processedDates": ingest_dates,
+                    "failedSlices": failed,
+                    "progress": {
+                        "completedSlices": int(progress_state["completedSlices"]),
+                        "totalSlices": total_slices,
+                    },
+                },
                 source_type="appmetrica_logs",
                 source_status="error",
             )
@@ -352,7 +402,15 @@ def main() -> None:
             runtime_context,
             status="succeeded",
             message=f"Ingestion completed for {len(ingest_dates)} date window(s).",
-            payload={"processedDates": ingest_dates, "appIds": app_ids, "gcsPrefix": gcs_prefix},
+            payload={
+                "processedDates": ingest_dates,
+                "appIds": app_ids,
+                "gcsPrefix": gcs_prefix,
+                "progress": {
+                    "completedSlices": int(progress_state["completedSlices"]),
+                    "totalSlices": total_slices,
+                },
+            },
             source_type="appmetrica_logs",
             source_status="ready",
         )

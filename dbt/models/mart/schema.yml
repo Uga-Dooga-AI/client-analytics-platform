@@ -282,7 +282,8 @@ models:
 
   - name: mart_revenue_metrics
     description: >
-      Метрики выручки из AppMetrica revenue events (purchase, in_app_purchase, subscription_start).
+      Метрики total revenue из AppMetrica revenue events
+      (c_ad_revenue, purchase, in_app_purchase, subscription_start).
       Активируется только при наличии revenue событий в AppMetrica stream.
       Grain: date × os_name × country_code × app_id × product_id × currency.
       Партиционировано по date.

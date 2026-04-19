@@ -8,6 +8,7 @@ Supports two modes:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
 import os
@@ -28,6 +29,14 @@ ALLOWED_METRICS = {
     "guardrail_crashes": "SUM(COALESCE(guardrail_crashes, 0))",
     "guardrail_errors": "SUM(COALESCE(guardrail_errors, 0))",
 }
+
+
+@dataclass(frozen=True)
+class MetricSourceSpec:
+    metric: str
+    table_name: str
+    date_column: str
+    value_sql: str
 
 
 class MartReader:
@@ -61,6 +70,8 @@ class MartReader:
             or "mart_installs_funnel"
         )
         self.input_path = input_path or os.environ.get("FORECAST_INPUT_PATH")
+        self.last_source_diagnostics: list[dict[str, object]] = []
+        self._table_exists_cache: dict[str, bool] = {}
 
         if not self.project_id:
             logger.warning("GCP_PROJECT_ID not set — BigQuery reader will stay in fallback mode")
@@ -139,9 +150,14 @@ class MartReader:
         if self._client is None:
             return self._read_from_local_input(metric_names)
 
+        self.last_source_diagnostics = []
         frames: list[pd.DataFrame] = []
         for metric in metric_names:
-            metric_frame = self._read_metric_frame(metric, date_from, date_to)
+            spec = self._metric_source_spec(metric)
+            metric_frame = self._read_metric_frame(spec, date_from, date_to)
+            self.last_source_diagnostics.append(
+                self._build_metric_diagnostic(spec, metric_frame, date_from, date_to)
+            )
             if not metric_frame.empty:
                 frames.append(metric_frame)
 
@@ -152,41 +168,57 @@ class MartReader:
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values(["metric", "date"]).reset_index(drop=True)
 
-    def _read_metric_frame(self, metric: str, date_from: str, date_to: str) -> "pd.DataFrame":
+    def get_source_diagnostics(self) -> list[dict[str, object]]:
+        return [dict(item) for item in self.last_source_diagnostics]
+
+    def _metric_source_spec(self, metric: str) -> MetricSourceSpec:
+        if metric == "revenue":
+            return MetricSourceSpec(
+                metric=metric,
+                table_name=self.revenue_metrics_table,
+                date_column="date",
+                value_sql="SUM(COALESCE(gross_revenue, 0))",
+            )
+        if metric == "dau":
+            return MetricSourceSpec(
+                metric=metric,
+                table_name=self.daily_active_users_table,
+                date_column="date",
+                value_sql="SUM(COALESCE(dau, 0))",
+            )
+        if metric == "installs":
+            return MetricSourceSpec(
+                metric=metric,
+                table_name=self.installs_funnel_table,
+                date_column="install_date",
+                value_sql="SUM(COALESCE(installed, 0))",
+            )
+
+        return MetricSourceSpec(
+            metric=metric,
+            table_name=self.experiment_daily_table,
+            date_column="date",
+            value_sql=ALLOWED_METRICS[metric],
+        )
+
+    def _read_metric_frame(self, spec: MetricSourceSpec, date_from: str, date_to: str) -> "pd.DataFrame":
         import pandas as pd
 
         if self._client is None:
             return pd.DataFrame(columns=["date", "metric", "value"])
 
-        if metric == "revenue":
-            table_name = self.revenue_metrics_table
-            date_column = "date"
-            value_sql = "SUM(COALESCE(gross_revenue, 0))"
-        elif metric == "dau":
-            table_name = self.daily_active_users_table
-            date_column = "date"
-            value_sql = "SUM(COALESCE(dau, 0))"
-        elif metric == "installs":
-            table_name = self.installs_funnel_table
-            date_column = "install_date"
-            value_sql = "SUM(COALESCE(installed, 0))"
-        else:
-            table_name = self.experiment_daily_table
-            date_column = "date"
-            value_sql = ALLOWED_METRICS[metric]
-
         query = f"""
             SELECT
-              {date_column} AS date,
+              {spec.date_column} AS date,
               @metric AS metric,
-              CAST({value_sql} AS FLOAT64) AS value
-            FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
-            WHERE {date_column} BETWEEN @date_from AND @date_to
-            GROUP BY {date_column}
+              CAST({spec.value_sql} AS FLOAT64) AS value
+            FROM `{self.project_id}.{self.mart_dataset}.{spec.table_name}`
+            WHERE {spec.date_column} BETWEEN @date_from AND @date_to
+            GROUP BY {spec.date_column}
         """
         job_config = self._bq.QueryJobConfig(
             query_parameters=[
-                self._bq.ScalarQueryParameter("metric", "STRING", metric),
+                self._bq.ScalarQueryParameter("metric", "STRING", spec.metric),
                 self._bq.ScalarQueryParameter("date_from", "DATE", date_from),
                 self._bq.ScalarQueryParameter("date_to", "DATE", date_to),
             ]
@@ -196,8 +228,8 @@ class MartReader:
             "reading mart data: project=%s dataset=%s table=%s metric=%s range=%s..%s",
             self.project_id,
             self.mart_dataset,
-            table_name,
-            metric,
+            spec.table_name,
+            spec.metric,
             date_from,
             date_to,
         )
@@ -206,9 +238,73 @@ class MartReader:
         except Exception as error:
             message = str(error)
             if "Not found: Table" in message:
-                logger.warning("skipping metric %s because source table is unavailable: %s", metric, message)
+                logger.warning(
+                    "skipping metric %s because source table is unavailable: %s",
+                    spec.metric,
+                    message,
+                )
                 return pd.DataFrame(columns=["date", "metric", "value"])
             raise
+
+    def _build_metric_diagnostic(
+        self,
+        spec: MetricSourceSpec,
+        metric_frame: "pd.DataFrame",
+        date_from: str,
+        date_to: str,
+    ) -> dict[str, object]:
+        min_date = None
+        max_date = None
+        total_value = 0.0
+
+        if not metric_frame.empty:
+            if "date" in metric_frame.columns:
+                min_date = metric_frame["date"].min()
+                max_date = metric_frame["date"].max()
+            if "value" in metric_frame.columns:
+                total_value = float(metric_frame["value"].fillna(0).sum())
+
+        latest_available = (
+            self._latest_available_date_for_table(spec.table_name, spec.date_column)
+            if self._table_exists(spec.table_name)
+            else None
+        )
+
+        return {
+            "metric": spec.metric,
+            "table": spec.table_name,
+            "dateColumn": spec.date_column,
+            "tableExists": self._table_exists(spec.table_name),
+            "requestedFrom": date_from,
+            "requestedTo": date_to,
+            "dateBucketCount": int(len(metric_frame.index)),
+            "valueTotal": round(total_value, 2),
+            "minDate": self._serialize_date_like(min_date),
+            "maxDate": self._serialize_date_like(max_date),
+            "latestAvailableDate": latest_available.isoformat() if latest_available else None,
+        }
+
+    def _table_exists(self, table_name: str) -> bool:
+        if self._client is None:
+            return False
+        if table_name in self._table_exists_cache:
+            return self._table_exists_cache[table_name]
+
+        query = f"""
+            SELECT COUNT(*) AS table_count
+            FROM `{self.project_id}.{self.mart_dataset}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_name = @table_name
+        """
+        job_config = self._bq.QueryJobConfig(
+            query_parameters=[
+                self._bq.ScalarQueryParameter("table_name", "STRING", table_name),
+            ]
+        )
+
+        df = self._client.query(query, job_config=job_config).to_dataframe()
+        exists = not df.empty and int(df["table_count"].iloc[0]) > 0
+        self._table_exists_cache[table_name] = exists
+        return exists
 
     def _latest_available_date(self) -> date | None:
         if self._client is None:
@@ -271,6 +367,23 @@ class MartReader:
 
         try:
             return date.fromisoformat(str(latest_value))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _serialize_date_like(value: object) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "date"):
+            try:
+                return value.date().isoformat()
+            except Exception:  # noqa: BLE001
+                return None
+        if isinstance(value, date):
+            return value.isoformat()
+
+        try:
+            return date.fromisoformat(str(value)).isoformat()
         except ValueError:
             return None
 

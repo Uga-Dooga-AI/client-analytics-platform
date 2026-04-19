@@ -1,6 +1,7 @@
 -- mart_revenue_metrics: метрики выручки из AppMetrica revenue events
 -- Grain: date × os_name × product_id
--- Источник: события с event_name = 'purchase' или 'in_app_purchase' (AppMetrica revenue stream)
+-- Источник: события total revenue stream
+--           ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
 -- Примечание: модель активируется только если в AppMetrica stream есть revenue события.
 --             Если нет — модель вернёт пустой результат (не ошибку).
 -- Партиционирование: по полю date
@@ -18,22 +19,25 @@
 with revenue_events as (
     select
         event_date                                          as date,
+        event_name,
         os_name,
         country_code,
         app_id,
         device_id,
         user_id,
-        -- revenue события: 'purchase', 'in_app_purchase', 'subscription_start'
+        -- revenue события: 'c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start'
         -- структура event_params зависит от интеграции AppMetrica SDK
         json_value(to_json_string(event_params), '$.product_id')        as product_id,
         json_value(to_json_string(event_params), '$.currency')          as currency,
-        safe_cast(
-            json_value(to_json_string(event_params), '$.price')
-            as float64
-        )                                                               as price_raw,
+        coalesce(
+            safe_cast(json_value(to_json_string(event_params), '$.price') as float64),
+            safe_cast(json_value(to_json_string(event_params), '$.revenue') as float64),
+            safe_cast(json_value(to_json_string(event_params), '$.value') as float64),
+            0
+        )                                                               as revenue_value,
         json_value(to_json_string(event_params), '$.transaction_id')    as transaction_id
     from {{ ref('stg_appmetrica__events') }}
-    where event_name in ('purchase', 'in_app_purchase', 'subscription_start')
+    where event_name in ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
       and event_params is not null
 ),
 
@@ -69,8 +73,8 @@ agg as (
 
         count(*)                                            as purchase_count,
         count(distinct device_id)                           as paying_users,
-        sum(coalesce(price_raw, 0))                         as gross_revenue,
-        avg(coalesce(price_raw, 0))                         as avg_order_value
+        sum(coalesce(revenue_value, 0))                     as gross_revenue,
+        avg(coalesce(revenue_value, 0))                     as avg_order_value
 
     from deduped
     group by 1, 2, 3, 4, 5, 6

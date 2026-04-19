@@ -83,10 +83,15 @@ revenue_daily as (
         device_id,
         event_date,
         sum(
-            safe_cast(json_value(to_json_string(event_params), '$.price') as float64)
+            coalesce(
+                safe_cast(json_value(to_json_string(event_params), '$.price') as float64),
+                safe_cast(json_value(to_json_string(event_params), '$.revenue') as float64),
+                safe_cast(json_value(to_json_string(event_params), '$.value') as float64),
+                0
+            )
         )                                             as revenue_amount
     from {{ ref('stg_appmetrica__events') }}
-    where event_name in ('purchase', 'in_app_purchase', 'subscription_start')
+    where event_name in ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start')
       and event_params is not null
     group by 1, 2
 ),

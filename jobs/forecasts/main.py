@@ -30,6 +30,17 @@ logging.basicConfig(
 logger = logging.getLogger("forecasts")
 
 
+def summarize_source_diagnostics(diagnostics: list[dict[str, object]]) -> str:
+    parts: list[str] = []
+    for diagnostic in diagnostics:
+        metric = str(diagnostic.get("metric", "unknown"))
+        table = str(diagnostic.get("table", "unknown"))
+        buckets = diagnostic.get("dateBucketCount", 0)
+        latest = diagnostic.get("latestAvailableDate") or "none"
+        parts.append(f"{metric}<{table}>={buckets} buckets, latest={latest}")
+    return "; ".join(parts[:4])
+
+
 def load_config() -> dict:
     config_path = Path(os.environ.get("JOB_CONFIG_PATH", "config/job_config.example.yml"))
     if not config_path.exists():
@@ -197,20 +208,39 @@ def main() -> None:
         )
 
         source_df = reader.read_experiment_daily(date_from, date_to, metrics)
+        source_diagnostics = reader.get_source_diagnostics()
         if source_df.empty:
+            diagnostic_summary = summarize_source_diagnostics(source_diagnostics)
             message = "No source rows were returned for the requested history window."
-            logger.info(message)
+            if diagnostic_summary:
+                message = f"{message} {diagnostic_summary}"
+            logger.warning(
+                "forecast source is empty: requested_range=%s..%s resolved_range=%s..%s metrics=%s diagnostics=%s",
+                requested_date_from,
+                requested_date_to,
+                date_from,
+                date_to,
+                metrics,
+                source_diagnostics,
+            )
             output = writer.write_forecast(
                 source_df,
                 run_date=date.today().isoformat(),
-                metadata={"sourceRange": {"from": date_from, "to": date_to}, "metrics": metrics},
+                metadata={
+                    "requestedSourceRange": {"from": requested_date_from, "to": requested_date_to},
+                    "sourceRange": {"from": date_from, "to": date_to},
+                    "metrics": metrics,
+                    "sourceDiagnostics": source_diagnostics,
+                },
             )
             patch_run_status(
                 runtime_context,
                 status="succeeded",
                 message=message,
                 payload={
+                    "requestedSourceRange": {"from": requested_date_from, "to": requested_date_to},
                     "sourceRange": {"from": date_from, "to": date_to},
+                    "sourceDiagnostics": source_diagnostics,
                     "hotCombinations": hot_combinations,
                     "prewarmPlan": prewarm_plan,
                     "output": output,
@@ -230,7 +260,9 @@ def main() -> None:
             forecast_df,
             run_date=date.today().isoformat(),
             metadata={
+                "requestedSourceRange": {"from": requested_date_from, "to": requested_date_to},
                 "sourceRange": {"from": date_from, "to": date_to},
+                "sourceDiagnostics": source_diagnostics,
                 "sourceRows": int(len(source_df.index)),
                 "metrics": metrics,
                 "hotCombinations": hot_combinations,
@@ -246,7 +278,9 @@ def main() -> None:
             status="succeeded",
             message=message,
             payload={
+                "requestedSourceRange": {"from": requested_date_from, "to": requested_date_to},
                 "sourceRange": {"from": date_from, "to": date_to},
+                "sourceDiagnostics": source_diagnostics,
                 "sourceRows": int(len(source_df.index)),
                 "forecastRows": int(len(forecast_df.index)),
                 "hotCombinationCount": len(hot_combinations),
