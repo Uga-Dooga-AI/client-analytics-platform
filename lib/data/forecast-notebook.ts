@@ -1718,23 +1718,21 @@ function fallbackYoungCohortPrediction(
       continue;
     }
 
+    if (previous.trueRevenue.length <= cohortLifetime) {
+      continue;
+    }
+
     const predicted = previous.predictedFor.get(horizon);
     if (predicted == null) {
       if (previous.trueRevenue.length > horizon) {
         const realizedAtCurrentLifetime = previous.trueRevenue[cohortLifetime] ?? 0;
-        if (realizedAtCurrentLifetime > 0) {
-          collectedPredictions.push(previous.trueRevenue[horizon] ?? 0);
-          collectedRevenues.push(realizedAtCurrentLifetime);
-        }
+        collectedPredictions.push(previous.trueRevenue[horizon] ?? 0);
+        collectedRevenues.push(realizedAtCurrentLifetime);
       }
       continue;
     }
 
     const realizedAtCurrentLifetime = previous.trueRevenue[cohortLifetime] ?? 0;
-    if (realizedAtCurrentLifetime <= 0) {
-      continue;
-    }
-
     collectedPredictions.push(predicted);
     collectedRevenues.push(realizedAtCurrentLifetime);
     if (collectedPredictions.length >= 3) {
@@ -3166,6 +3164,7 @@ function formatPlatformLabel(value: string) {
 export const __testables = {
   boundsKey,
   buildBoundsForCohortSize,
+  fallbackYoungCohortPrediction,
   getNotebookBounds,
   normalizeBoundsCohortSize,
 };

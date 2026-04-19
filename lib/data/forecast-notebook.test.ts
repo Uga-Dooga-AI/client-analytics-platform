@@ -513,4 +513,33 @@ describe("forecast notebook live surface", () => {
     expect(bounds).toEqual([4, 12]);
     expect(__testables.normalizeBoundsCohortSize(1904.6)).toBe(1000);
   });
+
+  it("matches notebook young-cohort fallback by keeping zero realized revenues in previous predictions", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+
+    const predicted = __testables.fallbackYoungCohortPrediction(
+      [10, 18, 20],
+      2,
+      30,
+      [
+        {
+          trueRevenue: Array.from({ length: 31 }, (_, index) => (index === 2 ? 150 : index === 30 ? 300 : 0)),
+          predictedFor: new Map<number, number>(),
+          points: new Map(),
+        },
+        {
+          trueRevenue: [10, 20, 50, 60, 70],
+          predictedFor: new Map<number, number>([[30, 200]]),
+          points: new Map(),
+        },
+        {
+          trueRevenue: [5, 9, 0, 12, 18],
+          predictedFor: new Map<number, number>([[30, 100]]),
+          points: new Map(),
+        },
+      ]
+    );
+
+    expect(predicted).toBe(60);
+  });
 });
