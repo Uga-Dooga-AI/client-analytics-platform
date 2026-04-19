@@ -18,6 +18,7 @@ type DispatchResult = {
 const OAUTH_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const TOKEN_CACHE = new Map<string, { token: string; expiresAtMs: number }>();
+const DISPATCH_CLAIM_MESSAGE = "Worker execution dispatched from control plane.";
 
 function runJobName(bundle: AnalyticsProjectBundle, run: AnalyticsSyncRunRecord) {
   const baseName = `analytics-${bundle.project.slug}`;
@@ -129,6 +130,49 @@ async function getGoogleAccessToken(serviceAccount: GoogleServiceAccount) {
   return payload.access_token;
 }
 
+async function claimQueuedRunForDispatch(runId: string) {
+  const pool = getPostgresPool();
+  if (!pool) {
+    return true;
+  }
+
+  const result = await pool.query(
+    `
+      UPDATE analytics_sync_runs
+      SET
+        status = 'running',
+        started_at = COALESCE(started_at, NOW()),
+        message = $2
+      WHERE id = $1
+        AND status = 'queued'
+      RETURNING id
+    `,
+    [runId, DISPATCH_CLAIM_MESSAGE]
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function restoreQueuedRunAfterDispatchFailure(runId: string, message: string) {
+  const pool = getPostgresPool();
+  if (!pool) {
+    return;
+  }
+
+  await pool.query(
+    `
+      UPDATE analytics_sync_runs
+      SET
+        status = 'queued',
+        started_at = NULL,
+        message = $2
+      WHERE id = $1
+        AND status = 'running'
+    `,
+    [runId, message]
+  );
+}
+
 export async function dispatchAnalyticsRun(
   run: AnalyticsSyncRunRecord,
   bundle: AnalyticsProjectBundle
@@ -152,36 +196,53 @@ export async function dispatchAnalyticsRun(
   }
 
   const token = await getGoogleAccessToken(serviceAccount);
+  const claimed = await claimQueuedRunForDispatch(run.id);
+  if (!claimed) {
+    return {
+      ok: false,
+      reason: `Run ${run.id} was already claimed before dispatch.`,
+    };
+  }
+
   const region = bundle.project.settings.provisioningRegion;
-  const response = await fetch(
-    `https://run.googleapis.com/v2/projects/${bundle.project.gcpProjectId}/locations/${region}/jobs/${jobName}:run`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "x-goog-user-project": bundle.project.gcpProjectId,
-      },
-      body: JSON.stringify({
-        overrides: {
-          containerOverrides: [
-            {
-              env: [
-                {
-                  name: "ANALYTICS_RUN_ID",
-                  value: run.id,
-                },
-              ],
-            },
-          ],
+  const restoreMessage = run.message ?? `${run.runType.replace(/_/g, " ")} queued from the admin control plane.`;
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://run.googleapis.com/v2/projects/${bundle.project.gcpProjectId}/locations/${region}/jobs/${jobName}:run`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "x-goog-user-project": bundle.project.gcpProjectId,
         },
-      }),
-      cache: "no-store",
-    }
-  );
+        body: JSON.stringify({
+          overrides: {
+            containerOverrides: [
+              {
+                env: [
+                  {
+                    name: "ANALYTICS_RUN_ID",
+                    value: run.id,
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+        cache: "no-store",
+      }
+    );
+  } catch (error) {
+    await restoreQueuedRunAfterDispatchFailure(run.id, restoreMessage);
+    throw error;
+  }
 
   if (!response.ok) {
-    throw new Error(`Cloud Run job dispatch failed: ${response.status} ${await response.text()}`);
+    const errorText = await response.text();
+    await restoreQueuedRunAfterDispatchFailure(run.id, restoreMessage);
+    throw new Error(`Cloud Run job dispatch failed: ${response.status} ${errorText}`);
   }
 
   const payload = (await response.json().catch(() => null)) as { name?: string } | null;
