@@ -86,6 +86,16 @@ export type ForecastNotebookDiagnostics = {
   visibleLineCount: number;
   visibleCohortCount: number;
   emptyReason: string | null;
+  boundsArtifactFallbackUsed: boolean;
+  boundsArtifactIssue: string | null;
+  boundsArtifactPath: string | null;
+  boundsArtifactSourceStatus: string | null;
+  boundsArtifactSourceLastSyncAt: string | null;
+  boundsArtifactSourceNextSyncAt: string | null;
+  boundsArtifactExpectedSizeCount: number;
+  boundsArtifactLoadedSizeCount: number;
+  boundsArtifactMissingSizes: number[];
+  boundsArtifactIssueSamples: string[];
 };
 
 type ForecastNotebookInput = {
@@ -99,6 +109,20 @@ type ForecastNotebookInput = {
 type StorageScope = {
   bucket: string;
   prefix: string;
+};
+
+type NotebookBoundsArtifactLoadResult = {
+  tables: Map<number, Map<string, readonly [number, number]>>;
+  scopeUri: string | null;
+  sourceStatus: string | null;
+  sourceLastSyncAt: string | null;
+  sourceNextSyncAt: string | null;
+  expectedSizes: number[];
+  loadedSizes: number[];
+  missingSizes: number[];
+  issueSamples: string[];
+  fallbackUsed: boolean;
+  issue: string | null;
 };
 
 type InstallDescriptorRow = {
@@ -301,7 +325,10 @@ const MIRROR_COUNTRY_COLUMN_CANDIDATES = [
 const MIRROR_STORE_COLUMN_CANDIDATES = ["store", "platform", "os_name", "source_app_store"];
 const MIRROR_SPEND_COLUMN_CANDIDATES = ["spend", "cost", "cost_micros", "amount_micros"];
 const MIRROR_INSTALLS_COLUMN_CANDIDATES = ["installs", "all_conversions", "conversions"];
-const NOTEBOOK_BOUNDS_ARTIFACT_CACHE = new Map<string, Promise<Map<string, readonly [number, number]> | null>>();
+const NOTEBOOK_BOUNDS_ARTIFACT_CACHE = new Map<
+  string,
+  Promise<{ artifact: Map<string, readonly [number, number]> | null; issue: string | null }>
+>();
 
 const STORE_SQL = `
   CASE
@@ -385,12 +412,13 @@ export async function getForecastNotebookSurface({
       720,
     ]);
     const groupedLines = buildGroupedLines(processedCohorts, groupBy);
-    const predictionResources = await buildPredictionResources(
+    const predictionResourcesResult = await buildPredictionResources(
       groupedLines,
       allRequestedHorizons,
       filters.granularityDays,
       context
     );
+    const predictionResources = predictionResourcesResult.resources;
     const visibleCohortCount = groupedLines
       .flatMap((line) => line.cohorts)
       .filter((cohort) => cohort.cohortSize > 0).length;
@@ -429,6 +457,16 @@ export async function getForecastNotebookSurface({
           visibleCohortCount,
           spendRowCount: spendRows.length,
         }),
+        boundsArtifactFallbackUsed: predictionResourcesResult.boundsArtifacts.fallbackUsed,
+        boundsArtifactIssue: predictionResourcesResult.boundsArtifacts.issue,
+        boundsArtifactPath: predictionResourcesResult.boundsArtifacts.scopeUri,
+        boundsArtifactSourceStatus: predictionResourcesResult.boundsArtifacts.sourceStatus,
+        boundsArtifactSourceLastSyncAt: predictionResourcesResult.boundsArtifacts.sourceLastSyncAt,
+        boundsArtifactSourceNextSyncAt: predictionResourcesResult.boundsArtifacts.sourceNextSyncAt,
+        boundsArtifactExpectedSizeCount: predictionResourcesResult.boundsArtifacts.expectedSizes.length,
+        boundsArtifactLoadedSizeCount: predictionResourcesResult.boundsArtifacts.loadedSizes.length,
+        boundsArtifactMissingSizes: predictionResourcesResult.boundsArtifacts.missingSizes,
+        boundsArtifactIssueSamples: predictionResourcesResult.boundsArtifacts.issueSamples,
       },
     };
   } catch (error) {
@@ -1476,13 +1514,16 @@ async function buildPredictionResources(
         historyDays,
         predictionPeriods,
         maxRequiredHorizon,
-        notebookArtifactBounds,
+        notebookArtifactBounds.tables,
         trainingRecords,
         estimatedCurves
       )
     );
   }
-  return resources;
+  return {
+    resources,
+    boundsArtifacts: notebookArtifactBounds,
+  };
 }
 
 async function buildLinePredictionResources(
@@ -1828,14 +1869,20 @@ function decodeNotebookBoundsArtifact(payload: Buffer) {
 async function fetchNotebookBoundsArtifact(
   context: ProjectQueryContext,
   cohortSize: number
-): Promise<Map<string, readonly [number, number]> | null> {
-  if (process.env.NODE_ENV === "test") {
-    return null;
-  }
-
+): Promise<{ artifact: Map<string, readonly [number, number]> | null; issue: string | null }> {
   const scope = resolveBoundsArtifactScope(context.bundle);
   if (!scope?.bucket) {
-    return null;
+    return {
+      artifact: null,
+      issue: "Bounds artifact scope is not configured.",
+    };
+  }
+
+  if (process.env.NODE_ENV === "test") {
+    return {
+      artifact: null,
+      issue: null,
+    };
   }
 
   const normalizedCohortSize = normalizeBoundsCohortSize(cohortSize);
@@ -1861,7 +1908,10 @@ async function fetchNotebookBoundsArtifact(
       );
 
       if (response.status === 404) {
-        return null;
+        return {
+          artifact: null,
+          issue: `Missing file gs://${scope.bucket}/${objectPath}.`,
+        };
       }
 
       if (!response.ok) {
@@ -1869,14 +1919,21 @@ async function fetchNotebookBoundsArtifact(
       }
 
       const payload = Buffer.from(await response.arrayBuffer());
-      return decodeNotebookBoundsArtifact(payload);
+      return {
+        artifact: decodeNotebookBoundsArtifact(payload),
+        issue: null,
+      };
     } catch (error) {
+      const issue = error instanceof Error ? error.message : "Unknown error";
       console.warn(
         `[forecast-notebook] bounds artifact fallback for ${context.bundle.project.slug} cohort size ${normalizedCohortSize}: ${
-          error instanceof Error ? error.message : "Unknown error"
+          issue
         }`
       );
-      return null;
+      return {
+        artifact: null,
+        issue,
+      };
     }
   })();
 
@@ -1887,22 +1944,70 @@ async function fetchNotebookBoundsArtifact(
 async function loadNotebookBoundsArtifacts(
   context: ProjectQueryContext,
   cohortSizes: number[]
-): Promise<Map<number, Map<string, readonly [number, number]>>> {
+): Promise<NotebookBoundsArtifactLoadResult> {
   const uniqueSizes = uniqueSortedNumbers(
     cohortSizes
       .filter((value) => Number.isFinite(value) && value > 0)
       .map((value) => normalizeBoundsCohortSize(value))
   );
+  const boundsSource = context.bundle.sources.find((source) => source.sourceType === "bounds_artifacts");
+  const scope = resolveBoundsArtifactScope(context.bundle);
+  const scopeUri = scope?.bucket ? `gs://${scope.bucket}${scope.prefix ? `/${scope.prefix}` : ""}` : null;
   const tables = new Map<number, Map<string, readonly [number, number]>>();
+  const loadedSizes: number[] = [];
+  const missingSizes: number[] = [];
+  const issueSamples: string[] = [];
+
+  if (process.env.NODE_ENV === "test") {
+    return {
+      tables,
+      scopeUri,
+      sourceStatus: boundsSource?.status ?? null,
+      sourceLastSyncAt: boundsSource?.lastSyncAt?.toISOString() ?? null,
+      sourceNextSyncAt: boundsSource?.nextSyncAt?.toISOString() ?? null,
+      expectedSizes: [],
+      loadedSizes: [],
+      missingSizes: [],
+      issueSamples: [],
+      fallbackUsed: false,
+      issue: null,
+    };
+  }
 
   for (const cohortSize of uniqueSizes) {
-    const artifact = await fetchNotebookBoundsArtifact(context, cohortSize);
-    if (artifact) {
-      tables.set(cohortSize, artifact);
+    const result = await fetchNotebookBoundsArtifact(context, cohortSize);
+    if (result.artifact) {
+      tables.set(cohortSize, result.artifact);
+      loadedSizes.push(cohortSize);
+    } else {
+      missingSizes.push(cohortSize);
+      if (result.issue && issueSamples.length < 5) {
+        issueSamples.push(`size ${cohortSize}: ${result.issue}`);
+      }
     }
   }
 
-  return tables;
+  const fallbackUsed = missingSizes.length > 0;
+  let issue: string | null = null;
+  if (fallbackUsed) {
+    issue = scopeUri
+      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. This request used live-built fallback bounds for the missing sizes, so the result is not strict notebook parity.`
+      : "Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. This request used live-built fallback bounds instead.";
+  }
+
+  return {
+    tables,
+    scopeUri,
+    sourceStatus: boundsSource?.status ?? null,
+    sourceLastSyncAt: boundsSource?.lastSyncAt?.toISOString() ?? null,
+    sourceNextSyncAt: boundsSource?.nextSyncAt?.toISOString() ?? null,
+    expectedSizes: uniqueSizes,
+    loadedSizes,
+    missingSizes,
+    issueSamples,
+    fallbackUsed,
+    issue,
+  };
 }
 
 function getNotebookBounds(
@@ -2884,6 +2989,16 @@ function buildEmptyDiagnostics(
     visibleLineCount: 0,
     visibleCohortCount: 0,
     emptyReason: errorMessage,
+    boundsArtifactFallbackUsed: false,
+    boundsArtifactIssue: null,
+    boundsArtifactPath: null,
+    boundsArtifactSourceStatus: null,
+    boundsArtifactSourceLastSyncAt: null,
+    boundsArtifactSourceNextSyncAt: null,
+    boundsArtifactExpectedSizeCount: 0,
+    boundsArtifactLoadedSizeCount: 0,
+    boundsArtifactMissingSizes: [],
+    boundsArtifactIssueSamples: [],
   };
 }
 

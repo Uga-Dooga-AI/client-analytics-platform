@@ -245,6 +245,43 @@ function buildForecastDataDiagnostic({
   };
 }
 
+function buildBoundsArtifactDiagnostic({
+  selectedProjectLabel,
+  diagnostics,
+}: {
+  selectedProjectLabel: string;
+  diagnostics: Awaited<ReturnType<typeof getForecastNotebookSurface>>["diagnostics"];
+}) {
+  if (!diagnostics.boundsArtifactFallbackUsed || !diagnostics.boundsArtifactIssue) {
+    return null;
+  }
+
+  const missingPreview =
+    diagnostics.boundsArtifactMissingSizes.length > 0
+      ? diagnostics.boundsArtifactMissingSizes.slice(0, 8).join(", ")
+      : "unknown";
+  const missingSuffix =
+    diagnostics.boundsArtifactMissingSizes.length > 8
+      ? `, +${diagnostics.boundsArtifactMissingSizes.length - 8} more`
+      : "";
+  const sourceStatus = diagnostics.boundsArtifactSourceStatus ?? "unknown";
+  const lastSync = diagnostics.boundsArtifactSourceLastSyncAt
+    ? formatDateTime(new Date(diagnostics.boundsArtifactSourceLastSyncAt))
+    : "never";
+  const nextSync = diagnostics.boundsArtifactSourceNextSyncAt
+    ? formatDateTime(new Date(diagnostics.boundsArtifactSourceNextSyncAt))
+    : "not scheduled";
+  const issueSamples =
+    diagnostics.boundsArtifactIssueSamples.length > 0
+      ? ` Sample issues: ${diagnostics.boundsArtifactIssueSamples.join(" | ")}.`
+      : "";
+
+  return {
+    title: "Notebook Bounds Artifact Fallback",
+    body: `${selectedProjectLabel} rendered this slice with fallback bounds because notebook artifact files were not fully available. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
+  };
+}
+
 function formatStageTone(stage: ForecastPipelineStage) {
   switch (stage.status) {
     case "ready":
@@ -430,6 +467,12 @@ export default async function ForecastsPage({
         diagnostics: notebookSurface.diagnostics,
       })
     : null;
+  const boundsArtifactDiagnostic = hasAppliedSelection
+    ? buildBoundsArtifactDiagnostic({
+        selectedProjectLabel,
+        diagnostics: notebookSurface.diagnostics,
+      })
+    : null;
   const strategy = selectedBundle.project.settings.forecastStrategy ?? null;
   const strategyToggleValue = (enabled: boolean | undefined) => (enabled ? "On" : "Off");
 
@@ -513,6 +556,10 @@ export default async function ForecastsPage({
 
         {hasAppliedSelection && forecastDataDiagnostic ? (
           <DiagnosticBanner title={forecastDataDiagnostic.title} body={forecastDataDiagnostic.body} />
+        ) : null}
+
+        {hasAppliedSelection && boundsArtifactDiagnostic ? (
+          <DiagnosticBanner title={boundsArtifactDiagnostic.title} body={boundsArtifactDiagnostic.body} />
         ) : null}
 
         {hasAppliedSelection && pipelineSnapshot ? (
