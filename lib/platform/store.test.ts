@@ -351,4 +351,62 @@ describe("analytics run orchestration", () => {
 
     expect(promotedForecastRun?.status).toBe("queued");
   });
+
+  it("returns an existing equivalent queued run instead of creating a duplicate", async () => {
+    const {
+      createAnalyticsProject,
+      listAnalyticsProjectRuns,
+      requestAnalyticsSync,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "duplicate-queued-run",
+        displayName: "Duplicate Queued Run",
+        autoBootstrapOnCreate: false,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigquerySourceProjectId: "analytics-platform-493522",
+        bigquerySourceDataset: "raw",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const firstRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+      windowFrom: "2026-03-20",
+      windowTo: "2026-04-18",
+      payload: {
+        sequence: "post-backfill-refresh",
+        windowKind: "recent-tail",
+      },
+    });
+
+    const duplicateRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+      windowFrom: "2026-03-20",
+      windowTo: "2026-04-18",
+      payload: {
+        sequence: "post-backfill-refresh",
+        windowKind: "recent-tail",
+      },
+    });
+
+    const runs = await listAnalyticsProjectRuns(bundle.project.id);
+    const queuedRecentTailRuns = runs.filter(
+      (run) =>
+        run.runType === "ingestion" &&
+        run.windowFrom === "2026-03-20" &&
+        run.windowTo === "2026-04-18"
+    );
+
+    expect(duplicateRun.id).toBe(firstRun.id);
+    expect(queuedRecentTailRuns).toHaveLength(1);
+  });
 });

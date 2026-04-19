@@ -3491,9 +3491,6 @@ export async function requestAnalyticsSync(
     .map((run) => findEquivalentPendingRun(bundle.latestRuns, run))
     .find((run): run is AnalyticsSyncRunRecord => Boolean(run));
   if (existingBundleDuplicate) {
-    if (!useDemoStore() && existingBundleDuplicate.status === "queued") {
-      await dispatchAnalyticsRunSafely(existingBundleDuplicate, bundle);
-    }
     return existingBundleDuplicate;
   }
 
