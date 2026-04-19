@@ -773,6 +773,40 @@ function resolveChunkedBackfillWindow(
   };
 }
 
+function isRecentTailIngestionPayload(payload: Record<string, unknown> | undefined) {
+  if (!payload) {
+    return false;
+  }
+
+  return payload.sequence === "post-backfill-refresh" || payload.windowKind === "recent-tail";
+}
+
+function resolveChunkedRecentTailIngestionWindow(
+  bundle: AnalyticsProjectBundle,
+  windowFrom: string | null | undefined,
+  windowTo: string | null | undefined
+) {
+  const requestedWindow = resolveRequestedBackfillWindow(bundle, windowFrom, windowTo);
+  const maxChunkWindowTo = addDaysToIsoDate(
+    requestedWindow.windowFrom,
+    Math.max(MAX_BACKFILL_CHUNK_DAYS - 1, 0)
+  );
+
+  return {
+    windowFrom: requestedWindow.windowFrom,
+    windowTo:
+      compareIsoDates(maxChunkWindowTo, requestedWindow.windowTo) < 0
+        ? maxChunkWindowTo
+        : requestedWindow.windowTo,
+    payload: {
+      ingestionRequestedWindowFrom: requestedWindow.windowFrom,
+      ingestionRequestedWindowTo: requestedWindow.windowTo,
+      ingestionChunkDays: MAX_BACKFILL_CHUNK_DAYS,
+      windowKind: "recent-tail",
+    },
+  };
+}
+
 function secretHintForValue(sourceType: AnalyticsSourceType, value?: string) {
   if (!value) {
     return null;
@@ -3344,6 +3378,82 @@ function buildBackfillContinuationRun(
   } satisfies AnalyticsSyncRunRecord;
 }
 
+function buildRecentTailIngestionContinuationRun(
+  bundle: AnalyticsProjectBundle,
+  currentRun: AnalyticsSyncRunRecord
+) {
+  if (
+    currentRun.runType !== "ingestion" ||
+    !currentRun.windowTo ||
+    !isRecentTailIngestionPayload(currentRun.payload)
+  ) {
+    return null;
+  }
+
+  const requestedWindowTo =
+    typeof currentRun.payload.ingestionRequestedWindowTo === "string"
+      ? currentRun.payload.ingestionRequestedWindowTo
+      : currentRun.windowTo;
+
+  if (compareIsoDates(currentRun.windowTo, requestedWindowTo) >= 0) {
+    return null;
+  }
+
+  const nextChunk = resolveChunkedRecentTailIngestionWindow(
+    bundle,
+    addDaysToIsoDate(currentRun.windowTo, 1),
+    requestedWindowTo
+  );
+  const requiredSources = requiredSourceStatusesForRun(bundle, "ingestion");
+  const missing = requiredSources.filter((sourceType) => {
+    const source = bundle.sources.find((entry) => entry.sourceType === sourceType);
+    return !source || source.status !== "ready";
+  });
+  const blockingRun =
+    activeProjectRuns(bundle).find((run) => activeRunBlocksCandidate(run, "ingestion")) ?? null;
+  const status: AnalyticsRunStatus =
+    missing.length > 0 ? "waiting_credentials" : blockingRun ? "blocked" : "queued";
+
+  return {
+    id: randomUUID(),
+    projectId: bundle.project.id,
+    runType: "ingestion" as const,
+    triggerKind: currentRun.triggerKind,
+    sourceType: requiredSources[0] ?? null,
+    status,
+    requestedBy: currentRun.requestedBy,
+    requestedAt: new Date(),
+    startedAt: null,
+    finishedAt: null,
+    windowFrom: nextChunk.windowFrom,
+    windowTo: nextChunk.windowTo,
+    message:
+      status === "queued"
+        ? `Recent-tail ingestion continuation queued for ${nextChunk.windowFrom} → ${nextChunk.windowTo}.`
+        : status === "waiting_credentials"
+          ? `Waiting for ${missing.join(", ")} configuration before recent-tail ingestion can continue.`
+          : "Waiting for the current ingestion run to release the recent-tail lane.",
+    payload: {
+      requiredSources,
+      projectSlug: bundle.project.slug,
+      dependencies: [],
+      ...currentRun.payload,
+      ...nextChunk.payload,
+      recentTailContinuation: true,
+    },
+  } satisfies AnalyticsSyncRunRecord;
+}
+
+function buildChunkedSourceContinuationRun(
+  bundle: AnalyticsProjectBundle,
+  currentRun: AnalyticsSyncRunRecord
+) {
+  return (
+    buildBackfillContinuationRun(bundle, currentRun) ??
+    buildRecentTailIngestionContinuationRun(bundle, currentRun)
+  );
+}
+
 function promoteBlockedRuns(
   bundle: AnalyticsProjectBundle,
   runs: AnalyticsSyncRunRecord[]
@@ -3439,6 +3549,18 @@ export async function requestAnalyticsSync(
             overrides?.windowTo ?? input.windowTo ?? null
           )
         : null;
+    const combinedPayload = {
+      ...input.payload,
+      ...overrides?.payload,
+    };
+    const chunkedRecentTailIngestionWindow =
+      runType === "ingestion" && isRecentTailIngestionPayload(combinedPayload)
+        ? resolveChunkedRecentTailIngestionWindow(
+            bundle,
+            overrides?.windowFrom ?? input.windowFrom ?? null,
+            overrides?.windowTo ?? input.windowTo ?? null
+          )
+        : null;
 
     return {
       id: randomUUID(),
@@ -3452,15 +3574,24 @@ export async function requestAnalyticsSync(
       startedAt: null,
       finishedAt: null,
       windowFrom:
-        chunkedBackfillWindow?.windowFrom ?? overrides?.windowFrom ?? input.windowFrom ?? null,
+        chunkedBackfillWindow?.windowFrom ??
+        chunkedRecentTailIngestionWindow?.windowFrom ??
+        overrides?.windowFrom ??
+        input.windowFrom ??
+        null,
       windowTo:
-        chunkedBackfillWindow?.windowTo ?? overrides?.windowTo ?? input.windowTo ?? null,
+        chunkedBackfillWindow?.windowTo ??
+        chunkedRecentTailIngestionWindow?.windowTo ??
+        overrides?.windowTo ??
+        input.windowTo ??
+        null,
       message: buildRunMessage(bundle, input, status, requiredSources, missing, blockingRun),
       payload: {
         requiredSources,
         projectSlug: bundle.project.slug,
         dependencies: runDependencies(runType),
         ...(chunkedBackfillWindow?.payload ?? {}),
+        ...(chunkedRecentTailIngestionWindow?.payload ?? {}),
         ...input.payload,
         ...overrides?.payload,
       },
@@ -3742,7 +3873,7 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
         let projectRuns = store.runs.filter((run) => run.projectId === nextRun.projectId);
         const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
         const continuationRunsToDispatch: AnalyticsSyncRunRecord[] = [];
-        const continuationRun = buildBackfillContinuationRun(
+        const continuationRun = buildChunkedSourceContinuationRun(
           { project, sources: projectSources, latestRuns: projectRuns },
           nextRun
         );
@@ -3877,7 +4008,7 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
         );
         const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
         const continuationRunsToDispatch: AnalyticsSyncRunRecord[] = [];
-        const continuationRun = buildBackfillContinuationRun(
+        const continuationRun = buildChunkedSourceContinuationRun(
           { project, sources: projectSources, latestRuns: projectRuns },
           nextRun
         );
