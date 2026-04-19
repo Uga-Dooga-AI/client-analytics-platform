@@ -50,6 +50,7 @@ const DEFAULT_INITIAL_BACKFILL_DAYS = 365;
 const DEFAULT_FORECAST_HORIZON_DAYS = 730;
 const MAX_BACKFILL_CHUNK_DAYS = 3;
 const LATEST_RUNS_LIMIT = 100;
+const POST_BACKFILL_REFRESH_DAYS = 30;
 
 export interface AnalyticsForecastStrategy {
   precomputePrimaryForecasts: boolean;
@@ -539,7 +540,7 @@ function normalizeJsonLike(value: unknown): unknown {
   return value ?? null;
 }
 
-function buildForecastCombinationKey(value: Record<string, unknown>) {
+export function buildForecastCombinationKey(value: Record<string, unknown>) {
   return JSON.stringify(normalizeJsonLike(value));
 }
 
@@ -570,6 +571,21 @@ function buildPrimaryForecastLabel(project: AnalyticsProjectRecord, filters: Rec
   }
   if (typeof filters.platform === "string" && filters.platform.length > 0) {
     parts.push(filters.platform);
+  }
+  if (typeof filters.revenueMode === "string" && filters.revenueMode.length > 0) {
+    parts.push(filters.revenueMode);
+  }
+  if (typeof filters.granularityDays === "number" && Number.isFinite(filters.granularityDays)) {
+    parts.push(`step ${filters.granularityDays}d`);
+  }
+  if (Array.isArray(filters.horizonDays) && filters.horizonDays.length > 0) {
+    const labels = filters.horizonDays
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+      .map((value) => `D${value}`);
+    if (labels.length > 0) {
+      parts.push(labels.join("/"));
+    }
   }
 
   return parts.join(" · ");
@@ -611,7 +627,13 @@ function buildPrimaryForecastCombinationInputs(
     });
   };
 
-  register({});
+  const baseFilters = {
+    granularityDays: bundle.project.defaultGranularityDays,
+    revenueMode: "total",
+    horizonDays: [30, 60, 120],
+  };
+
+  register(baseFilters);
 
   if (bundle.project.settings.forecastStrategy.expandPrimaryMatrix) {
     for (const segment of segments) {
@@ -619,6 +641,7 @@ function buildPrimaryForecastCombinationInputs(
         for (const spendSource of spendSources) {
           for (const platform of platforms) {
             register({
+              ...baseFilters,
               segment,
               country,
               spendSource,
@@ -630,16 +653,16 @@ function buildPrimaryForecastCombinationInputs(
     }
   } else {
     for (const segment of segments) {
-      register({ segment });
+      register({ ...baseFilters, segment });
     }
     for (const country of countries) {
-      register({ country });
+      register({ ...baseFilters, country });
     }
     for (const spendSource of spendSources) {
-      register({ spendSource });
+      register({ ...baseFilters, spendSource });
     }
     for (const platform of platforms) {
-      register({ platform });
+      register({ ...baseFilters, platform });
     }
   }
 
@@ -710,6 +733,19 @@ function resolveRequestedBackfillWindow(
   );
 
   return { windowFrom: windowStart, windowTo: windowEnd };
+}
+
+function resolvePostBackfillRefreshWindow(bundle: AnalyticsProjectBundle) {
+  const windowTo = addDaysToIsoDate(
+    new Date().toISOString().slice(0, 10),
+    -bundle.project.lookbackDays
+  );
+  const windowFrom = addDaysToIsoDate(
+    windowTo,
+    -Math.max(POST_BACKFILL_REFRESH_DAYS - 1, 0)
+  );
+
+  return { windowFrom, windowTo };
 }
 
 function resolveChunkedBackfillWindow(
@@ -3066,6 +3102,14 @@ function activeRunBlocksCandidate(
     );
   }
 
+  if (candidateRunType === "ingestion") {
+    return activeRun.runType === "ingestion";
+  }
+
+  if (candidateRunType === "backfill") {
+    return activeRun.runType === "backfill";
+  }
+
   return activeRun.runType !== "bootstrap";
 }
 
@@ -3556,13 +3600,18 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
 
   let promotedRunsToDispatch: AnalyticsSyncRunRecord[] = [];
   let promotedDispatchBundle: AnalyticsProjectBundle | null = null;
-  const buildFollowUpRunRequests = (run: AnalyticsSyncRunRecord): AnalyticsSyncRequestInput[] => {
+  const buildFollowUpRunRequests = (
+    bundle: AnalyticsProjectBundle,
+    run: AnalyticsSyncRunRecord
+  ): AnalyticsSyncRequestInput[] => {
     if (run.status !== "succeeded") {
       return [];
     }
 
+    const followUpRequests: AnalyticsSyncRequestInput[] = [];
+
     if (run.runType === "backfill" || run.runType === "ingestion") {
-      return [
+      followUpRequests.push(
         {
           runType: "bounds_refresh",
           requestedBy: run.requestedBy,
@@ -3572,11 +3621,11 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
             sourceRunType: run.runType,
           },
         },
-      ];
+      );
     }
 
     if (run.runType === "bounds_refresh") {
-      return [
+      followUpRequests.push(
         {
           runType: "forecast",
           requestedBy: run.requestedBy,
@@ -3586,28 +3635,56 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
             sourceRunType: run.runType,
           },
         },
-      ];
+      );
     }
 
-    return [];
+    if (run.runType === "backfill") {
+      const latestIncrementalIngestion = latestSuccessfulRun(bundle, ["ingestion"]);
+      if (!latestIncrementalIngestion || compareRunFreshness(run, latestIncrementalIngestion) > 0) {
+        const recentRefreshWindow = resolvePostBackfillRefreshWindow(bundle);
+        followUpRequests.push({
+          runType: "ingestion",
+          requestedBy: run.requestedBy,
+          triggerKind: run.triggerKind,
+          windowFrom: recentRefreshWindow.windowFrom,
+          windowTo: recentRefreshWindow.windowTo,
+          payload: {
+            sourceRunId: run.id,
+            sourceRunType: run.runType,
+            sequence: "post-backfill-refresh",
+            windowKind: "recent-tail",
+          },
+        });
+      }
+    }
+
+    return followUpRequests;
   };
   const requestFollowUpRunsIfNeeded = async (run: AnalyticsSyncRunRecord) => {
-    const followUpRunRequests = buildFollowUpRunRequests(run);
-    if (followUpRunRequests.length === 0) {
-      return;
-    }
-
     const bundle = await getAnalyticsProject(run.projectId);
     if (!bundle) {
       return;
     }
 
+    const followUpRunRequests = buildFollowUpRunRequests(bundle, run);
+    if (followUpRunRequests.length === 0) {
+      return;
+    }
+
     const followUpRunsToQueue = followUpRunRequests.filter(
-      (input) =>
-        !bundle.latestRuns.some(
+      (input) => {
+        if (
+          input.runType === "ingestion" &&
+          input.payload?.sequence === "post-backfill-refresh"
+        ) {
+          return true;
+        }
+
+        return !bundle.latestRuns.some(
           (existingRun) =>
             existingRun.runType === input.runType && isPendingRunStatus(existingRun.status)
-        )
+        );
+      }
     );
 
     if (followUpRunsToQueue.length === 0) {

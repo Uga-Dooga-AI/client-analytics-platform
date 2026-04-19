@@ -1,6 +1,6 @@
 export type DashboardProjectKey = string;
 export type DashboardRangeKey = "7d" | "30d" | "90d" | "mtd" | "custom";
-export type DashboardGranularityKey = "1" | "7" | "14" | "30";
+export type DashboardGranularityKey = "1" | "7" | "14" | "30" | "custom";
 export type DashboardPlatformKey = "all" | "ios" | "android" | "web";
 export type DashboardSegmentPresetKey =
   | "all"
@@ -67,6 +67,7 @@ export const GRANULARITY_OPTIONS: Array<{ key: DashboardGranularityKey; label: s
   { key: "7", label: "Weekly", days: 7 },
   { key: "14", label: "14 days", days: 14 },
   { key: "30", label: "30 days", days: 30 },
+  { key: "custom", label: "Custom", days: 7 },
 ];
 
 export const PLATFORM_OPTIONS: Array<{ key: DashboardPlatformKey; label: string }> = [
@@ -231,7 +232,14 @@ export function parseDashboardSearchParams(
   const rangeKey = (readSingleParam(raw, "range") as DashboardRangeKey | undefined) ?? "30d";
   const normalizedRangeKey = RANGE_OPTIONS.some((option) => option.key === rangeKey) ? rangeKey : "30d";
   const granularityRaw = (readSingleParam(raw, "granularity") as DashboardGranularityKey | undefined) ?? "7";
-  const granularity = GRANULARITY_OPTIONS.find((option) => option.key === granularityRaw) ?? GRANULARITY_OPTIONS[1];
+  const granularityOption =
+    GRANULARITY_OPTIONS.find((option) => option.key === granularityRaw) ?? GRANULARITY_OPTIONS[1];
+  const customStepRaw = Number(
+    readSingleParam(raw, "stepDays") ?? readSingleParam(raw, "granularityDays") ?? granularityOption.days
+  );
+  const customStepDays = clampGranularityDays(customStepRaw, GRANULARITY_OPTIONS[1].days);
+  const granularityDays =
+    granularityOption.key === "custom" ? customStepDays : granularityOption.days;
   const defaultRange = getRangeDates(normalizedRangeKey);
 
   const projectKeyRaw = readSingleParam(raw, "project");
@@ -247,8 +255,8 @@ export function parseDashboardSearchParams(
   return {
     projectKey,
     rangeKey: normalizedRangeKey,
-    granularityKey: granularity.key,
-    granularityDays: granularity.days,
+    granularityKey: granularityOption.key,
+    granularityDays,
     from: readSingleParam(raw, "from") ?? defaultRange.from,
     to: readSingleParam(raw, "to") ?? defaultRange.to,
     platform: PLATFORM_OPTIONS.some((option) => option.key === platform) ? platform : "all",
@@ -263,6 +271,9 @@ export function serializeDashboardFilters(filters: DashboardFilters) {
   params.set("project", filters.projectKey);
   params.set("range", filters.rangeKey);
   params.set("granularity", filters.granularityKey);
+  if (filters.granularityKey === "custom") {
+    params.set("stepDays", String(clampGranularityDays(filters.granularityDays, GRANULARITY_OPTIONS[1].days)));
+  }
   params.set("from", filters.from);
   params.set("to", filters.to);
   params.set("platform", filters.platform);
@@ -286,5 +297,19 @@ export function normalizeFiltersForPath(filters: DashboardFilters, pathname: str
     ? filters.projectKey
     : getDefaultProjectForPath(pathname);
 
-  return { ...filters, projectKey };
+  const granularityDays =
+    filters.granularityKey === "custom"
+      ? clampGranularityDays(filters.granularityDays, GRANULARITY_OPTIONS[1].days)
+      : GRANULARITY_OPTIONS.find((option) => option.key === filters.granularityKey)?.days ??
+        GRANULARITY_OPTIONS[1].days;
+
+  return { ...filters, projectKey, granularityDays };
+}
+
+function clampGranularityDays(value: number, fallback: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.min(28, Math.round(value)));
 }

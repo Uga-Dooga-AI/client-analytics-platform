@@ -45,9 +45,9 @@ export type AcquisitionOption = {
 
 export type ConfidenceSeriesPoint = {
   label: string;
-  value: number;
-  lower: number;
-  upper: number;
+  value: number | null;
+  lower: number | null;
+  upper: number | null;
   actual?: number | null;
 };
 
@@ -64,6 +64,16 @@ export type ComparisonConfidenceChartData = {
   subtitle: string;
   unit: string;
   groups: ComparisonChartGroup[];
+  yAxis?: {
+    min?: number;
+    max?: number;
+    referenceLines?: Array<{
+      value: number;
+      label?: string;
+      color?: string;
+      dasharray?: string;
+    }>;
+  };
 };
 
 export type AcquisitionSummary = {
@@ -111,9 +121,9 @@ export type AcquisitionBreakdownRow = {
 
 export type CohortMatrixCell = {
   label: string;
-  value: number;
-  lower: number;
-  upper: number;
+  value: number | null;
+  lower: number | null;
+  upper: number | null;
   actual?: number | null;
 };
 

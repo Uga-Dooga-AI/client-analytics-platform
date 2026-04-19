@@ -19,6 +19,15 @@ type ForecastPointRow = {
 
 const FORECAST_SERIES_POINTS = 14;
 const FORECAST_CARD_POINTS = 5;
+const SUPPORTED_PUBLISHED_FORECAST_METRICS = new Set(["revenue"]);
+
+function containsUnsupportedForecastMetric(text: string) {
+  return /\bdau\b|\binstalls?\b/i.test(text);
+}
+
+function sanitizeForecastRunLabel(label: string) {
+  return containsUnsupportedForecastMetric(label) ? "Forecast run" : label;
+}
 
 type ForecastTableCandidate = {
   kind: "serving" | "raw";
@@ -38,36 +47,6 @@ const METRIC_META: Record<
     unit: "$",
     subtitle: "Projected revenue with confidence interval from the latest published forecast run.",
   },
-  dau: {
-    label: "DAU forecast",
-    unit: "",
-    subtitle: "Projected daily active users with confidence interval from the latest published forecast run.",
-  },
-  installs: {
-    label: "Installs forecast",
-    unit: "",
-    subtitle: "Projected installs with confidence interval from the latest published forecast run.",
-  },
-  exposures: {
-    label: "Exposure forecast",
-    unit: "",
-    subtitle: "Projected experiment exposure volume with confidence interval from the latest published forecast run.",
-  },
-  activations: {
-    label: "Activation forecast",
-    unit: "",
-    subtitle: "Projected activation volume with confidence interval from the latest published forecast run.",
-  },
-  guardrail_crashes: {
-    label: "Crash guardrail forecast",
-    unit: "",
-    subtitle: "Projected guardrail crash count with confidence interval from the latest published forecast run.",
-  },
-  guardrail_errors: {
-    label: "Error guardrail forecast",
-    unit: "",
-    subtitle: "Projected guardrail error count with confidence interval from the latest published forecast run.",
-  },
 };
 
 export async function getForecastRuns(filters?: ForecastsFilter): Promise<ForecastRun[]> {
@@ -86,7 +65,9 @@ export async function getForecastRuns(filters?: ForecastsFilter): Promise<Foreca
               typeof run.payload?.forecastCombination === "object" &&
               run.payload.forecastCombination &&
               typeof (run.payload.forecastCombination as Record<string, unknown>).label === "string"
-                ? String((run.payload.forecastCombination as Record<string, unknown>).label)
+                ? sanitizeForecastRunLabel(
+                    String((run.payload.forecastCombination as Record<string, unknown>).label)
+                  )
                 : "Forecast run",
             status:
               run.status === "running"
@@ -164,6 +145,9 @@ export async function getForecastTrajectories(filters?: ForecastsFilter): Promis
       }
 
       const rowsByMetric = rows.reduce<Map<string, ForecastPointRow[]>>((acc, row) => {
+        if (!SUPPORTED_PUBLISHED_FORECAST_METRICS.has(row.metric)) {
+          return acc;
+        }
         const current = acc.get(row.metric) ?? [];
         current.push(row);
         acc.set(row.metric, current);
@@ -243,6 +227,7 @@ async function loadLatestForecastRows(context: ProjectQueryContext): Promise<For
           CROSS JOIN latest_generated
           WHERE latest_generated.latest_generated_at IS NOT NULL
             AND generated_at = latest_generated.latest_generated_at
+            AND metric = 'revenue'
           ORDER BY metric, date
         `
       );

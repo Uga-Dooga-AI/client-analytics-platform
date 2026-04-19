@@ -1,12 +1,15 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import {
-  PLATFORM_OPTIONS,
   TAG_OPTIONS,
   type DashboardProjectKey,
 } from "@/lib/dashboard-filters";
-import type { SegmentBuilderCatalog } from "@/lib/data/acquisition";
+import {
+  defaultLiveSliceSelection,
+  resolveLiveSliceCatalogOptions,
+  type LiveSliceCatalog,
+} from "@/lib/slice-catalog";
 import type { SavedSegmentEventRule, SavedUserSegment } from "@/lib/segments";
 
 type BuilderState = {
@@ -40,7 +43,7 @@ export function SegmentsWorkspace({
 }: {
   initialSegments: SavedUserSegment[];
   projectKey: DashboardProjectKey;
-  catalog: SegmentBuilderCatalog;
+  catalog: LiveSliceCatalog;
   projectOptions: Array<{ value: string; label: string }>;
 }) {
   const [segments, setSegments] = useState(initialSegments);
@@ -61,6 +64,10 @@ export function SegmentsWorkspace({
   const [error, setError] = useState("");
   const [isPending, startTransition] = useTransition();
 
+  useEffect(() => {
+    setBuilder((current) => ({ ...current, projectKey }));
+  }, [projectKey]);
+
   const scopedSegments = useMemo(
     () =>
       projectKey === "all"
@@ -70,6 +77,85 @@ export function SegmentsWorkspace({
           ),
     [projectKey, segments]
   );
+
+  const resolvedOptions = useMemo(
+    () =>
+      resolveLiveSliceCatalogOptions(catalog, {
+        platform: builder.platform,
+        country: builder.country,
+        source: builder.source,
+        company: builder.company,
+        campaign: builder.campaign,
+        creative: builder.creative,
+      }),
+    [builder.campaign, builder.company, builder.country, builder.creative, builder.platform, builder.source, catalog]
+  );
+  const hasCompanyOptions = useMemo(
+    () => resolvedOptions.companies.some((option) => option.value !== "all" && option.count > 0),
+    [resolvedOptions.companies]
+  );
+  const hasCampaignOptions = useMemo(
+    () => resolvedOptions.campaigns.some((option) => option.value !== "all" && option.count > 0),
+    [resolvedOptions.campaigns]
+  );
+  const hasCreativeOptions = useMemo(
+    () => resolvedOptions.creatives.some((option) => option.value !== "all" && option.count > 0),
+    [resolvedOptions.creatives]
+  );
+  const hasMirrorFilters = hasCompanyOptions || hasCampaignOptions || hasCreativeOptions;
+
+  useEffect(() => {
+    const defaults = defaultLiveSliceSelection();
+
+    setBuilder((current) => {
+      const next = { ...current };
+      let changed = false;
+
+      if (!resolvedOptions.platforms.some((option) => option.value === current.platform)) {
+        next.platform = defaults.platform;
+        changed = true;
+      }
+
+      if (!resolvedOptions.countries.some((option) => option.value === current.country)) {
+        next.country = defaults.country;
+        changed = true;
+      }
+
+      if (!resolvedOptions.sources.some((option) => option.value === current.source)) {
+        next.source = defaults.source;
+        changed = true;
+      }
+
+      if (!resolvedOptions.companies.some((option) => option.value === current.company)) {
+        next.company = defaults.company;
+        changed = true;
+      }
+      if (!hasCompanyOptions && current.company !== defaults.company) {
+        next.company = defaults.company;
+        changed = true;
+      }
+
+      if (!resolvedOptions.campaigns.some((option) => option.value === current.campaign)) {
+        next.campaign = defaults.campaign;
+        changed = true;
+      }
+      if (!hasCampaignOptions && current.campaign !== defaults.campaign) {
+        next.campaign = defaults.campaign;
+        changed = true;
+      }
+
+      if (!resolvedOptions.creatives.some((option) => option.value === current.creative)) {
+        next.creative = defaults.creative;
+        changed = true;
+      }
+      if (!hasCreativeOptions && current.creative !== defaults.creative) {
+        next.creative = defaults.creative;
+        changed = true;
+      }
+
+      return changed ? next : current;
+    });
+  }, [hasCampaignOptions, hasCompanyOptions, hasCreativeOptions, resolvedOptions]);
 
   function resetBuilder() {
     setBuilder((current) => ({
@@ -198,7 +284,7 @@ export function SegmentsWorkspace({
             label="Platform"
             value={builder.platform}
             onChange={(value) => setBuilder((current) => ({ ...current, platform: value }))}
-            options={PLATFORM_OPTIONS.map((option) => ({ value: option.key, label: option.label }))}
+            options={formatOptionsWithCounts(resolvedOptions.platforms)}
           />
           <SelectField
             label="Tag focus"
@@ -213,34 +299,82 @@ export function SegmentsWorkspace({
             label="Country"
             value={builder.country}
             onChange={(value) => setBuilder((current) => ({ ...current, country: value }))}
-            options={catalog.countries.map((option) => ({ value: option.value, label: option.label }))}
-          />
-          <SelectField
-            label="Company"
-            value={builder.company}
-            onChange={(value) => setBuilder((current) => ({ ...current, company: value }))}
-            options={catalog.companies.map((option) => ({ value: option.value, label: option.label }))}
+            options={formatOptionsWithCounts(resolvedOptions.countries)}
           />
           <SelectField
             label="Traffic source"
             value={builder.source}
             onChange={(value) => setBuilder((current) => ({ ...current, source: value }))}
-            options={catalog.sources.map((option) => ({ value: option.value, label: option.label }))}
-          />
-          <SelectField
-            label="Campaign"
-            value={builder.campaign}
-            onChange={(value) => setBuilder((current) => ({ ...current, campaign: value }))}
-            options={catalog.campaigns.map((option) => ({ value: option.value, label: option.label }))}
+            options={formatOptionsWithCounts(resolvedOptions.sources)}
           />
         </div>
 
-        <SelectField
-          label="Creative"
-          value={builder.creative}
-          onChange={(value) => setBuilder((current) => ({ ...current, creative: value }))}
-          options={catalog.creatives.map((option) => ({ value: option.value, label: option.label }))}
-        />
+        {hasMirrorFilters ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+            {hasCompanyOptions ? (
+              <SelectField
+                label="Company"
+                value={builder.company}
+                onChange={(value) => setBuilder((current) => ({ ...current, company: value }))}
+                options={formatOptionsWithCounts(resolvedOptions.companies)}
+              />
+            ) : null}
+            {hasCampaignOptions ? (
+              <SelectField
+                label="Campaign"
+                value={builder.campaign}
+                onChange={(value) => setBuilder((current) => ({ ...current, campaign: value }))}
+                options={formatOptionsWithCounts(resolvedOptions.campaigns)}
+              />
+            ) : null}
+            {hasCreativeOptions ? (
+              <SelectField
+                label="Creative"
+                value={builder.creative}
+                onChange={(value) => setBuilder((current) => ({ ...current, creative: value }))}
+                options={formatOptionsWithCounts(resolvedOptions.creatives)}
+              />
+            ) : null}
+          </div>
+        ) : (
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--color-ink-500)",
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px dashed var(--color-border-strong)",
+              background: "var(--color-panel-soft)",
+              lineHeight: 1.55,
+            }}
+          >
+            Paid-media mirror filters stay hidden until live company, campaign, or creative catalogs resolve from the
+            connected spend mirrors.
+          </div>
+        )}
+
+        {catalog.notes.length > 0 ? (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              padding: "12px 14px",
+              borderRadius: 10,
+              border: "1px solid var(--color-border-soft)",
+              background: "var(--color-panel-soft)",
+            }}
+          >
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--color-ink-500)" }}>
+              Live Filter Notes
+            </div>
+            {catalog.notes.map((note) => (
+              <div key={note} style={{ fontSize: 12, color: "var(--color-ink-600)", lineHeight: 1.5 }}>
+                {note}
+              </div>
+            ))}
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
@@ -258,7 +392,7 @@ export function SegmentsWorkspace({
                   eventRules: [
                     ...current.eventRules,
                     {
-                      eventName: catalog.events.find((option) => option.value !== "all")?.value ?? "session_start",
+                      eventName: resolvedOptions.events.find((option) => option.value !== "all")?.value ?? "session_start",
                       operator: "did" as const,
                       withinDays: 30,
                       minCount: 1,
@@ -285,7 +419,7 @@ export function SegmentsWorkspace({
                     ),
                   }))
                 }
-                options={catalog.events.filter((option) => option.value !== "all").map((option) => ({ value: option.value, label: option.label }))}
+                options={resolvedOptions.events.filter((option) => option.value !== "all").map((option) => ({ value: option.value, label: option.label }))}
               />
               <SelectField
                 label="Operator"
@@ -473,6 +607,16 @@ function summarizeRules(segment: SavedUserSegment) {
     rules.push(`${rule.operator === "did" ? "did" : "did not"} ${rule.eventName} in ${rule.withinDays}d`);
   });
   return rules.length > 0 ? rules : ["No additional rules"];
+}
+
+function formatOptionsWithCounts(options: Array<{ value: string; label: string; count: number }>) {
+  return options.map((option) => ({
+    value: option.value,
+    label:
+      option.value === "all"
+        ? `${option.label}${option.count > 0 ? ` (${option.count.toLocaleString()})` : ""}`
+        : `${option.label} (${option.count.toLocaleString()})`,
+  }));
 }
 
 function TextField({

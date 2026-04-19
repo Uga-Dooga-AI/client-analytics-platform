@@ -178,12 +178,6 @@ function buildForecastPrewarmPlan(settings: AnalyticsProjectBundle["project"]["s
 
 const FORECAST_RUNTIME_METRICS = [
   "revenue",
-  "dau",
-  "installs",
-  "exposures",
-  "activations",
-  "guardrail_crashes",
-  "guardrail_errors",
 ] as const;
 
 export function buildAnalyticsRuntimeBundle(
@@ -400,6 +394,7 @@ export function buildAnalyticsRuntimeBundle(
       "Forecast strategy keeps a project-level matrix of segments, countries, spend sources, and platforms warm and remembers the last N viewed combinations for follow-up precompute.",
       "Cold forecast combinations can be registered through the control plane endpoint so workers can queue or prewarm them without redeploying config.",
       "Workers should PATCH run status back into the control plane so Settings reflects actual runtime progress.",
+      "The current operational forecast worker is restricted to revenue until notebook-parity cohort forecasts replace the daily-series placeholder model.",
     ],
   };
 }
