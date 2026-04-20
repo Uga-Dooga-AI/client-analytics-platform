@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -153,6 +154,8 @@ def patch_run_status(
         body["startedAt"] = context.run.get("startedAt")
     if status in {"succeeded", "failed"}:
         body["finishedAt"] = context.run.get("finishedAt")
+    if status == "blocked":
+        body["finishedAt"] = datetime.now(timezone.utc).isoformat()
 
     try:
         _request("PATCH", f"/api/internal/runs/{run_id}", body)

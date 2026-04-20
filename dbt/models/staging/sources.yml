@@ -53,6 +53,10 @@ sources:
             description: Клиентский user_id (может быть null)
           - name: tracker_name
             description: Название трекера / источника установки
+          - name: tracking_id
+            description: Идентификатор tracking link / source binding из AppMetrica
+          - name: click_url_parameters
+            description: Сырые click URL параметры из installs export; используются для campaign / creative parsing
           - name: country_iso_code
             description: ISO-код страны
           - name: os_name

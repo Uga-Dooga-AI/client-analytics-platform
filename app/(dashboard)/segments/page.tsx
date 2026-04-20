@@ -1,14 +1,47 @@
 import { cookies } from "next/headers";
 import { SegmentsWorkspace } from "@/components/segments-workspace";
 import { TopFilterRail } from "@/components/top-filter-rail";
-import { getSegmentBuilderCatalog } from "@/lib/data/acquisition";
+import { scopeBundles } from "@/lib/dashboard-live";
 import { getProjectLabel, parseDashboardSearchParams } from "@/lib/dashboard-filters";
-import { listAnalyticsProjectOptions } from "@/lib/platform/store";
+import { getLiveSliceCatalog } from "@/lib/data/live-slice-catalog";
+import { listAnalyticsProjectOptions, listAnalyticsProjects } from "@/lib/platform/store";
 import { parseSavedSegmentsCookie, SAVED_SEGMENTS_COOKIE } from "@/lib/segments";
+import type { LiveSliceCatalog } from "@/lib/slice-catalog";
 
 export const dynamic = "force-dynamic";
 
 type SearchParamsInput = Promise<Record<string, string | string[] | undefined>>;
+
+async function withTimeout<T>(work: Promise<T>, timeoutMs: number, fallback: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback()), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function buildEmptyLiveSliceCatalog(note: string): LiveSliceCatalog {
+  return {
+    appmetricaDescriptors: [],
+    mirrorDescriptors: [],
+    mirrorOptions: {
+      companies: [{ value: "all", label: "All companies", count: 0 }],
+      campaigns: [{ value: "all", label: "All campaigns", count: 0 }],
+      creatives: [{ value: "all", label: "All creatives", count: 0 }],
+    },
+    events: [{ value: "all", label: "All events", count: 0 }],
+    notes: [note],
+  };
+}
 
 export default async function SegmentsPage({
   searchParams,
@@ -16,10 +49,25 @@ export default async function SegmentsPage({
   searchParams: SearchParamsInput;
 }) {
   const filters = parseDashboardSearchParams(await searchParams, "/segments");
-  const catalog = getSegmentBuilderCatalog(filters.projectKey);
   const cookieStore = await cookies();
   const savedSegments = parseSavedSegmentsCookie(cookieStore.get(SAVED_SEGMENTS_COOKIE)?.value);
-  const projectOptions = await listAnalyticsProjectOptions();
+  const [projectOptions, bundles] = await Promise.all([
+    listAnalyticsProjectOptions(),
+    listAnalyticsProjects(),
+  ]);
+  const scopedBundles = scopeBundles(bundles, filters.projectKey);
+  const catalog = await withTimeout(
+    getLiveSliceCatalog(scopedBundles, {
+      from: filters.from,
+      to: filters.to,
+      platform: filters.platform,
+    }),
+    12_000,
+    () =>
+      buildEmptyLiveSliceCatalog(
+        "Live slice catalog timed out, so segment filters were reduced to safe defaults for this request."
+      )
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>

@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+function shiftIsoDays(value: string, days: number) {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return parsed.toISOString().slice(0, 10);
+}
+
 describe("analytics run orchestration", () => {
   const previousDemoFlag = process.env.DEMO_ACCESS_ENABLED;
   const globalStore = globalThis as typeof globalThis & {
@@ -72,7 +78,7 @@ describe("analytics run orchestration", () => {
     expect(promotedBoundsRun?.status).toBe("queued");
   });
 
-  it("keeps forecast blocked until a fresh bounds refresh succeeds after the latest ingestion", async () => {
+  it("keeps forecast blocked until a fresh bounds refresh succeeds after the latest ingestion while allowing ingestion to run in parallel", async () => {
     const {
       createAnalyticsProject,
       listAnalyticsProjectRuns,
@@ -139,18 +145,30 @@ describe("analytics run orchestration", () => {
       message: "Bootstrap forecast completed in test.",
     });
 
-    await requestAnalyticsSync(bundle.project.id, {
-      runType: "ingestion",
-      requestedBy: "tester@example.com",
-      triggerKind: "manual",
-    });
-
     runs = await listAnalyticsProjectRuns(bundle.project.id);
-    const incrementalIngestion = runs.find(
+    let incrementalIngestion = runs.find(
       (run) =>
         run.runType === "ingestion" &&
+        run.status === "queued" &&
         run.payload?.sequence !== "initial-bootstrap"
     );
+
+    if (!incrementalIngestion) {
+      await requestAnalyticsSync(bundle.project.id, {
+        runType: "ingestion",
+        requestedBy: "tester@example.com",
+        triggerKind: "manual",
+      });
+
+      runs = await listAnalyticsProjectRuns(bundle.project.id);
+      incrementalIngestion = runs.find(
+        (run) =>
+          run.runType === "ingestion" &&
+          run.status === "queued" &&
+          run.payload?.sequence !== "initial-bootstrap"
+      );
+    }
+
     expect(incrementalIngestion?.status).toBe("queued");
 
     await updateAnalyticsSyncRun(incrementalIngestion!.id, {
@@ -166,7 +184,7 @@ describe("analytics run orchestration", () => {
     });
 
     expect(forecastRun.status).toBe("blocked");
-    expect(forecastRun.message).toContain("Waiting for bounds refresh");
+    expect(forecastRun.message).toContain("bounds refresh");
   });
 
   it("allows appmetrica backfill with warehouse credentials even when source dataset mapping is absent", async () => {
@@ -253,6 +271,65 @@ describe("analytics run orchestration", () => {
     expect(retriedBoundsRun.status).toBe("queued");
   });
 
+  it("returns an existing equivalent queued run instead of creating a duplicate", async () => {
+    const {
+      createAnalyticsProject,
+      listAnalyticsProjectRuns,
+      requestAnalyticsSync,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "duplicate-queued-run",
+        displayName: "Duplicate Queued Run",
+        autoBootstrapOnCreate: false,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigquerySourceProjectId: "analytics-platform-493522",
+        bigquerySourceDataset: "raw",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const firstRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+      windowFrom: "2026-03-20",
+      windowTo: "2026-04-18",
+      payload: {
+        sequence: "post-backfill-refresh",
+        windowKind: "recent-tail",
+      },
+    });
+
+    const duplicateRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+      windowFrom: "2026-03-20",
+      windowTo: "2026-04-18",
+      payload: {
+        sequence: "post-backfill-refresh",
+        windowKind: "recent-tail",
+      },
+    });
+
+    const runs = await listAnalyticsProjectRuns(bundle.project.id);
+    const queuedRecentTailRuns = runs.filter(
+      (run) =>
+        run.runType === "ingestion" &&
+        run.windowFrom === "2026-03-20" &&
+        run.windowTo === "2026-03-22"
+    );
+
+    expect(duplicateRun.id).toBe(firstRun.id);
+    expect(firstRun.payload.ingestionRequestedWindowTo).toBe("2026-04-18");
+    expect(queuedRecentTailRuns).toHaveLength(1);
+  });
+
   it("chunks long backfills while allowing bounds and forecast runs to start from the latest successful source slice", async () => {
     const {
       createAnalyticsProject,
@@ -303,10 +380,26 @@ describe("analytics run orchestration", () => {
     const promotedBounds = runs.find(
       (run) => run.runType === "bounds_refresh" && run.status === "queued"
     );
+    const postBackfillIngestion = runs.find(
+      (run) =>
+        run.runType === "ingestion" &&
+        run.payload?.sequence === "post-backfill-refresh"
+    );
+    const expectedRecentWindowTo = shiftIsoDays(
+      new Date().toISOString().slice(0, 10),
+      -bundle.project.lookbackDays
+    );
+    const expectedRecentWindowFrom = shiftIsoDays(expectedRecentWindowTo, -29);
+    const expectedRecentChunkWindowTo = shiftIsoDays(expectedRecentWindowFrom, 2);
 
     expect(secondBackfill?.status).toBe("queued");
     expect(secondBackfill?.payload.backfillContinuation).toBe(true);
     expect(promotedBounds?.status).toBe("queued");
+    expect(postBackfillIngestion?.status).toBe("queued");
+    expect(postBackfillIngestion?.windowFrom).toBe(expectedRecentWindowFrom);
+    expect(postBackfillIngestion?.windowTo).toBe(expectedRecentChunkWindowTo);
+    expect(postBackfillIngestion?.payload.ingestionRequestedWindowTo).toBe(expectedRecentWindowTo);
+    expect(postBackfillIngestion?.payload.windowKind).toBe("recent-tail");
 
     await updateAnalyticsSyncRun(promotedBounds!.id, {
       status: "succeeded",
@@ -350,5 +443,231 @@ describe("analytics run orchestration", () => {
     const promotedForecastRun = runs.find((run) => run.runType === "forecast");
 
     expect(promotedForecastRun?.status).toBe("queued");
+  });
+
+  it("continues recent-tail ingestion in 3-day chunks until the requested window is exhausted", async () => {
+    const {
+      createAnalyticsProject,
+      listAnalyticsProjectRuns,
+      requestAnalyticsSync,
+      updateAnalyticsSyncRun,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "recent-tail-chunking",
+        displayName: "Recent Tail Chunking",
+        autoBootstrapOnCreate: false,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigquerySourceProjectId: "analytics-platform-493522",
+        bigquerySourceDataset: "raw",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const firstRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+      windowFrom: "2026-03-20",
+      windowTo: "2026-03-26",
+      payload: {
+        sequence: "post-backfill-refresh",
+        windowKind: "recent-tail",
+      },
+    });
+
+    expect(firstRun.windowFrom).toBe("2026-03-20");
+    expect(firstRun.windowTo).toBe("2026-03-22");
+
+    await updateAnalyticsSyncRun(firstRun.id, {
+      status: "succeeded",
+      sourceType: "appmetrica_logs",
+      message: "Recent-tail chunk 1 complete.",
+    });
+
+    let runs = await listAnalyticsProjectRuns(bundle.project.id);
+    const secondRun = runs.find(
+      (run) =>
+        run.runType === "ingestion" &&
+        run.id !== firstRun.id &&
+        run.payload?.recentTailContinuation === true
+    );
+
+    expect(secondRun?.windowFrom).toBe("2026-03-23");
+    expect(secondRun?.windowTo).toBe("2026-03-25");
+
+    await updateAnalyticsSyncRun(secondRun!.id, {
+      status: "succeeded",
+      sourceType: "appmetrica_logs",
+      message: "Recent-tail chunk 2 complete.",
+    });
+
+    runs = await listAnalyticsProjectRuns(bundle.project.id);
+    const thirdRun = runs.find(
+      (run) =>
+        run.runType === "ingestion" &&
+        run.id !== firstRun.id &&
+        run.id !== secondRun!.id &&
+        run.payload?.recentTailContinuation === true
+    );
+
+    expect(thirdRun?.windowFrom).toBe("2026-03-26");
+    expect(thirdRun?.windowTo).toBe("2026-03-26");
+  });
+
+  it("queues a blocked recent-tail ingestion after backfill even when another ingestion run is already pending", async () => {
+    const {
+      createAnalyticsProject,
+      listAnalyticsProjectRuns,
+      requestAnalyticsSync,
+      updateAnalyticsSyncRun,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "recent-tail-priority",
+        displayName: "Recent Tail Priority",
+        autoBootstrapOnCreate: false,
+        initialBackfillDays: 3,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigquerySourceProjectId: "analytics-platform-493522",
+        bigquerySourceDataset: "raw",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const ingestionRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+    const backfillRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "backfill",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    expect(ingestionRun.status).toBe("queued");
+    expect(backfillRun.status).toBe("queued");
+
+    await updateAnalyticsSyncRun(backfillRun.id, {
+      status: "succeeded",
+      sourceType: "appmetrica_logs",
+      message: "Backfill completed while daily ingestion is still pending.",
+    });
+
+    const runs = await listAnalyticsProjectRuns(bundle.project.id);
+    const blockedRecentTailRun = runs.find(
+      (run) =>
+        run.runType === "ingestion" &&
+        run.id !== ingestionRun.id &&
+        run.payload?.sequence === "post-backfill-refresh"
+    );
+
+    expect(blockedRecentTailRun?.status).toBe("blocked");
+    expect(blockedRecentTailRun?.payload.windowKind).toBe("recent-tail");
+  });
+
+  it("does not claim a deferred blocked ingestion before its retry window", async () => {
+    const {
+      claimNextAnalyticsRun,
+      createAnalyticsProject,
+      requestAnalyticsSync,
+      updateAnalyticsSyncRun,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "deferred-ingestion-future",
+        displayName: "Deferred Ingestion Future",
+        autoBootstrapOnCreate: false,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigquerySourceProjectId: "analytics-platform-493522",
+        bigquerySourceDataset: "raw",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const run = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    await updateAnalyticsSyncRun(run.id, {
+      status: "blocked",
+      sourceType: "appmetrica_logs",
+      message: "Waiting for AppMetrica export to become available.",
+      payload: {
+        deferUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        deferReason: "appmetrica_export_pending",
+      },
+    });
+
+    const claimedRun = await claimNextAnalyticsRun(bundle.project.id, {
+      runTypes: ["ingestion"],
+      message: "retry claim",
+    });
+
+    expect(claimedRun).toBeNull();
+  });
+
+  it("promotes a deferred blocked ingestion after its retry window elapses", async () => {
+    const {
+      claimNextAnalyticsRun,
+      createAnalyticsProject,
+      requestAnalyticsSync,
+      updateAnalyticsSyncRun,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "deferred-ingestion-due",
+        displayName: "Deferred Ingestion Due",
+        autoBootstrapOnCreate: false,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigquerySourceProjectId: "analytics-platform-493522",
+        bigquerySourceDataset: "raw",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const run = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    await updateAnalyticsSyncRun(run.id, {
+      status: "blocked",
+      sourceType: "appmetrica_logs",
+      message: "Waiting for AppMetrica export to become available.",
+      payload: {
+        deferUntil: new Date(Date.now() - 60 * 1000).toISOString(),
+        deferReason: "appmetrica_export_pending",
+      },
+    });
+
+    const claimedRun = await claimNextAnalyticsRun(bundle.project.id, {
+      runTypes: ["ingestion"],
+      message: "retry claim",
+    });
+
+    expect(claimedRun?.id).toBe(run.id);
+    expect(claimedRun?.status).toBe("running");
+    expect(claimedRun?.finishedAt).toBeNull();
   });
 });

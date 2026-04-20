@@ -57,7 +57,7 @@ export type AnalyticsCostServiceRow = {
 
 export type AnalyticsCostSnapshot = {
   generatedAt: string;
-  warehouseProjectId: string | null;
+  warehouseProjectIds: string[];
   billingExportConfigured: boolean;
   billingExportTable: string | null;
   billingExportLastUpdatedAt: string | null;
@@ -128,6 +128,25 @@ type StorageListResponse = {
   }>;
 };
 
+type StorageScope = {
+  bucket: string;
+  prefix: string;
+};
+
+type StorageStats = {
+  retainedStageBytes: number;
+  stagedTransferBytesToday: number;
+  stagedTransferBytes30d: number;
+};
+
+type BillingSummary = {
+  warehouseProjectId: string;
+  actualByService: AnalyticsCostServiceRow[];
+  finalizedActual30dUsd: number | null;
+  reportedActualTodayUsd: number | null;
+  lastUpdatedAt: string | null;
+};
+
 function envNumber(name: string, fallback: number) {
   const raw = process.env[name];
   if (!raw) {
@@ -141,6 +160,43 @@ function envNumber(name: string, fallback: number) {
 function toNumber(value: unknown) {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function zeroStorageStats(): StorageStats {
+  return {
+    retainedStageBytes: 0,
+    stagedTransferBytesToday: 0,
+    stagedTransferBytes30d: 0,
+  };
+}
+
+function defaultPipelineStats(): PipelineStatsRow {
+  return {
+    latest_successful_ingestion_at: null,
+    successful_slices_today: 0,
+    skipped_slices_today: 0,
+    successful_slices_30d: 0,
+    skipped_slices_30d: 0,
+    rows_loaded_today: 0,
+    rows_loaded_30d: 0,
+  };
+}
+
+function defaultJobStats(): JobStatsRow {
+  return {
+    bigquery_jobs_today: 0,
+    bigquery_jobs_30d: 0,
+    query_jobs_today: 0,
+    query_jobs_30d: 0,
+    load_jobs_today: 0,
+    load_jobs_30d: 0,
+    bytes_billed_today: 0,
+    bytes_billed_30d: 0,
+    bytes_processed_today: 0,
+    bytes_processed_30d: 0,
+    slot_ms_today: 0,
+    slot_ms_30d: 0,
+  };
 }
 
 function startOfTodayUtc() {
@@ -158,6 +214,62 @@ function estimateBigQueryCostUsd(bytesBilled: number, usdPerTib: number) {
 
 function estimateDailyStorageCostUsd(retainedBytes: number, usdPerGibMonth: number) {
   return (retainedBytes / 1024 ** 3) * (usdPerGibMonth / 30);
+}
+
+function parseGsUri(uri: string): StorageScope | null {
+  if (!uri.startsWith("gs://")) {
+    return null;
+  }
+
+  const remainder = uri.slice("gs://".length);
+  const slashIndex = remainder.indexOf("/");
+  if (slashIndex === -1) {
+    return remainder ? { bucket: remainder, prefix: "" } : null;
+  }
+
+  const bucket = remainder.slice(0, slashIndex).trim();
+  const prefix = remainder.slice(slashIndex + 1).trim();
+  if (!bucket) {
+    return null;
+  }
+
+  return { bucket, prefix };
+}
+
+function listManagedStorageScopes(bundle: AnalyticsProjectBundle): StorageScope[] {
+  const scopes: StorageScope[] = [];
+  const seen = new Set<string>();
+
+  const pushScope = (scope: StorageScope | null) => {
+    if (!scope || !scope.bucket) {
+      return;
+    }
+    const key = `${scope.bucket}|${scope.prefix}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    scopes.push(scope);
+  };
+
+  pushScope({
+    bucket: bundle.project.gcsBucket,
+    prefix: `raw/${bundle.project.slug}/appmetrica/`,
+  });
+
+  const boundsSource = bundle.sources.find((source) => source.sourceType === "bounds_artifacts");
+  const boundsBucket =
+    typeof boundsSource?.config.bucket === "string" ? boundsSource.config.bucket.trim() : "";
+  const boundsPrefix =
+    typeof boundsSource?.config.prefix === "string" ? boundsSource.config.prefix.trim() : "";
+
+  if (boundsBucket && boundsPrefix) {
+    pushScope({ bucket: boundsBucket, prefix: boundsPrefix });
+  } else {
+    pushScope(parseGsUri(bundle.project.boundsPath));
+  }
+
+  return scopes;
 }
 
 async function queryPipelineStats(context: ProjectQueryContext): Promise<PipelineStatsRow> {
@@ -192,15 +304,7 @@ async function queryPipelineStats(context: ProjectQueryContext): Promise<Pipelin
     [{ name: "gcs_uri_prefix", type: "STRING", value: gcsUriPrefix }]
   );
 
-  return rows[0] ?? {
-    latest_successful_ingestion_at: null,
-    successful_slices_today: 0,
-    skipped_slices_today: 0,
-    successful_slices_30d: 0,
-    skipped_slices_30d: 0,
-    rows_loaded_today: 0,
-    rows_loaded_30d: 0,
-  };
+  return rows[0] ?? defaultPipelineStats();
 }
 
 async function queryJobStats(context: ProjectQueryContext): Promise<JobStatsRow> {
@@ -249,91 +353,73 @@ async function queryJobStats(context: ProjectQueryContext): Promise<JobStatsRow>
     ]
   );
 
-  return rows[0] ?? {
-    bigquery_jobs_today: 0,
-    bigquery_jobs_30d: 0,
-    query_jobs_today: 0,
-    query_jobs_30d: 0,
-    load_jobs_today: 0,
-    load_jobs_30d: 0,
-    bytes_billed_today: 0,
-    bytes_billed_30d: 0,
-    bytes_processed_today: 0,
-    bytes_processed_30d: 0,
-    slot_ms_today: 0,
-    slot_ms_30d: 0,
-  };
+  return rows[0] ?? defaultJobStats();
 }
 
 async function queryStorageStats(context: ProjectQueryContext) {
   const token = await getAccessToken(context.serviceAccount);
-  const prefix = `raw/${context.bundle.project.slug}/appmetrica/`;
+  const scopes = listManagedStorageScopes(context.bundle);
   const todayStart = startOfTodayUtc();
   const thirtyDaysAgo = thirtyDaysAgoUtc();
-  let nextPageToken: string | undefined;
-  let retainedStageBytes = 0;
-  let stagedTransferBytesToday = 0;
-  let stagedTransferBytes30d = 0;
+  const totals = zeroStorageStats();
 
-  do {
-    const params = new URLSearchParams({
-      prefix,
-      fields: "items(name,size,updated),nextPageToken",
-      maxResults: "1000",
-    });
-    if (nextPageToken) {
-      params.set("pageToken", nextPageToken);
-    }
+  for (const scope of scopes) {
+    let nextPageToken: string | undefined;
 
-    const response = await fetch(
-      `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(context.bundle.project.gcsBucket)}/o?${params.toString()}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "x-goog-user-project": context.warehouseProjectId,
-        },
-        cache: "no-store",
+    do {
+      const params = new URLSearchParams({
+        prefix: scope.prefix,
+        fields: "items(name,size,updated),nextPageToken",
+        maxResults: "1000",
+      });
+      if (nextPageToken) {
+        params.set("pageToken", nextPageToken);
       }
-    );
 
-    if (!response.ok) {
-      throw new Error(`GCS inventory query failed: ${response.status} ${await response.text()}`);
-    }
+      const response = await fetch(
+        `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(scope.bucket)}/o?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "x-goog-user-project": context.warehouseProjectId,
+          },
+          cache: "no-store",
+        }
+      );
 
-    const payload = (await response.json()) as StorageListResponse;
-    for (const entry of payload.items ?? []) {
-      const size = Number(entry.size ?? 0);
-      retainedStageBytes += size;
-
-      const updatedAt = entry.updated ? new Date(entry.updated) : null;
-      if (updatedAt && updatedAt >= thirtyDaysAgo) {
-        stagedTransferBytes30d += size;
+      if (!response.ok) {
+        throw new Error(
+          `GCS inventory query failed for gs://${scope.bucket}/${scope.prefix}: ${response.status} ${await response.text()}`
+        );
       }
-      if (updatedAt && updatedAt >= todayStart) {
-        stagedTransferBytesToday += size;
+
+      const payload = (await response.json()) as StorageListResponse;
+      for (const entry of payload.items ?? []) {
+        const size = Number(entry.size ?? 0);
+        totals.retainedStageBytes += size;
+
+        const updatedAt = entry.updated ? new Date(entry.updated) : null;
+        if (updatedAt && updatedAt >= thirtyDaysAgo) {
+          totals.stagedTransferBytes30d += size;
+        }
+        if (updatedAt && updatedAt >= todayStart) {
+          totals.stagedTransferBytesToday += size;
+        }
       }
-    }
 
-    nextPageToken = payload.nextPageToken;
-  } while (nextPageToken);
+      nextPageToken = payload.nextPageToken;
+    } while (nextPageToken);
+  }
 
-  return {
-    retainedStageBytes,
-    stagedTransferBytesToday,
-    stagedTransferBytes30d,
-  };
+  return totals;
 }
 
 async function queryBillingExportSummary(
   context: ProjectQueryContext
-): Promise<{
-  actualByService: AnalyticsCostServiceRow[];
-  finalizedActual30dUsd: number | null;
-  reportedActualTodayUsd: number | null;
-  lastUpdatedAt: string | null;
-}> {
+): Promise<BillingSummary> {
   if (!BILLING_EXPORT_TABLE) {
     return {
+      warehouseProjectId: context.warehouseProjectId,
       actualByService: [],
       finalizedActual30dUsd: null,
       reportedActualTodayUsd: null,
@@ -350,15 +436,27 @@ async function queryBillingExportSummary(
           SUM(
             IF(
               DATE(usage_start_time) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY),
-              cost,
-              0
+              CAST(cost AS NUMERIC),
+              CAST(0 AS NUMERIC)
+            )
+          ) + SUM(
+            IF(
+              DATE(usage_start_time) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY),
+              IFNULL((SELECT SUM(CAST(c.amount AS NUMERIC)) FROM UNNEST(credits) AS c), CAST(0 AS NUMERIC)),
+              CAST(0 AS NUMERIC)
             )
           ),
           6
         ) AS finalized_cost_30d_usd,
         ROUND(
           SUM(
-            IF(DATE(usage_start_time) = CURRENT_DATE(), cost, 0)
+            IF(DATE(usage_start_time) = CURRENT_DATE(), CAST(cost AS NUMERIC), CAST(0 AS NUMERIC))
+          ) + SUM(
+            IF(
+              DATE(usage_start_time) = CURRENT_DATE(),
+              IFNULL((SELECT SUM(CAST(c.amount AS NUMERIC)) FROM UNNEST(credits) AS c), CAST(0 AS NUMERIC)),
+              CAST(0 AS NUMERIC)
+            )
           ),
           6
         ) AS reported_cost_today_usd,
@@ -389,6 +487,7 @@ async function queryBillingExportSummary(
   );
 
   return {
+    warehouseProjectId: context.warehouseProjectId,
     actualByService,
     finalizedActual30dUsd,
     reportedActualTodayUsd,
@@ -441,103 +540,81 @@ async function buildProjectRow(
     };
   }
 
-  try {
-    const [pipeline, jobs, storage] = await Promise.all([
-      queryPipelineStats(context),
-      queryJobStats(context),
-      queryStorageStats(context),
-    ]);
+  const [pipelineResult, jobsResult, storageResult] = await Promise.allSettled([
+    queryPipelineStats(context),
+    queryJobStats(context),
+    queryStorageStats(context),
+  ]);
 
-    const estimatedBigQueryCostTodayUsd = estimateBigQueryCostUsd(
-      toNumber(jobs.bytes_billed_today),
-      coefficients.bigQueryUsdPerTib
-    );
-    const estimatedBigQueryCost30dUsd = estimateBigQueryCostUsd(
-      toNumber(jobs.bytes_billed_30d),
-      coefficients.bigQueryUsdPerTib
-    );
-    const estimatedStorageCostTodayUsd = estimateDailyStorageCostUsd(
-      storage.retainedStageBytes,
-      coefficients.storageUsdPerGibMonth
-    );
-    const estimatedStorageCost30dUsd =
-      (storage.retainedStageBytes / 1024 ** 3) * coefficients.storageUsdPerGibMonth;
+  const pipeline =
+    pipelineResult.status === "fulfilled" ? pipelineResult.value : defaultPipelineStats();
+  const jobs = jobsResult.status === "fulfilled" ? jobsResult.value : defaultJobStats();
+  const storage =
+    storageResult.status === "fulfilled" ? storageResult.value : zeroStorageStats();
 
-    return {
-      projectId: bundle.project.id,
-      projectSlug: bundle.project.slug,
-      projectName: bundle.project.displayName,
-      status: "ready",
-      latestSuccessfulIngestionAt: pipeline.latest_successful_ingestion_at,
-      successfulSlicesToday: toNumber(pipeline.successful_slices_today),
-      skippedSlicesToday: toNumber(pipeline.skipped_slices_today),
-      successfulSlices30d: toNumber(pipeline.successful_slices_30d),
-      skippedSlices30d: toNumber(pipeline.skipped_slices_30d),
-      rowsLoadedToday: toNumber(pipeline.rows_loaded_today),
-      rowsLoaded30d: toNumber(pipeline.rows_loaded_30d),
-      retainedStageBytes: storage.retainedStageBytes,
-      stagedTransferBytesToday: storage.stagedTransferBytesToday,
-      stagedTransferBytes30d: storage.stagedTransferBytes30d,
-      bigQueryJobsToday: toNumber(jobs.bigquery_jobs_today),
-      bigQueryJobs30d: toNumber(jobs.bigquery_jobs_30d),
-      queryJobsToday: toNumber(jobs.query_jobs_today),
-      queryJobs30d: toNumber(jobs.query_jobs_30d),
-      loadJobsToday: toNumber(jobs.load_jobs_today),
-      loadJobs30d: toNumber(jobs.load_jobs_30d),
-      bytesBilledToday: toNumber(jobs.bytes_billed_today),
-      bytesBilled30d: toNumber(jobs.bytes_billed_30d),
-      bytesProcessedToday: toNumber(jobs.bytes_processed_today),
-      bytesProcessed30d: toNumber(jobs.bytes_processed_30d),
-      slotMsToday: toNumber(jobs.slot_ms_today),
-      slotMs30d: toNumber(jobs.slot_ms_30d),
-      estimatedBigQueryCostTodayUsd,
-      estimatedBigQueryCost30dUsd,
-      estimatedStorageCostTodayUsd,
-      estimatedStorageCost30dUsd,
-      estimatedTotalTodayUsd: estimatedBigQueryCostTodayUsd + estimatedStorageCostTodayUsd,
-      estimatedTotal30dUsd: estimatedBigQueryCost30dUsd + estimatedStorageCost30dUsd,
-      attributedActualFinalized30dUsd: null,
-      error: null,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown analytics ops error.";
-    return {
-      projectId: bundle.project.id,
-      projectSlug: bundle.project.slug,
-      projectName: bundle.project.displayName,
-      status: "partial",
-      latestSuccessfulIngestionAt: null,
-      successfulSlicesToday: 0,
-      skippedSlicesToday: 0,
-      successfulSlices30d: 0,
-      skippedSlices30d: 0,
-      rowsLoadedToday: 0,
-      rowsLoaded30d: 0,
-      retainedStageBytes: 0,
-      stagedTransferBytesToday: 0,
-      stagedTransferBytes30d: 0,
-      bigQueryJobsToday: 0,
-      bigQueryJobs30d: 0,
-      queryJobsToday: 0,
-      queryJobs30d: 0,
-      loadJobsToday: 0,
-      loadJobs30d: 0,
-      bytesBilledToday: 0,
-      bytesBilled30d: 0,
-      bytesProcessedToday: 0,
-      bytesProcessed30d: 0,
-      slotMsToday: 0,
-      slotMs30d: 0,
-      estimatedBigQueryCostTodayUsd: 0,
-      estimatedBigQueryCost30dUsd: 0,
-      estimatedStorageCostTodayUsd: 0,
-      estimatedStorageCost30dUsd: 0,
-      estimatedTotalTodayUsd: 0,
-      estimatedTotal30dUsd: 0,
-      attributedActualFinalized30dUsd: null,
-      error: message,
-    };
-  }
+  const errors = [
+    pipelineResult.status === "rejected"
+      ? `pipeline telemetry failed: ${pipelineResult.reason instanceof Error ? pipelineResult.reason.message : "Unknown error"}`
+      : null,
+    jobsResult.status === "rejected"
+      ? `BigQuery job telemetry failed: ${jobsResult.reason instanceof Error ? jobsResult.reason.message : "Unknown error"}`
+      : null,
+    storageResult.status === "rejected"
+      ? `storage telemetry failed: ${storageResult.reason instanceof Error ? storageResult.reason.message : "Unknown error"}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const estimatedBigQueryCostTodayUsd = estimateBigQueryCostUsd(
+    toNumber(jobs.bytes_billed_today),
+    coefficients.bigQueryUsdPerTib
+  );
+  const estimatedBigQueryCost30dUsd = estimateBigQueryCostUsd(
+    toNumber(jobs.bytes_billed_30d),
+    coefficients.bigQueryUsdPerTib
+  );
+  const estimatedStorageCostTodayUsd = estimateDailyStorageCostUsd(
+    storage.retainedStageBytes,
+    coefficients.storageUsdPerGibMonth
+  );
+  const estimatedStorageCost30dUsd =
+    (storage.retainedStageBytes / 1024 ** 3) * coefficients.storageUsdPerGibMonth;
+
+  return {
+    projectId: bundle.project.id,
+    projectSlug: bundle.project.slug,
+    projectName: bundle.project.displayName,
+    status: errors.length === 0 ? "ready" : "partial",
+    latestSuccessfulIngestionAt: pipeline.latest_successful_ingestion_at,
+    successfulSlicesToday: toNumber(pipeline.successful_slices_today),
+    skippedSlicesToday: toNumber(pipeline.skipped_slices_today),
+    successfulSlices30d: toNumber(pipeline.successful_slices_30d),
+    skippedSlices30d: toNumber(pipeline.skipped_slices_30d),
+    rowsLoadedToday: toNumber(pipeline.rows_loaded_today),
+    rowsLoaded30d: toNumber(pipeline.rows_loaded_30d),
+    retainedStageBytes: storage.retainedStageBytes,
+    stagedTransferBytesToday: storage.stagedTransferBytesToday,
+    stagedTransferBytes30d: storage.stagedTransferBytes30d,
+    bigQueryJobsToday: toNumber(jobs.bigquery_jobs_today),
+    bigQueryJobs30d: toNumber(jobs.bigquery_jobs_30d),
+    queryJobsToday: toNumber(jobs.query_jobs_today),
+    queryJobs30d: toNumber(jobs.query_jobs_30d),
+    loadJobsToday: toNumber(jobs.load_jobs_today),
+    loadJobs30d: toNumber(jobs.load_jobs_30d),
+    bytesBilledToday: toNumber(jobs.bytes_billed_today),
+    bytesBilled30d: toNumber(jobs.bytes_billed_30d),
+    bytesProcessedToday: toNumber(jobs.bytes_processed_today),
+    bytesProcessed30d: toNumber(jobs.bytes_processed_30d),
+    slotMsToday: toNumber(jobs.slot_ms_today),
+    slotMs30d: toNumber(jobs.slot_ms_30d),
+    estimatedBigQueryCostTodayUsd,
+    estimatedBigQueryCost30dUsd,
+    estimatedStorageCostTodayUsd,
+    estimatedStorageCost30dUsd,
+    estimatedTotalTodayUsd: estimatedBigQueryCostTodayUsd + estimatedStorageCostTodayUsd,
+    estimatedTotal30dUsd: estimatedBigQueryCost30dUsd + estimatedStorageCost30dUsd,
+    attributedActualFinalized30dUsd: null,
+    error: errors.length > 0 ? errors.join(" | ") : null,
+  };
 }
 
 export async function getAnalyticsCostSnapshot(): Promise<AnalyticsCostSnapshot> {
@@ -558,52 +635,128 @@ export async function getAnalyticsCostSnapshot(): Promise<AnalyticsCostSnapshot>
     bundles.map((bundle) => buildProjectRow(bundle, contexts.get(bundle.project.id), coefficients))
   );
 
-  const primaryContext = Array.from(contexts.values())[0];
-  const billingSummary = primaryContext
-    ? await queryBillingExportSummary(primaryContext).catch(() => ({
-        actualByService: [],
-        finalizedActual30dUsd: null,
-        reportedActualTodayUsd: null,
-        lastUpdatedAt: null,
-      }))
-    : {
-        actualByService: [],
-        finalizedActual30dUsd: null,
-        reportedActualTodayUsd: null,
-        lastUpdatedAt: null,
-      };
+  const warehouseContexts = new Map<string, ProjectQueryContext>();
+  for (const context of contexts.values()) {
+    if (!warehouseContexts.has(context.warehouseProjectId)) {
+      warehouseContexts.set(context.warehouseProjectId, context);
+    }
+  }
 
-  const provisionalTotal30d = projects.reduce(
-    (sum, row) => sum + row.estimatedTotal30dUsd,
-    0
+  const warehouseProjectIds = Array.from(warehouseContexts.keys()).sort();
+  const billingWarnings: string[] = [];
+  const billingByWarehouse = new Map<string, BillingSummary>();
+  const billingInputs = Array.from(warehouseContexts.entries());
+  const billingResults = await Promise.allSettled(
+    billingInputs.map(async ([warehouseProjectId, context]) => ({
+      warehouseProjectId,
+      summary: await queryBillingExportSummary(context),
+    }))
   );
-  const finalizedActual30dUsd = billingSummary.finalizedActual30dUsd;
+
+  for (const [index, result] of billingResults.entries()) {
+    const warehouseProjectId = billingInputs[index]?.[0];
+    if (!warehouseProjectId) {
+      continue;
+    }
+
+    if (result.status === "fulfilled") {
+      billingByWarehouse.set(warehouseProjectId, result.value.summary);
+      continue;
+    }
+
+    const message = result.reason instanceof Error ? result.reason.message : "Unknown billing export error.";
+    billingWarnings.push(`Billing export query failed for warehouse ${warehouseProjectId}: ${message}`);
+  }
+
+  const provisionalTotal30dByWarehouse = new Map<string, number>();
+  for (const row of projects) {
+    const context = contexts.get(row.projectId);
+    if (!context) {
+      continue;
+    }
+    provisionalTotal30dByWarehouse.set(
+      context.warehouseProjectId,
+      (provisionalTotal30dByWarehouse.get(context.warehouseProjectId) ?? 0) + row.estimatedTotal30dUsd
+    );
+  }
+
   const projectsWithActuals = projects.map((row) => ({
     ...row,
     attributedActualFinalized30dUsd:
-      finalizedActual30dUsd != null && provisionalTotal30d > 0
-        ? (row.estimatedTotal30dUsd / provisionalTotal30d) * finalizedActual30dUsd
-        : null,
+      (() => {
+        const context = contexts.get(row.projectId);
+        if (!context) {
+          return null;
+        }
+
+        const billingSummary = billingByWarehouse.get(context.warehouseProjectId);
+        const provisionalTotal30d = provisionalTotal30dByWarehouse.get(context.warehouseProjectId) ?? 0;
+        if (!billingSummary || billingSummary.finalizedActual30dUsd == null || provisionalTotal30d <= 0) {
+          return null;
+        }
+
+        return (row.estimatedTotal30dUsd / provisionalTotal30d) * billingSummary.finalizedActual30dUsd;
+      })(),
   }));
+
+  const billingSummaries = Array.from(billingByWarehouse.values());
+  const actualByService = Array.from(
+    billingSummaries
+      .reduce((services, summary) => {
+        for (const row of summary.actualByService) {
+          const current = services.get(row.serviceDescription) ?? {
+            serviceDescription: row.serviceDescription,
+            finalizedCost30dUsd: 0,
+            reportedCostTodayUsd: 0,
+          };
+          current.finalizedCost30dUsd += row.finalizedCost30dUsd;
+          current.reportedCostTodayUsd += row.reportedCostTodayUsd;
+          services.set(row.serviceDescription, current);
+        }
+        return services;
+      }, new Map<string, AnalyticsCostServiceRow>())
+      .values()
+  ).sort((left, right) => right.finalizedCost30dUsd - left.finalizedCost30dUsd);
+
+  const hasBillingActuals = billingSummaries.length > 0;
+  const finalizedActual30dUsd = hasBillingActuals
+    ? billingSummaries.reduce((sum, summary) => sum + (summary.finalizedActual30dUsd ?? 0), 0)
+    : null;
+  const reportedActualTodayUsd = hasBillingActuals
+    ? billingSummaries.reduce((sum, summary) => sum + (summary.reportedActualTodayUsd ?? 0), 0)
+    : null;
+  const billingExportLastUpdatedAt = billingSummaries
+    .map((summary) => summary.lastUpdatedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1) ?? null;
 
   const warnings: string[] = [];
   if (!BILLING_EXPORT_TABLE) {
     warnings.push(
       "Actual finalized cost is unavailable until ANALYTICS_BILLING_EXPORT_TABLE points to a Cloud Billing export table."
     );
+  } else {
+    warnings.push(
+      "Per-project finalized actual is an allocation inside each warehouse project, not a direct billing row per client project."
+    );
+  }
+  if (warehouseProjectIds.length > 1) {
+    warnings.push(`This snapshot spans multiple warehouse projects: ${warehouseProjectIds.join(", ")}.`);
   }
   if (projectsWithActuals.some((row) => row.status !== "ready")) {
     warnings.push(
-      "Some projects could not be measured completely because their BigQuery or storage credentials are incomplete or the warehouse query failed."
+      "Some projects could not be measured completely because their BigQuery or storage credentials are incomplete or part of the warehouse query failed."
     );
   }
+  warnings.push(...billingWarnings);
 
   return {
     generatedAt: new Date().toISOString(),
-    warehouseProjectId: primaryContext?.warehouseProjectId ?? null,
+    warehouseProjectIds,
     billingExportConfigured: Boolean(BILLING_EXPORT_TABLE),
     billingExportTable: BILLING_EXPORT_TABLE || null,
-    billingExportLastUpdatedAt: billingSummary.lastUpdatedAt,
+    billingExportLastUpdatedAt,
     estimationCoefficients: coefficients,
     totals: {
       trackedProjects: projectsWithActuals.length,
@@ -633,7 +786,7 @@ export async function getAnalyticsCostSnapshot(): Promise<AnalyticsCostSnapshot>
         0
       ),
       finalizedActual30dUsd,
-      reportedActualTodayUsd: billingSummary.reportedActualTodayUsd,
+      reportedActualTodayUsd,
       retainedStageBytes: projectsWithActuals.reduce(
         (sum, row) => sum + row.retainedStageBytes,
         0
@@ -655,7 +808,7 @@ export async function getAnalyticsCostSnapshot(): Promise<AnalyticsCostSnapshot>
         0
       ),
     },
-    actualByService: billingSummary.actualByService,
+    actualByService,
     projects: projectsWithActuals.sort(
       (left, right) => right.estimatedTotal30dUsd - left.estimatedTotal30dUsd
     ),

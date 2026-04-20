@@ -39,11 +39,10 @@ forecast:
   # Confidence interval width (0.0–1.0)
   confidence_interval: 0.8
 
-  # Metric set to forecast from mart_experiment_daily
+  # Metric set to forecast. Keep this restricted to decay-compatible metrics
+  # until notebook-parity cohort forecasting lands in the runtime.
   metrics:
     - revenue
-    - exposures
-    - activations
 
   # Bounds manifest location
   bounds_bucket: REPLACE_WITH_BUCKET_NAME

@@ -1,18 +1,37 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import type { ComparisonConfidenceChartData } from "@/lib/data/acquisition";
+import { useMemo, useState, type ReactNode } from "react";
+import type {
+  ComparisonChartGroup,
+  ComparisonConfidenceChartData,
+} from "@/lib/data/acquisition";
+
+export type ComparisonConfidenceChartOverlay = {
+  label: string;
+  groups: ComparisonChartGroup[];
+  bandAlpha?: number;
+};
 
 export function ComparisonConfidenceChart({
   chart,
+  overlay,
+  headerAccessory,
+  footer,
 }: {
   chart: ComparisonConfidenceChartData;
+  overlay?: ComparisonConfidenceChartOverlay;
+  headerAccessory?: ReactNode;
+  footer?: ReactNode;
 }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [hiddenGroupLabels, setHiddenGroupLabels] = useState<Set<string>>(new Set());
   const visibleGroups = useMemo(
     () => chart.groups.filter((group) => !hiddenGroupLabels.has(group.label)),
     [chart.groups, hiddenGroupLabels]
+  );
+  const visibleOverlayGroups = useMemo(
+    () => overlay?.groups.filter((group) => !hiddenGroupLabels.has(group.label)) ?? [],
+    [hiddenGroupLabels, overlay?.groups]
   );
 
   if (chart.groups.length === 0 || chart.groups[0]?.series.length === 0) {
@@ -61,14 +80,19 @@ export function ComparisonConfidenceChart({
   const chartHeight = height - paddingTop - paddingBottom;
 
   const allPoints = visibleGroups.flatMap((group) => group.series);
+  const overlayPoints = visibleOverlayGroups.flatMap((group) => group.series);
   const referenceLines = chart.yAxis?.referenceLines ?? [];
   const upperCandidates = [
     ...allPoints.map((point) => point.upper).filter(isFiniteNumber),
+    ...overlayPoints.map((point) => point.upper).filter(isFiniteNumber),
+    ...overlayPoints.map((point) => point.value).filter(isFiniteNumber),
     ...referenceLines.map((line) => line.value),
     ...(typeof chart.yAxis?.max === "number" ? [chart.yAxis.max] : []),
   ];
   const lowerCandidates = [
     ...allPoints.map((point) => point.lower).filter(isFiniteNumber),
+    ...overlayPoints.map((point) => point.lower).filter(isFiniteNumber),
+    ...overlayPoints.map((point) => point.value).filter(isFiniteNumber),
     ...referenceLines.map((line) => line.value),
     ...(typeof chart.yAxis?.min === "number" ? [chart.yAxis.min] : []),
   ];
@@ -105,9 +129,13 @@ export function ComparisonConfidenceChart({
         lower: group.series[hoveredIndex]?.lower ?? null,
         upper: group.series[hoveredIndex]?.upper ?? null,
         actual: group.series[hoveredIndex]?.actual ?? null,
+        overlay:
+          visibleOverlayGroups.find((overlayGroup) => overlayGroup.label === group.label)?.series[
+            hoveredIndex
+          ] ?? null,
       })),
     };
-  }, [chart.groups, domainCount, hoveredIndex, visibleGroups]);
+  }, [chart.groups, domainCount, hoveredIndex, visibleGroups, visibleOverlayGroups]);
 
   function toggleGroup(groupLabel: string) {
     setHiddenGroupLabels((current) => {
@@ -138,42 +166,45 @@ export function ComparisonConfidenceChart({
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-start", justifyContent: "flex-end" }}>
-          {chart.groups.map((group) => (
-            <button
-              key={group.label}
-              type="button"
-              onClick={() => toggleGroup(group.label)}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                fontSize: 11.5,
-                color: "var(--color-ink-600)",
-                borderRadius: 999,
-                border: hiddenGroupLabels.has(group.label)
-                  ? "1px solid var(--color-border-soft)"
-                  : `1px solid ${group.color}`,
-                background: hiddenGroupLabels.has(group.label)
-                  ? "var(--color-panel-soft)"
-                  : "var(--color-panel-base)",
-                padding: "5px 10px",
-                cursor: "pointer",
-                opacity: hiddenGroupLabels.has(group.label) ? 0.55 : 1,
-              }}
-            >
-              <span
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-end" }}>
+          {headerAccessory}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-start", justifyContent: "flex-end" }}>
+            {chart.groups.map((group) => (
+              <button
+                key={group.label}
+                type="button"
+                onClick={() => toggleGroup(group.label)}
                 style={{
-                  width: 12,
-                  height: 12,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 11.5,
+                  color: "var(--color-ink-600)",
                   borderRadius: 999,
-                  background: group.color,
-                  border: "1px solid rgba(15, 23, 42, 0.08)",
+                  border: hiddenGroupLabels.has(group.label)
+                    ? "1px solid var(--color-border-soft)"
+                    : `1px solid ${group.color}`,
+                  background: hiddenGroupLabels.has(group.label)
+                    ? "var(--color-panel-soft)"
+                    : "var(--color-panel-base)",
+                  padding: "5px 10px",
+                  cursor: "pointer",
+                  opacity: hiddenGroupLabels.has(group.label) ? 0.55 : 1,
                 }}
-              />
-              {group.label}
-            </button>
-          ))}
+              >
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: 999,
+                    background: group.color,
+                    border: "1px solid rgba(15, 23, 42, 0.08)",
+                  }}
+                />
+                {group.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -208,8 +239,11 @@ export function ComparisonConfidenceChart({
                       <div style={{ marginTop: 3, fontSize: 11.5, opacity: 0.86, lineHeight: 1.45 }}>
                         {item.value === null
                           ? "No forecast for this point"
-                          : `Predicted ${formatChartValue(item.value, chart.unit)} · band ${formatChartValue(item.lower, chart.unit)}–${formatChartValue(item.upper, chart.unit)}`}
+                          : `Forecast ${formatChartValue(item.value, chart.unit)} · bounds ${formatChartValue(item.lower, chart.unit)}–${formatChartValue(item.upper, chart.unit)}`}
                         {item.actual !== null ? ` · actual ${formatChartValue(item.actual, chart.unit)}` : ""}
+                        {item.overlay && overlay
+                          ? ` · ${overlay.label} ${formatChartValue(item.overlay.value, chart.unit)} (${formatChartValue(item.overlay.lower, chart.unit)}–${formatChartValue(item.overlay.upper, chart.unit)})`
+                          : ""}
                       </div>
                     </div>
                   </div>
@@ -307,8 +341,8 @@ export function ComparisonConfidenceChart({
                     d={path}
                     fill="none"
                     stroke={group.actualColor ?? group.color}
-                    strokeDasharray="4 4"
                     strokeWidth="1.8"
+                    strokeDasharray="4 4"
                     strokeLinejoin="round"
                     strokeLinecap="round"
                   />
@@ -319,7 +353,12 @@ export function ComparisonConfidenceChart({
                   return (
                     <g key={`${group.label}-${point.label}`}>
                       {isFiniteNumber(point.value) ? (
-                        <circle cx={getX(index, group.series.length)} cy={getY(point.value)} r={active ? "5" : "3.3"} fill={group.color} />
+                        <circle
+                          cx={getX(index, group.series.length)}
+                          cy={getY(point.value)}
+                          r={active ? "5" : "3.3"}
+                          fill={group.color}
+                        />
                       ) : null}
                       {isFiniteNumber(actualValue) ? (
                         <circle
@@ -332,6 +371,53 @@ export function ComparisonConfidenceChart({
                     </g>
                   );
                 })}
+              </g>
+            );
+          })}
+
+          {visibleOverlayGroups.map((group) => {
+            const bandPaths = buildBandPaths(group.series, group.series.length, getX, getY);
+            const predictedPaths = buildLinePaths(
+              group.series,
+              group.series.length,
+              getX,
+              getY,
+              (point) => point.value
+            );
+
+            return (
+              <g key={`overlay-${group.label}`}>
+                {bandPaths.map((path, index) => (
+                  <path
+                    key={`overlay-${group.label}-band-${index}`}
+                    d={path}
+                    fill={toAlpha(group.color, overlay?.bandAlpha ?? 0.14)}
+                  />
+                ))}
+                {predictedPaths.map((path, index) => (
+                  <path
+                    key={`overlay-${group.label}-predicted-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={group.color}
+                    strokeWidth="2.2"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                ))}
+                {group.series.map((point, index) =>
+                  isFiniteNumber(point.value) ? (
+                    <circle
+                      key={`overlay-${group.label}-${point.label}`}
+                      cx={getX(index, group.series.length)}
+                      cy={getY(point.value)}
+                      r={hoveredIndex === index ? "4.3" : "2.8"}
+                      fill={group.color}
+                      stroke="rgba(255, 255, 255, 0.75)"
+                      strokeWidth="1.2"
+                    />
+                  ) : null
+                )}
               </g>
             );
           })}
@@ -368,6 +454,7 @@ export function ComparisonConfidenceChart({
           })}
         </svg>
       </div>
+      {footer ? <div style={{ marginTop: 14 }}>{footer}</div> : null}
     </section>
   );
 }

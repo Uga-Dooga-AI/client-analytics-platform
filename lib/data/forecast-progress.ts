@@ -65,9 +65,22 @@ function stageProgress(status: ForecastPipelineStageStatus) {
 }
 
 function compareRunFreshness(left: AnalyticsSyncRunRecord, right: AnalyticsSyncRunRecord) {
-  const leftTime = left.finishedAt?.getTime() ?? left.startedAt?.getTime() ?? left.requestedAt.getTime();
-  const rightTime = right.finishedAt?.getTime() ?? right.startedAt?.getTime() ?? right.requestedAt.getTime();
+  const leftTime = runFreshnessTime(left);
+  const rightTime = runFreshnessTime(right);
   return leftTime - rightTime;
+}
+
+function runFreshnessTime(run: AnalyticsSyncRunRecord) {
+  return run.finishedAt?.getTime() ?? run.startedAt?.getTime() ?? run.requestedAt.getTime();
+}
+
+function parseSerializedDate(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function sortRunsByFreshness(runs: AnalyticsSyncRunRecord[]) {
@@ -223,6 +236,9 @@ function buildBoundsStage(
   bundle: AnalyticsProjectBundle,
   sourceStage: ForecastPipelineStage
 ): ForecastPipelineStage {
+  const manualOnly = bundle.project.boundsIntervalHours <= 0;
+  const boundsSource =
+    bundle.sources.find((source) => source.sourceType === "bounds_artifacts") ?? null;
   const active = latestActiveRun(bundle, ["bounds_refresh"]);
   if (active) {
     return buildRunStage("bounds", "Bounds Refresh", active);
@@ -231,6 +247,42 @@ function buildBoundsStage(
   const failed = latestFailedRun(bundle, ["bounds_refresh"]);
   const success = latestSuccessfulRun(bundle, ["bounds_refresh"]);
   const latestSourceSuccess = latestSuccessfulRun(bundle, ["backfill", "ingestion"]);
+
+  if (manualOnly) {
+    const artifactUpdatedAt = serializeDate(
+      boundsSource?.lastSyncAt ?? success?.finishedAt ?? success?.startedAt ?? success?.requestedAt
+    );
+
+    if (boundsSource?.lastSyncAt || success) {
+      return {
+        key: "bounds",
+        label: "Bounds Refresh",
+        status: "ready",
+        message:
+          "Bounds rebuild is manual-only for this project. Existing bounds artifacts stay in use until you explicitly request a rebuild.",
+        progressPercent: stageProgress("ready"),
+        updatedAt: artifactUpdatedAt,
+        runId: success?.id ?? null,
+        runType: success?.runType ?? null,
+      };
+    }
+
+    return {
+      key: "bounds",
+      label: "Bounds Refresh",
+      status: sourceStage.status === "waiting_credentials" ? "waiting_credentials" : "blocked",
+      message:
+        sourceStage.status === "waiting_credentials"
+          ? "Bounds are manual-only, and the first build cannot run until critical source credentials are fixed."
+          : "Bounds are manual-only and no successful bounds artifact is recorded yet. Run a manual bounds rebuild only if you explicitly need new empirical intervals.",
+      progressPercent: stageProgress(
+        sourceStage.status === "waiting_credentials" ? "waiting_credentials" : "blocked"
+      ),
+      updatedAt: null,
+      runId: null,
+      runType: null,
+    };
+  }
 
   if (failed && (!success || compareRunFreshness(failed, success) > 0)) {
     return buildRunStage("bounds", "Bounds Refresh", failed);
@@ -313,7 +365,8 @@ function buildForecastStage(
     combinationRun?.status === "succeeded"
       ? combinationRun
       : latestSuccessfulRun(bundle, ["forecast"]);
-  const latestBoundsSuccess = latestSuccessfulRun(bundle, ["bounds_refresh"]);
+  const successFreshness = success ? runFreshnessTime(success) : null;
+  const boundsUpdatedAt = parseSerializedDate(boundsStage.updatedAt);
 
   if (failed && (!success || compareRunFreshness(failed, success) > 0)) {
     return buildRunStage("forecast", "Forecast Run", failed);
@@ -334,7 +387,8 @@ function buildForecastStage(
 
   if (
     success &&
-    (!latestBoundsSuccess || compareRunFreshness(success, latestBoundsSuccess) >= 0)
+    boundsStage.status === "ready" &&
+    (boundsUpdatedAt === null || (successFreshness !== null && successFreshness >= boundsUpdatedAt))
   ) {
     return {
       key: "forecast",
@@ -366,11 +420,11 @@ function buildForecastStage(
     label: "Forecast Run",
     status: "blocked",
     message:
-      latestBoundsSuccess
-        ? "Forecast output is older than the latest bounds refresh and needs a rerun."
-        : "Forecast is waiting for the first successful bounds refresh.",
+      boundsStage.status === "ready"
+        ? "Forecast output is older than the current bounds state and needs a rerun."
+        : "Forecast is waiting for bounds readiness before it can run.",
     progressPercent: stageProgress("blocked"),
-    updatedAt: serializeDate(latestBoundsSuccess?.finishedAt ?? latestBoundsSuccess?.requestedAt),
+    updatedAt: boundsStage.updatedAt,
     runId: combination?.lastForecastRunId ?? null,
     runType: "forecast",
   };

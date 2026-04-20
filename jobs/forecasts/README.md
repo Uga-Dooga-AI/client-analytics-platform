@@ -1,7 +1,11 @@
-# forecasts — BigQuery mart → forecast engine → BigQuery output
+# forecasts — operational BigQuery mart → forecast engine → BigQuery output
 
-Cloud Run Job that reads experiment time-series data from BigQuery marts,
+Cloud Run Job that reads operational time-series data from BigQuery marts,
 generates forecasts, and writes results back to `mart_forecast_points`.
+
+This worker is not the notebook-parity cohort-decay / ROAS engine. Until that
+surface is implemented, the runtime is restricted to revenue so it does not
+materialize clearly invalid forecasts for DAU or installs.
 
 ## Pipeline overview
 
@@ -102,3 +106,11 @@ gcloud scheduler jobs create http forecasts-daily \
 | < 14 days | — | Insufficient data, job exits cleanly |
 | 14–89 days | statsmodels ExponentialSmoothing | Fast, no seasonality |
 | ≥ 90 days | Prophet | Handles weekly/annual seasonality |
+
+## Bounds behavior
+
+- `bounds_refresh` currently rebuilds upstream marts only.
+- The published `p10 / p50 / p90` bands are generated inside the forecast run itself.
+- Holt intervals use residual standard deviation around the fitted series, scaled by the configured confidence interval.
+- Prophet intervals use `yhat_lower / yhat / yhat_upper` directly from Prophet output.
+- All bands are clipped to non-negative values before publishing.

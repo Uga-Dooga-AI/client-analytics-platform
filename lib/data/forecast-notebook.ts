@@ -8,6 +8,7 @@ import type {
   AcquisitionBreakdownRow,
   CohortMatrixRow,
   ComparisonConfidenceChartData,
+  ConfidenceSeriesPoint,
   RevenueModeKey,
 } from "@/lib/data/acquisition";
 import {
@@ -17,9 +18,11 @@ import {
 import type {
   DashboardFilters,
   DashboardGroupByKey,
+  DashboardPlatformKey,
 } from "@/lib/dashboard-filters";
 import {
   executeBigQuery,
+  getAccessToken,
   loadBigQueryContexts,
   type BigQueryQueryParam,
   type ProjectQueryContext,
@@ -51,6 +54,7 @@ export type ForecastNotebookSummary = {
 export type ForecastNotebookData = {
   summary: ForecastNotebookSummary;
   horizonCharts: ComparisonConfidenceChartData[];
+  cohortCurvesChart: ComparisonConfidenceChartData;
   paybackChart: ComparisonConfidenceChartData;
   breakdownRows: AcquisitionBreakdownRow[];
   cohortMatrix: CohortMatrixRow[];
@@ -71,6 +75,41 @@ export type ForecastNotebookSurface = {
   diagnostics: ForecastNotebookDiagnostics;
 };
 
+export type ForecastHistoryChartGroup = {
+  label: string;
+  series: ConfidenceSeriesPoint[];
+};
+
+export type ForecastHistoryChartSnapshot = {
+  cutoffDay: number;
+  groups: ForecastHistoryChartGroup[];
+  visiblePointCount: number;
+};
+
+export type ForecastNotebookSpendDebugSource = {
+  sourceType: string;
+  label: string;
+  sourceProjectId: string;
+  sourceDataset: string;
+  tableNames: string[];
+  totalRows: number;
+  filteredRows: number;
+  totalSpend: number;
+  filteredSpend: number;
+  totalInstalls: number;
+  filteredInstalls: number;
+  filteredCountries: Array<{ value: string; spend: number; rows: number }>;
+  filteredStores: Array<{ value: string; spend: number; rows: number }>;
+};
+
+export type ForecastNotebookSpendDebug = {
+  contextStatus: ForecastNotebookDiagnostics["contextStatus"];
+  message: string | null;
+  filters: DashboardFilters;
+  selection: ForecastNotebookSelection;
+  sources: ForecastNotebookSpendDebugSource[];
+};
+
 export type ForecastNotebookDiagnostics = {
   contextStatus: "ready" | "missing_credentials" | "query_failed";
   errorMessage: string | null;
@@ -85,6 +124,32 @@ export type ForecastNotebookDiagnostics = {
   visibleLineCount: number;
   visibleCohortCount: number;
   emptyReason: string | null;
+  boundsArtifactFallbackUsed: boolean;
+  boundsArtifactIssue: string | null;
+  boundsArtifactPath: string | null;
+  boundsArtifactSourceStatus: string | null;
+  boundsArtifactSourceLastSyncAt: string | null;
+  boundsArtifactSourceNextSyncAt: string | null;
+  boundsArtifactExpectedSizeCount: number;
+  boundsArtifactLoadedSizeCount: number;
+  boundsArtifactLoadedSizes: number[];
+  boundsArtifactMissingSizes: number[];
+  boundsArtifactIssueSamples: string[];
+  boundsCoverage: ForecastNotebookBoundsCoverageRow[];
+};
+
+export type ForecastNotebookBoundsCoverageRow = {
+  cohortSize: number;
+  sliceCohorts: number;
+  source: "artifact" | "live_fallback" | "missing";
+  tableKeyCount: number;
+  smoothedTrainingRecords: number;
+  minTrainingCohortSize: number | null;
+  maxTrainingCohortSize: number | null;
+  minHistoryDay: number | null;
+  maxHistoryDay: number | null;
+  minPredictionDay: number | null;
+  maxPredictionDay: number | null;
 };
 
 type ForecastNotebookInput = {
@@ -93,6 +158,41 @@ type ForecastNotebookInput = {
   filters: DashboardFilters;
   selection: ForecastNotebookSelection;
   horizonDays?: ForecastHorizonDay[];
+  loadData?: boolean;
+};
+
+type StorageScope = {
+  bucket: string;
+  prefix: string;
+};
+
+type NotebookBoundsArtifactLoadResult = {
+  tables: Map<number, Map<string, readonly [number, number]>>;
+  scopeUri: string | null;
+  sourceStatus: string | null;
+  sourceLastSyncAt: string | null;
+  sourceNextSyncAt: string | null;
+  expectedSizes: number[];
+  loadedSizes: number[];
+  missingSizes: number[];
+  issueSamples: string[];
+  fallbackUsed: boolean;
+  issue: string | null;
+};
+
+type BoundsCoverageSummary = {
+  rows: ForecastNotebookBoundsCoverageRow[];
+  prebuiltFallbackTables: Map<number, Map<string, readonly [number, number]>>;
+};
+
+type PredictionRuntimeArtifacts = {
+  notebookArtifactBounds: Map<number, Map<string, readonly [number, number]>>;
+  prebuiltFallbackTables: Map<number, Map<string, readonly [number, number]>>;
+  trainingRecords: BoundsTrainingRecord[];
+  estimatedCurves: Map<string, number[] | null>;
+  historyDays: number[];
+  predictionPeriods: number[];
+  maxRequiredHorizon: number;
 };
 
 type InstallDescriptorRow = {
@@ -228,6 +328,8 @@ type InstallSqlConfig = {
   campaignSql: string;
   creativeSql: string;
   companySql: string;
+  profileKeySql: string;
+  deviceKeySql: string;
   userKeySql: string;
 };
 
@@ -246,12 +348,19 @@ type CurveEstimateTask = {
 };
 
 const PAYBACK_CURVE_POINTS = [1, 3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 240, 270, 360, 720] as const;
+const PAYBACK_CURVE_POINTS_WITH_ZERO = [0, ...PAYBACK_CURVE_POINTS] as const;
 const GROUP_COLORS = ["#2563eb", "#d97706", "#059669", "#dc2626", "#7c3aed", "#0891b2", "#ea580c", "#4f46e5"];
 const NOTEBOOK_HISTORY_MIN_DAY = 4;
 const BOUNDS_MAX_CUTOFF = 91;
 const BOUNDS_MIN_PREDICTIONS = 10;
 const BOUNDS_SIZE_SMOOTH_COEFF = 1.2;
+const BOUNDS_LOWER_QUANTILE = 0.05;
+const BOUNDS_UPPER_QUANTILE = 0.95;
+const NOTEBOOK_BOUNDS_MIN_COHORT_SIZE = 1;
+const NOTEBOOK_BOUNDS_MAX_COHORT_SIZE = 1000;
 const NOTEBOOK_FALLBACK_CUTOFF = 6;
+const NOTEBOOK_YOUNG_FALLBACK_MIN_HISTORY = 2;
+const NOTEBOOK_YOUNG_FALLBACK_TARGET_HISTORY = 4;
 const NOTEBOOK_BOUNDS_HISTORY_DAYS = [
   4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
   35, 42, 49, 56, 63, 70, 77, 84, 91,
@@ -260,6 +369,7 @@ const NOTEBOOK_BOUNDS_PREDICTION_PERIODS = [
   7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 40,
   50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360,
 ] as const;
+export const FORECAST_HISTORY_CUTOFF_DAYS = [7, 10, 14, 18, 24, 30, 45, 60, 90] as const;
 
 const MIRROR_CAMPAIGN_ID_COLUMN_CANDIDATES = ["campaign_id", "campaignid", "campaign"];
 const MIRROR_CAMPAIGN_NAME_COLUMN_CANDIDATES = [
@@ -293,6 +403,10 @@ const MIRROR_COUNTRY_COLUMN_CANDIDATES = [
 const MIRROR_STORE_COLUMN_CANDIDATES = ["store", "platform", "os_name", "source_app_store"];
 const MIRROR_SPEND_COLUMN_CANDIDATES = ["spend", "cost", "cost_micros", "amount_micros"];
 const MIRROR_INSTALLS_COLUMN_CANDIDATES = ["installs", "all_conversions", "conversions"];
+const NOTEBOOK_BOUNDS_ARTIFACT_CACHE = new Map<
+  string,
+  Promise<{ artifact: Map<string, readonly [number, number]> | null; issue: string | null }>
+>();
 
 const STORE_SQL = `
   CASE
@@ -308,6 +422,7 @@ export async function getForecastNotebookSurface({
   filters,
   selection,
   horizonDays = [...DEFAULT_FORECAST_HORIZON_DAYS],
+  loadData = true,
 }: ForecastNotebookInput): Promise<ForecastNotebookSurface> {
   const contexts = await loadBigQueryContexts([bundle]);
   const context = contexts.get(bundle.project.id);
@@ -320,11 +435,8 @@ export async function getForecastNotebookSurface({
   }
   try {
     const installSql = await discoverInstallSqlConfig(context);
-    const [descriptorRows, cohortSizeRows, revenueRows, corruptedDayRows, spendRows] = await Promise.all([
+    const [descriptorRows, spendRows] = await Promise.all([
       loadInstallDescriptors(context, filters, installSql),
-      loadCohortSizes(context, filters, selection, installSql),
-      loadRevenueRows(context, filters, selection, horizonDays, installSql),
-      loadCorruptedDayCounts(context, filters, selection, horizonDays),
       loadSpendRows(context, filters, selection),
     ]);
 
@@ -348,6 +460,27 @@ export async function getForecastNotebookSurface({
     });
     const notes = buildCatalogNotes(descriptorRows, selectedDescriptorRows, spendRows, selection);
 
+    if (!loadData) {
+      return {
+        catalog,
+        data: buildIdleData(
+          notes[0] ??
+            `Forecast data for ${projectLabel} is not loaded yet. Apply the current slice to run the live cohort queries.`
+        ),
+        diagnostics: buildIdleDiagnostics({
+          descriptorRowCount: descriptorRows.length,
+          selectedDescriptorRowCount: selectedDescriptorRows.length,
+          spendRowCount: spendRows.length,
+        }),
+      };
+    }
+
+    const [cohortSizeRows, revenueRows, corruptedDayRows] = await Promise.all([
+      loadCohortSizes(context, filters, selection, installSql),
+      loadRevenueRows(context, filters, selection, horizonDays, installSql),
+      loadCorruptedDayCounts(context, filters, selection, horizonDays),
+    ]);
+
     const rawCohorts = buildRawCohorts({
       cohortSizeRows,
       revenueRows,
@@ -365,9 +498,9 @@ export async function getForecastNotebookSurface({
       new Set(corruptedDayRows)
     );
 
-    const allRequestedHorizons = uniqueSortedNumbers([
+    const allRequestedHorizons = uniqueSortedNonNegativeNumbers([
       ...horizonDays,
-      ...PAYBACK_CURVE_POINTS,
+      ...PAYBACK_CURVE_POINTS_WITH_ZERO,
       30,
       60,
       120,
@@ -376,11 +509,13 @@ export async function getForecastNotebookSurface({
       720,
     ]);
     const groupedLines = buildGroupedLines(processedCohorts, groupBy);
-    const predictionResources = await buildPredictionResources(
+    const predictionResourcesResult = await buildPredictionResources(
       groupedLines,
       allRequestedHorizons,
-      filters.granularityDays
+      filters.granularityDays,
+      context
     );
+    const predictionResources = predictionResourcesResult.resources;
     const visibleCohortCount = groupedLines
       .flatMap((line) => line.cohorts)
       .filter((cohort) => cohort.cohortSize > 0).length;
@@ -419,6 +554,18 @@ export async function getForecastNotebookSurface({
           visibleCohortCount,
           spendRowCount: spendRows.length,
         }),
+        boundsArtifactFallbackUsed: predictionResourcesResult.boundsArtifacts.fallbackUsed,
+        boundsArtifactIssue: predictionResourcesResult.boundsArtifacts.issue,
+        boundsArtifactPath: predictionResourcesResult.boundsArtifacts.scopeUri,
+        boundsArtifactSourceStatus: predictionResourcesResult.boundsArtifacts.sourceStatus,
+        boundsArtifactSourceLastSyncAt: predictionResourcesResult.boundsArtifacts.sourceLastSyncAt,
+        boundsArtifactSourceNextSyncAt: predictionResourcesResult.boundsArtifacts.sourceNextSyncAt,
+        boundsArtifactExpectedSizeCount: predictionResourcesResult.boundsArtifacts.expectedSizes.length,
+        boundsArtifactLoadedSizeCount: predictionResourcesResult.boundsArtifacts.loadedSizes.length,
+        boundsArtifactLoadedSizes: predictionResourcesResult.boundsArtifacts.loadedSizes,
+        boundsArtifactMissingSizes: predictionResourcesResult.boundsArtifacts.missingSizes,
+        boundsArtifactIssueSamples: predictionResourcesResult.boundsArtifacts.issueSamples,
+        boundsCoverage: predictionResourcesResult.boundsCoverage,
       },
     };
   } catch (error) {
@@ -427,6 +574,166 @@ export async function getForecastNotebookSurface({
       catalog: buildEmptyCatalog(),
       data: buildEmptyData(`Forecast live query failed: ${message}`),
       diagnostics: buildEmptyDiagnostics("query_failed", message),
+    };
+  }
+}
+
+export function getForecastHistoryCutoffDays(horizonDay: number) {
+  return FORECAST_HISTORY_CUTOFF_DAYS.filter((cutoffDay) => cutoffDay < horizonDay);
+}
+
+export async function* streamForecastNotebookHistorySnapshots({
+  bundle,
+  filters,
+  selection,
+  horizonDay,
+}: Omit<ForecastNotebookInput, "horizonDays" | "loadData" | "projectLabel"> & {
+  horizonDay: number;
+}) {
+  const contexts = await loadBigQueryContexts([bundle]);
+  const context = contexts.get(bundle.project.id);
+  if (!context) {
+    throw new Error("BigQuery credentials are unavailable for this project.");
+  }
+
+  const installSql = await discoverInstallSqlConfig(context);
+  const groupBy = supportedGroupBy(filters.groupBy);
+  const [spendRows, cohortSizeRows, revenueRows, corruptedDayRows] = await Promise.all([
+    loadSpendRows(context, filters, selection),
+    loadCohortSizes(context, filters, selection, installSql),
+    loadRevenueRows(context, filters, selection, [horizonDay], installSql),
+    loadCorruptedDayCounts(context, filters, selection, [horizonDay]),
+  ]);
+
+  const rawCohorts = buildRawCohorts({
+    cohortSizeRows,
+    revenueRows,
+    spendRows,
+    filters,
+    selection,
+    groupBy,
+  });
+  const processedCohorts = processRawCohorts(
+    rawCohorts,
+    filters.from,
+    filters.to,
+    filters.granularityDays,
+    new Set(corruptedDayRows)
+  );
+  const groupedLines = buildGroupedLines(processedCohorts, groupBy);
+  const predictionResourcesResult = await buildPredictionResources(
+    groupedLines,
+    uniqueSortedNonNegativeNumbers([horizonDay, 30, 60, 120, 240, 360, 720]),
+    filters.granularityDays,
+    context
+  );
+  const requestedCutoffs = getForecastHistoryCutoffDays(horizonDay);
+  const boundsCache = cloneBoundsTables(predictionResourcesResult.artifacts.prebuiltFallbackTables);
+
+  for (const cutoffDay of requestedCutoffs) {
+    yield buildHistoricalForecastChartSnapshot(
+      groupedLines,
+      horizonDay,
+      cutoffDay,
+      predictionResourcesResult.artifacts,
+      boundsCache
+    );
+  }
+}
+
+export async function debugForecastNotebookSpendSelection({
+  bundle,
+  projectLabel: _projectLabel,
+  filters,
+  selection,
+}: ForecastNotebookInput): Promise<ForecastNotebookSpendDebug> {
+  const contexts = await loadBigQueryContexts([bundle]);
+  const context = contexts.get(bundle.project.id);
+  if (!context) {
+    return {
+      contextStatus: "missing_credentials",
+      message: "BigQuery credentials are unavailable for this project.",
+      filters,
+      selection,
+      sources: [],
+    };
+  }
+
+  try {
+    const mirrorSources = context.bundle.sources.filter(
+      (source) =>
+        (source.sourceType === "unity_ads_spend" || source.sourceType === "google_ads_spend") &&
+        source.config.enabled === true &&
+        source.config.mode === "bigquery"
+    );
+
+    const settled = await Promise.allSettled(
+      mirrorSources.map(async (source) => {
+        const schema = await discoverMirrorSpendSchema(context, source, filters);
+        if (!schema) {
+          return null;
+        }
+
+        const rows = await executeBigQuery<MirrorSpendRow>(
+          context,
+          `
+            ${schema.query}
+          `,
+          [
+            { name: "from", type: "DATE", value: filters.from },
+            { name: "to", type: "DATE", value: filters.to },
+          ]
+        );
+        const filteredRows = rows.filter((row) =>
+          spendRowMatchesSelection(row, filters.platform, selection)
+        );
+
+        return {
+          sourceType: source.sourceType,
+          label: source.label,
+          sourceProjectId: schema.sourceProjectId,
+          sourceDataset: schema.sourceDataset,
+          tableNames: schema.tableNames,
+          totalRows: rows.length,
+          filteredRows: filteredRows.length,
+          totalSpend: roundDebugMetric(rows.reduce((sum, row) => sum + Number(row.spend ?? 0), 0)),
+          filteredSpend: roundDebugMetric(
+            filteredRows.reduce((sum, row) => sum + Number(row.spend ?? 0), 0)
+          ),
+          totalInstalls: roundDebugMetric(
+            rows.reduce((sum, row) => sum + Number(row.installs ?? 0), 0)
+          ),
+          filteredInstalls: roundDebugMetric(
+            filteredRows.reduce((sum, row) => sum + Number(row.installs ?? 0), 0)
+          ),
+          filteredCountries: summarizeSpendDebugDimension(
+            filteredRows,
+            (row) => row.country ?? "UNKNOWN"
+          ),
+          filteredStores: summarizeSpendDebugDimension(
+            filteredRows,
+            (row) => row.store ?? "unknown"
+          ),
+        } satisfies ForecastNotebookSpendDebugSource;
+      })
+    );
+
+    return {
+      contextStatus: "ready",
+      message: null,
+      filters,
+      selection,
+      sources: settled
+        .flatMap((entry) => (entry.status === "fulfilled" && entry.value ? [entry.value] : []))
+        .sort((left, right) => right.filteredSpend - left.filteredSpend),
+    };
+  } catch (error) {
+    return {
+      contextStatus: "query_failed",
+      message: error instanceof Error ? error.message : "Unknown forecast debug runtime error",
+      filters,
+      selection,
+      sources: [],
     };
   }
 }
@@ -473,19 +780,23 @@ async function discoverInstallSqlConfig(context: ProjectQueryContext): Promise<I
     campaignSql,
     creativeSql,
     companySql: buildCompanySql(sourceSql),
+    profileKeySql: `NULLIF(${profileExpr}, '')`,
+    deviceKeySql: `NULLIF(${deviceExpr}, '')`,
     userKeySql: `COALESCE(NULLIF(${profileExpr}, ''), ${deviceExpr})`,
   };
 }
 
 function buildSourceSql(clickExpr: string, trackerExpr: string) {
+  const normalizedTrackerExpr = `LOWER(COALESCE(${trackerExpr}, ''))`;
   return `
     CASE
       WHEN ${clickExpr} = 'Google Play' THEN 'organic'
       WHEN ${clickExpr} IN ('Unconfigured AdWords', 'AutocreatedGoogle Ads', 'Autocreated Google Ads') THEN 'google_ads'
-      WHEN LOWER(COALESCE(${trackerExpr}, '')) = 'google play' THEN 'organic'
-      WHEN LOWER(COALESCE(${trackerExpr}, '')) IN ('unconfigured adwords', 'autocreatedgoogle ads', 'autocreated google ads') THEN 'google_ads'
-      WHEN LOWER(COALESCE(${trackerExpr}, '')) IN ('', 'unknown') THEN 'unknown'
-      ELSE LOWER(${trackerExpr})
+      WHEN ${normalizedTrackerExpr} = 'google play' THEN 'organic'
+      WHEN ${normalizedTrackerExpr} IN ('unconfigured adwords', 'autocreatedgoogle ads', 'autocreated google ads') THEN 'google_ads'
+      WHEN REGEXP_CONTAINS(${normalizedTrackerExpr}, r'unity') THEN 'unity_ads'
+      WHEN ${normalizedTrackerExpr} IN ('', 'unknown') THEN 'unknown'
+      ELSE ${normalizedTrackerExpr}
     END
   `;
 }
@@ -530,6 +841,13 @@ function buildCompanySql(sourceSql: string) {
       ELSE REGEXP_REPLACE(INITCAP(REPLACE(${sourceSql}, '_', ' ')), r'\\bAds\\b', 'Ads')
     END
   `;
+}
+
+function buildRevenueJoinConditionSql(installAlias: string, eventAlias: string) {
+  return `(
+    (${installAlias}.profile_key IS NOT NULL AND ${eventAlias}.profile_key = ${installAlias}.profile_key)
+    OR (${installAlias}.device_key IS NOT NULL AND ${eventAlias}.device_key = ${installAlias}.device_key)
+  )`;
 }
 
 export function buildForecastNotebookTrackingPayload(
@@ -710,7 +1028,8 @@ async function loadRevenueRows(
           ${installSql.companySql} AS company,
           ${installSql.campaignSql} AS campaign,
           ${installSql.creativeSql} AS creative,
-          ${installSql.userKeySql} AS user_key
+          ${installSql.profileKeySql} AS profile_key,
+          ${installSql.deviceKeySql} AS device_key
         FROM \`${context.warehouseProjectId}.${context.bundle.project.rawDataset}.${context.rawInstallsTable}\`
         WHERE _PARTITIONDATE BETWEEN DATE(@from) AND DATE(@to)
           AND DATE(SAFE_CAST(install_datetime AS TIMESTAMP)) BETWEEN DATE(@from) AND DATE(@to)
@@ -727,7 +1046,8 @@ async function loadRevenueRows(
       ),
       events AS (
         SELECT
-          COALESCE(NULLIF(CAST(profile_id AS STRING), ''), CAST(appmetrica_device_id AS STRING)) AS user_key,
+          NULLIF(CAST(profile_id AS STRING), '') AS profile_key,
+          NULLIF(CAST(appmetrica_device_id AS STRING), '') AS device_key,
           DATE(SAFE_CAST(event_datetime AS TIMESTAMP)) AS event_date,
           SUM(
             COALESCE(
@@ -745,7 +1065,7 @@ async function loadRevenueRows(
             OR (@revenue_mode = 'iap' AND event_name IN ('purchase', 'in_app_purchase', 'subscription_start'))
             OR (@revenue_mode = 'total' AND event_name IN ('c_ad_revenue', 'purchase', 'in_app_purchase', 'subscription_start'))
           )
-        GROUP BY 1, 2
+        GROUP BY 1, 2, 3
       )
       SELECT
         CAST(i.cohort_date AS STRING) AS cohort_date,
@@ -760,7 +1080,7 @@ async function loadRevenueRows(
         SUM(e.revenue) AS revenue
       FROM installs_filtered i
       INNER JOIN events e
-        ON e.user_key = i.user_key
+        ON ${buildRevenueJoinConditionSql("i", "e")}
        AND e.event_date >= i.cohort_date
        AND e.event_date <= DATE_ADD(i.cohort_date, INTERVAL @max_horizon DAY)
       GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
@@ -1012,6 +1332,9 @@ async function discoverMirrorSpendSchema(
     `,
     company: sourceCompany,
     source: sourceKey,
+    sourceProjectId,
+    sourceDataset,
+    tableNames,
   };
 }
 
@@ -1165,7 +1488,6 @@ function buildRawCohorts({
   selection: ForecastNotebookSelection;
   groupBy: DashboardGroupByKey;
 }) {
-  const spendByFallbackKey = buildSpendLookup(spendRows);
   const raw = new Map<string, RawCohortRecord>();
 
   for (const row of cohortSizeRows) {
@@ -1196,18 +1518,6 @@ function buildRawCohorts({
       store,
     });
     record.cohortSize += Number(row.cohort_size ?? 0);
-
-    const spendMatch = lookupSpend(spendByFallbackKey, {
-      cohortDate,
-      source,
-      country,
-      store,
-      company,
-      campaign,
-      creative,
-    });
-    record.spend += spendMatch.spend;
-    record.installs += spendMatch.installs;
   }
 
   for (const row of revenueRows) {
@@ -1247,6 +1557,11 @@ function buildRawCohorts({
     );
   }
 
+  allocateSpendToRawCohorts(
+    raw.values(),
+    spendRows.filter((row) => spendRowMatchesSelection(row, filters.platform, selection))
+  );
+
   for (const record of raw.values()) {
     if (record.installs <= 0) {
       record.installs = record.cohortSize;
@@ -1254,6 +1569,49 @@ function buildRawCohorts({
   }
 
   return raw;
+}
+
+function allocateSpendToRawCohorts(
+  rawCohorts: Iterable<RawCohortRecord>,
+  spendRows: MirrorSpendRow[]
+) {
+  const records = Array.from(rawCohorts);
+
+  for (const row of spendRows) {
+    const spend = Number(row.spend ?? 0);
+    const installs = Number(row.installs ?? 0);
+    if (spend === 0 && installs === 0) {
+      continue;
+    }
+
+    const candidates = selectSpendAllocationCandidates(records, {
+      cohortDate: row.cohort_date ?? "",
+      source: row.source ?? "unknown",
+      country: row.country ?? "UNKNOWN",
+      store: row.store ?? "unknown",
+      company: row.company ?? "Unknown",
+      campaign: row.campaign_id ?? "unknown",
+      creative: row.creative_id ?? "unknown",
+    });
+    if (candidates.length === 0) {
+      continue;
+    }
+
+    const totalWeight = candidates.reduce(
+      (sum, record) => sum + Math.max(1, Number(record.cohortSize ?? 0)),
+      0
+    );
+    if (totalWeight <= 0) {
+      continue;
+    }
+
+    for (const record of candidates) {
+      const weight = Math.max(1, Number(record.cohortSize ?? 0));
+      const share = weight / totalWeight;
+      record.spend += spend * share;
+      record.installs += installs * share;
+    }
+  }
 }
 
 function processRawCohorts(
@@ -1392,23 +1750,25 @@ function buildGroupedLines(
 async function buildPredictionResources(
   lines: GroupedLine[],
   horizons: number[],
-  runDateFreq: number
+  runDateFreq: number,
+  context: ProjectQueryContext
 ) {
   const resources = new Map<string, LinePredictionResources>();
-  const requiredHorizons = uniqueSortedNumbers(horizons);
+  const requiredHorizons = uniqueSortedNonNegativeNumbers(horizons);
   const allCohorts = lines.flatMap((line) => line.cohorts);
   const maxRequiredHorizon = Math.max(90, ...requiredHorizons);
-  const predictionPeriods = uniqueSortedNumbers([
-    ...NOTEBOOK_BOUNDS_PREDICTION_PERIODS.filter((period) => period <= Math.max(360, maxRequiredHorizon)),
-    ...requiredHorizons.filter((period) => period >= 7),
-  ]);
+  const predictionPeriods = [...NOTEBOOK_BOUNDS_PREDICTION_PERIODS];
   const historyDays = [...NOTEBOOK_BOUNDS_HISTORY_DAYS];
   const curveTasks: CurveEstimateTask[] = [];
+  const notebookArtifactBounds = await loadNotebookBoundsArtifacts(
+    context,
+    allCohorts.map((cohort) => cohort.cohortSize)
+  );
 
   for (const cohort of allCohorts) {
     const canEstimateCurve =
       cohort.cohortSize > 0 &&
-      cohort.cohortNumDays === runDateFreq &&
+      cohort.cohortNumDays > 0 &&
       cohort.isCorrupted === 0 &&
       cohort.cohortLifetime >= NOTEBOOK_HISTORY_MIN_DAY &&
       cohort.totalRevenue.length >= NOTEBOOK_HISTORY_MIN_DAY;
@@ -1438,7 +1798,7 @@ async function buildPredictionResources(
           id: `train:${cohort.groupValue}:${cohort.cohortDate}:${cutoff}`,
           totalRevenue: cohort.totalRevenue,
           cutoff,
-          horizon: Math.max(maxRequiredHorizon, 90),
+          horizon: Math.max(360, maxRequiredHorizon, 90),
         });
       }
     }
@@ -1453,6 +1813,14 @@ async function buildPredictionResources(
     runDateFreq,
     estimatedCurves
   );
+  const boundsCoverage = buildBoundsCoverageSummary(
+    allCohorts,
+    trainingRecords,
+    maxRequiredHorizon,
+    historyDays,
+    predictionPeriods,
+    notebookArtifactBounds.tables
+  );
 
   for (const line of lines) {
     resources.set(
@@ -1464,12 +1832,27 @@ async function buildPredictionResources(
         historyDays,
         predictionPeriods,
         maxRequiredHorizon,
+        notebookArtifactBounds.tables,
+        boundsCoverage.prebuiltFallbackTables,
         trainingRecords,
         estimatedCurves
       )
     );
   }
-  return resources;
+  return {
+    resources,
+    boundsArtifacts: notebookArtifactBounds,
+    boundsCoverage: boundsCoverage.rows,
+    artifacts: {
+      notebookArtifactBounds: notebookArtifactBounds.tables,
+      prebuiltFallbackTables: boundsCoverage.prebuiltFallbackTables,
+      trainingRecords,
+      estimatedCurves,
+      historyDays,
+      predictionPeriods,
+      maxRequiredHorizon,
+    },
+  };
 }
 
 async function buildLinePredictionResources(
@@ -1479,10 +1862,17 @@ async function buildLinePredictionResources(
   historyDays: readonly number[],
   predictionPeriods: readonly number[],
   maxRequiredHorizon: number,
+  notebookArtifactBounds: Map<number, Map<string, readonly [number, number]>>,
+  prebuiltFallbackTables: Map<number, Map<string, readonly [number, number]>>,
   trainingRecords: BoundsTrainingRecord[],
   estimatedCurves: Map<string, number[] | null>
 ): Promise<LinePredictionResources> {
-  const boundsByCohortSize = new Map<number, Map<string, readonly [number, number]>>();
+  const liveBoundsByCohortSize = new Map<number, Map<string, readonly [number, number]>>(
+    Array.from(prebuiltFallbackTables.entries()).map(([cohortSize, table]) => [
+      cohortSize,
+      new Map(table),
+    ])
+  );
   const predictionsByCohortDate = new Map<string, CurvePrediction>();
   const history: CurvePrediction[] = [];
 
@@ -1497,23 +1887,19 @@ async function buildLinePredictionResources(
 
     const canEstimateCurve =
       cohort.cohortSize > 0 &&
-      cohort.cohortNumDays === runDateFreq &&
+      cohort.cohortNumDays > 0 &&
       cohort.isCorrupted === 0 &&
       cohort.cohortLifetime >= NOTEBOOK_HISTORY_MIN_DAY &&
       cohort.totalRevenue.length >= NOTEBOOK_HISTORY_MIN_DAY;
-    const estimatedCurve = canEstimateCurve
-      ? estimatedCurves.get(`live:${cohort.groupValue}:${cohort.cohortDate}`) ?? null
+    const predictedCurve = canEstimateCurve
+      ? getUsableEstimatedCurve(estimatedCurves.get(`live:${cohort.groupValue}:${cohort.cohortDate}`))
       : null;
-    const predictedCurve = estimatedCurve ? [...estimatedCurve] : null;
-    if (predictedCurve && predictedCurve[predictedCurve.length - 1]! < predictedCurve[predictedCurve.length - 2]!) {
-      straightenPrediction(predictedCurve);
-    }
-    const curveAllowed = predictedCurve && !isExplodingCurve(predictedCurve);
+    const curveAllowed = predictedCurve !== null;
     const canUseYoungFallback =
       !canEstimateCurve &&
-      cohort.cohortNumDays === runDateFreq &&
+      cohort.cohortNumDays > 0 &&
       cohort.isCorrupted === 0 &&
-      history.length >= 3;
+      history.length >= NOTEBOOK_YOUNG_FALLBACK_MIN_HISTORY;
     const shouldAppendToHistory = Boolean(curveAllowed) || canUseYoungFallback;
 
     for (const horizon of requiredHorizons) {
@@ -1571,22 +1957,23 @@ async function buildLinePredictionResources(
 
       const bounds = allowBounds
         ? getNotebookBounds(
-            boundsByCohortSize,
+            liveBoundsByCohortSize,
             trainingRecords,
             cohort.cohortSize,
             cutoffToLook,
             horizon,
             maxRequiredHorizon,
             historyDays,
-            predictionPeriods
+            predictionPeriods,
+            notebookArtifactBounds
           )
-        : ([0, 0] as const);
+        : null;
       const lowerRevenue =
-        predictedRevenue == null
+        predictedRevenue == null || bounds == null
           ? null
           : Math.max(0, predictedRevenue + (predictedRevenue * bounds[0]) / 100);
       const upperRevenue =
-        predictedRevenue == null
+        predictedRevenue == null || bounds == null
           ? null
           : Math.max(lowerRevenue ?? 0, predictedRevenue + (predictedRevenue * bounds[1]) / 100);
       points.set(horizon, {
@@ -1608,7 +1995,7 @@ async function buildLinePredictionResources(
 
   return {
     predictionsByCohortDate,
-    boundsByCohortSize,
+    boundsByCohortSize: liveBoundsByCohortSize,
     trainingPredictionCount: trainingRecords.length,
   };
 }
@@ -1690,7 +2077,7 @@ function fallbackYoungCohortPrediction(
   history: CurvePrediction[]
 ) {
   const currentRevenue = totalRevenue[cohortLifetime] ?? 0;
-  if (history.length < 3) {
+  if (history.length < NOTEBOOK_YOUNG_FALLBACK_MIN_HISTORY) {
     return null;
   }
 
@@ -1703,31 +2090,29 @@ function fallbackYoungCohortPrediction(
       continue;
     }
 
+    if (previous.trueRevenue.length <= cohortLifetime) {
+      continue;
+    }
+
     const predicted = previous.predictedFor.get(horizon);
     if (predicted == null) {
       if (previous.trueRevenue.length > horizon) {
         const realizedAtCurrentLifetime = previous.trueRevenue[cohortLifetime] ?? 0;
-        if (realizedAtCurrentLifetime > 0) {
-          collectedPredictions.push(previous.trueRevenue[horizon] ?? 0);
-          collectedRevenues.push(realizedAtCurrentLifetime);
-        }
+        collectedPredictions.push(previous.trueRevenue[horizon] ?? 0);
+        collectedRevenues.push(realizedAtCurrentLifetime);
       }
       continue;
     }
 
     const realizedAtCurrentLifetime = previous.trueRevenue[cohortLifetime] ?? 0;
-    if (realizedAtCurrentLifetime <= 0) {
-      continue;
-    }
-
     collectedPredictions.push(predicted);
     collectedRevenues.push(realizedAtCurrentLifetime);
-    if (collectedPredictions.length >= 3) {
+    if (collectedPredictions.length >= NOTEBOOK_YOUNG_FALLBACK_TARGET_HISTORY) {
       break;
     }
   }
 
-  if (collectedPredictions.length < 3) {
+  if (collectedPredictions.length < NOTEBOOK_YOUNG_FALLBACK_MIN_HISTORY) {
     return null;
   }
 
@@ -1740,6 +2125,341 @@ function fallbackYoungCohortPrediction(
   return currentRevenue * coefficient;
 }
 
+function normalizeBoundsCohortSize(cohortSize: number) {
+  const lower = Math.floor(cohortSize);
+  const upper = Math.ceil(cohortSize);
+  const nearest = cohortSize - lower <= upper - cohortSize ? lower : upper;
+  return clamp(nearest, NOTEBOOK_BOUNDS_MIN_COHORT_SIZE, NOTEBOOK_BOUNDS_MAX_COHORT_SIZE);
+}
+
+function collectBoundsTrainingWindow(
+  trainingRecords: BoundsTrainingRecord[],
+  cohortSize: number
+) {
+  const minSize = Math.floor(cohortSize / BOUNDS_SIZE_SMOOTH_COEFF);
+  const maxSize = Math.ceil(cohortSize * BOUNDS_SIZE_SMOOTH_COEFF) + 1;
+  const records = trainingRecords.filter(
+    (record) => record.cohortSize >= minSize && record.cohortSize <= maxSize
+  );
+  return {
+    minSize,
+    maxSize,
+    records,
+  };
+}
+
+function summarizeBoundsTable(table: Map<string, readonly [number, number]>) {
+  if (table.size === 0) {
+    return {
+      tableKeyCount: 0,
+      minHistoryDay: null,
+      maxHistoryDay: null,
+      minPredictionDay: null,
+      maxPredictionDay: null,
+    };
+  }
+
+  const historyDays: number[] = [];
+  const predictionDays: number[] = [];
+
+  for (const key of table.keys()) {
+    const match = /^for_(\d+)_on_(\d+)$/.exec(key);
+    if (!match) {
+      continue;
+    }
+    predictionDays.push(Number(match[1]));
+    historyDays.push(Number(match[2]));
+  }
+
+  return {
+    tableKeyCount: table.size,
+    minHistoryDay: historyDays.length > 0 ? Math.min(...historyDays) : null,
+    maxHistoryDay: historyDays.length > 0 ? Math.max(...historyDays) : null,
+    minPredictionDay: predictionDays.length > 0 ? Math.min(...predictionDays) : null,
+    maxPredictionDay: predictionDays.length > 0 ? Math.max(...predictionDays) : null,
+  };
+}
+
+function buildBoundsCoverageSummary(
+  cohorts: ProcessedCohort[],
+  trainingRecords: BoundsTrainingRecord[],
+  maxPredictionHorizon: number,
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[],
+  artifactTables: Map<number, Map<string, readonly [number, number]>>
+): BoundsCoverageSummary {
+  const requestedSizeCounts = new Map<number, number>();
+  for (const cohort of cohorts) {
+    if (!Number.isFinite(cohort.cohortSize) || cohort.cohortSize <= 0) {
+      continue;
+    }
+    const normalizedSize = normalizeBoundsCohortSize(cohort.cohortSize);
+    requestedSizeCounts.set(normalizedSize, (requestedSizeCounts.get(normalizedSize) ?? 0) + 1);
+  }
+
+  const rows: ForecastNotebookBoundsCoverageRow[] = [];
+  const prebuiltFallbackTables = new Map<number, Map<string, readonly [number, number]>>();
+
+  for (const cohortSize of Array.from(requestedSizeCounts.keys()).sort((left, right) => left - right)) {
+    const artifactTable = artifactTables.get(cohortSize);
+    const trainingWindow = collectBoundsTrainingWindow(trainingRecords, cohortSize);
+    const liveFallbackTable =
+      artifactTable ??
+      buildBoundsForCohortSize(
+        trainingRecords,
+        cohortSize,
+        maxPredictionHorizon,
+        historyDays,
+        predictionPeriods
+      );
+
+    if (!artifactTable && liveFallbackTable.size > 0) {
+      prebuiltFallbackTables.set(cohortSize, liveFallbackTable);
+    }
+
+    const source: ForecastNotebookBoundsCoverageRow["source"] = artifactTable
+      ? "artifact"
+      : liveFallbackTable.size > 0
+        ? "live_fallback"
+        : "missing";
+    const summary = summarizeBoundsTable(liveFallbackTable);
+
+    rows.push({
+      cohortSize,
+      sliceCohorts: requestedSizeCounts.get(cohortSize) ?? 0,
+      source,
+      tableKeyCount: summary.tableKeyCount,
+      smoothedTrainingRecords: trainingWindow.records.length,
+      minTrainingCohortSize:
+        trainingWindow.records.length > 0
+          ? Math.min(...trainingWindow.records.map((record) => record.cohortSize))
+          : null,
+      maxTrainingCohortSize:
+        trainingWindow.records.length > 0
+          ? Math.max(...trainingWindow.records.map((record) => record.cohortSize))
+          : null,
+      minHistoryDay: summary.minHistoryDay,
+      maxHistoryDay: summary.maxHistoryDay,
+      minPredictionDay: summary.minPredictionDay,
+      maxPredictionDay: summary.maxPredictionDay,
+    });
+  }
+
+  return {
+    rows,
+    prebuiltFallbackTables,
+  };
+}
+
+function parseGsUri(uri: string): StorageScope | null {
+  if (!uri.startsWith("gs://")) {
+    return null;
+  }
+
+  const remainder = uri.slice("gs://".length);
+  const slashIndex = remainder.indexOf("/");
+  if (slashIndex < 0) {
+    return { bucket: remainder.trim(), prefix: "" };
+  }
+
+  const bucket = remainder.slice(0, slashIndex).trim();
+  const prefix = remainder.slice(slashIndex + 1).trim().replace(/^\/+|\/+$/g, "");
+  if (!bucket) {
+    return null;
+  }
+
+  return { bucket, prefix };
+}
+
+function resolveBoundsArtifactScope(bundle: AnalyticsProjectBundle) {
+  const boundsSource = bundle.sources.find((source) => source.sourceType === "bounds_artifacts");
+  const bucket =
+    typeof boundsSource?.config.bucket === "string" ? boundsSource.config.bucket.trim() : "";
+  const prefix =
+    typeof boundsSource?.config.prefix === "string" ? boundsSource.config.prefix.trim() : "";
+
+  if (bucket) {
+    return {
+      bucket,
+      prefix: prefix.replace(/^\/+|\/+$/g, ""),
+    };
+  }
+
+  return parseGsUri(bundle.project.boundsPath);
+}
+
+function resolveNotebookPythonBin() {
+  const localVenvPython = join(process.cwd(), ".venv", "bin", "python3");
+  return process.env.ANALYTICS_NOTEBOOK_PYTHON_BIN ?? (existsSync(localVenvPython) ? localVenvPython : "python3");
+}
+
+function decodeNotebookBoundsArtifact(payload: Buffer) {
+  const scriptPath = join(process.cwd(), "scripts", "read_bounds_pickle.py");
+  const result = spawnSync(resolveNotebookPythonBin(), [scriptPath], {
+    input: payload,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 64,
+  });
+
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.trim() || result.stdout?.trim() || `python exited with ${result.status}`);
+  }
+
+  const parsed = JSON.parse(result.stdout || "{}") as {
+    bounds?: Record<string, [number, number]>;
+  };
+  return new Map(
+    Object.entries(parsed.bounds ?? {}).map(([key, bounds]) => [
+      key,
+      [Number(bounds[0] ?? 0), Number(bounds[1] ?? 0)] as const,
+    ])
+  );
+}
+
+async function fetchNotebookBoundsArtifact(
+  context: ProjectQueryContext,
+  cohortSize: number
+): Promise<{ artifact: Map<string, readonly [number, number]> | null; issue: string | null }> {
+  const scope = resolveBoundsArtifactScope(context.bundle);
+  if (!scope?.bucket) {
+    return {
+      artifact: null,
+      issue: "Bounds artifact scope is not configured.",
+    };
+  }
+
+  if (process.env.NODE_ENV === "test") {
+    return {
+      artifact: null,
+      issue: null,
+    };
+  }
+
+  const normalizedCohortSize = normalizeBoundsCohortSize(cohortSize);
+  const objectPath = [scope.prefix, `${normalizedCohortSize}.pkl`].filter(Boolean).join("/");
+  const cacheKey = `${scope.bucket}/${objectPath}`;
+  const cached = NOTEBOOK_BOUNDS_ARTIFACT_CACHE.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = (async () => {
+    try {
+      const token = await getAccessToken(context.serviceAccount);
+      const response = await fetch(
+        `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(scope.bucket)}/o/${encodeURIComponent(objectPath)}?alt=media`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "x-goog-user-project": context.warehouseProjectId,
+          },
+          cache: "no-store",
+        }
+      );
+
+      if (response.status === 404) {
+        return {
+          artifact: null,
+          issue: `Missing file gs://${scope.bucket}/${objectPath}.`,
+        };
+      }
+
+      if (!response.ok) {
+        throw new Error(`GCS bounds fetch failed: ${response.status} ${await response.text()}`);
+      }
+
+      const payload = Buffer.from(await response.arrayBuffer());
+      return {
+        artifact: decodeNotebookBoundsArtifact(payload),
+        issue: null,
+      };
+    } catch (error) {
+      const issue = error instanceof Error ? error.message : "Unknown error";
+      console.warn(
+        `[forecast-notebook] bounds artifact fallback for ${context.bundle.project.slug} cohort size ${normalizedCohortSize}: ${
+          issue
+        }`
+      );
+      return {
+        artifact: null,
+        issue,
+      };
+    }
+  })();
+
+  NOTEBOOK_BOUNDS_ARTIFACT_CACHE.set(cacheKey, pending);
+  return pending;
+}
+
+async function loadNotebookBoundsArtifacts(
+  context: ProjectQueryContext,
+  cohortSizes: number[]
+): Promise<NotebookBoundsArtifactLoadResult> {
+  const uniqueSizes = uniqueSortedNumbers(
+    cohortSizes
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .map((value) => normalizeBoundsCohortSize(value))
+  );
+  const boundsSource = context.bundle.sources.find((source) => source.sourceType === "bounds_artifacts");
+  const scope = resolveBoundsArtifactScope(context.bundle);
+  const scopeUri = scope?.bucket ? `gs://${scope.bucket}${scope.prefix ? `/${scope.prefix}` : ""}` : null;
+  const tables = new Map<number, Map<string, readonly [number, number]>>();
+  const loadedSizes: number[] = [];
+  const missingSizes: number[] = [];
+  const issueSamples: string[] = [];
+
+  if (process.env.NODE_ENV === "test") {
+    return {
+      tables,
+      scopeUri,
+      sourceStatus: boundsSource?.status ?? null,
+      sourceLastSyncAt: boundsSource?.lastSyncAt?.toISOString() ?? null,
+      sourceNextSyncAt: boundsSource?.nextSyncAt?.toISOString() ?? null,
+      expectedSizes: [],
+      loadedSizes: [],
+      missingSizes: [],
+      issueSamples: [],
+      fallbackUsed: false,
+      issue: null,
+    };
+  }
+
+  for (const cohortSize of uniqueSizes) {
+    const result = await fetchNotebookBoundsArtifact(context, cohortSize);
+    if (result.artifact) {
+      tables.set(cohortSize, result.artifact);
+      loadedSizes.push(cohortSize);
+    } else {
+      missingSizes.push(cohortSize);
+      if (result.issue && issueSamples.length < 5) {
+        issueSamples.push(`size ${cohortSize}: ${result.issue}`);
+      }
+    }
+  }
+
+  const fallbackUsed = missingSizes.length > 0;
+  let issue: string | null = null;
+  if (fallbackUsed) {
+    issue = scopeUri
+      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. This request used live-built fallback bounds for the missing sizes, so the result is not strict notebook parity.`
+      : "Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. This request used live-built fallback bounds instead.";
+  }
+
+  return {
+    tables,
+    scopeUri,
+    sourceStatus: boundsSource?.status ?? null,
+    sourceLastSyncAt: boundsSource?.lastSyncAt?.toISOString() ?? null,
+    sourceNextSyncAt: boundsSource?.nextSyncAt?.toISOString() ?? null,
+    expectedSizes: uniqueSizes,
+    loadedSizes,
+    missingSizes,
+    issueSamples,
+    fallbackUsed,
+    issue,
+  };
+}
+
 function getNotebookBounds(
   cache: Map<number, Map<string, readonly [number, number]>>,
   trainingRecords: BoundsTrainingRecord[],
@@ -1748,30 +2468,35 @@ function getNotebookBounds(
   horizon: number,
   maxPredictionHorizon: number,
   historyDays: readonly number[],
-  predictionPeriods: readonly number[]
+  predictionPeriods: readonly number[],
+  artifactCache?: Map<number, Map<string, readonly [number, number]>>
 ) {
-  const normalizedCohortSize = Math.max(1, Math.round(cohortSize));
-  for (const sizeToLook of cohortSizesToLook(normalizedCohortSize)) {
-    let boundsTable = cache.get(sizeToLook);
-    if (!boundsTable) {
-      boundsTable = buildBoundsForCohortSize(
-        trainingRecords,
-        sizeToLook,
-        maxPredictionHorizon,
-        historyDays,
-        predictionPeriods
-      );
-      cache.set(sizeToLook, boundsTable);
-    }
-
-    const key = boundsKey(horizon, nearestHistoryDay(cutoff));
-    const found = boundsTable.get(key);
-    if (found) {
-      return found;
-    }
+  const normalizedCohortSize = normalizeBoundsCohortSize(cohortSize);
+  const notebookHorizon = clamp(Math.round(horizon), 7, 365);
+  const key = boundsKey(notebookHorizon, nearestHistoryDay(cutoff));
+  const artifactBounds = artifactCache?.get(normalizedCohortSize)?.get(key);
+  if (artifactBounds) {
+    return artifactBounds;
   }
 
-  return [-15, 15] as const;
+  let boundsTable = cache.get(normalizedCohortSize);
+  if (!boundsTable) {
+    boundsTable = buildBoundsForCohortSize(
+      trainingRecords,
+      normalizedCohortSize,
+      maxPredictionHorizon,
+      historyDays,
+      predictionPeriods
+    );
+    cache.set(normalizedCohortSize, boundsTable);
+  }
+
+  const found = boundsTable.get(key);
+  if (found) {
+    return found;
+  }
+
+  return null;
 }
 
 function buildBoundsForCohortSize(
@@ -1781,11 +2506,8 @@ function buildBoundsForCohortSize(
   historyDays: readonly number[],
   predictionPeriods: readonly number[]
 ) {
-  const minSize = Math.floor(cohortSize / BOUNDS_SIZE_SMOOTH_COEFF);
-  const maxSize = Math.ceil(cohortSize * BOUNDS_SIZE_SMOOTH_COEFF) + 1;
-  const smoothRecords = trainingRecords.filter(
-    (record) => record.cohortSize >= minSize && record.cohortSize <= maxSize
-  );
+  const trainingWindow = collectBoundsTrainingWindow(trainingRecords, cohortSize);
+  const smoothRecords = trainingWindow.records;
   const table = new Map<string, readonly [number, number]>();
   if (smoothRecords.length < BOUNDS_MIN_PREDICTIONS) {
     return table;
@@ -1816,7 +2538,7 @@ function buildBoundsForCohortSize(
     }
   }
 
-  const fullPredictionPeriods = rangeInclusive(7, Math.max(365, maxPredictionHorizon));
+  const fullPredictionPeriods = rangeInclusive(7, 365);
   for (const cutoff of rangeInclusive(NOTEBOOK_HISTORY_MIN_DAY, BOUNDS_MAX_CUTOFF)) {
     const knownPeriods = predictionPeriods.filter((period) => cutoff < period && table.has(boundsKey(period, cutoff)));
     if (knownPeriods.length <= 1) {
@@ -1829,7 +2551,7 @@ function buildBoundsForCohortSize(
       knownPeriods,
       lowerValues,
       upperValues,
-      fullPredictionPeriods[fullPredictionPeriods.length - 1] ?? Math.max(365, maxPredictionHorizon)
+      fullPredictionPeriods[fullPredictionPeriods.length - 1] ?? 365
     );
 
     for (const [period, bounds] of expanded.entries()) {
@@ -1863,7 +2585,7 @@ function getErrorBoundsFromRecords(
         }
         const actual = record.trueFor.get(period);
         const predicted = record.predictedForByCutoff.get(boundsKey(period, cutoff));
-        if (actual == null || predicted == null || actual <= 0) {
+        if (actual == null || predicted == null) {
           continue;
         }
         errors.push(((actual - predicted) / actual) * 100);
@@ -1874,7 +2596,10 @@ function getErrorBoundsFromRecords(
       }
 
       const sorted = errors.sort((left, right) => left - right);
-      bounds.set(boundsKey(period, cutoff), [quantile(sorted, 0.5), quantile(sorted, 0.95)]);
+      bounds.set(boundsKey(period, cutoff), [
+        quantile(sorted, BOUNDS_LOWER_QUANTILE),
+        quantile(sorted, BOUNDS_UPPER_QUANTILE),
+      ]);
     }
   }
 
@@ -1997,6 +2722,13 @@ function buildNotebookData({
   const horizonCharts = horizonDays.map((horizonDay) =>
     buildHorizonChart(projectLabel, filters, selection, lines, horizonDay, predictionResources)
   );
+  const cohortCurvesChart = buildCohortCurvesChart(
+    projectLabel,
+    filters,
+    selection,
+    lines,
+    predictionResources
+  );
   const paybackChart = buildPaybackChart(projectLabel, selection, lines, predictionResources);
   const breakdownRows = lines.map((line) => buildBreakdownRow(line, predictionResources));
   const summary = buildSummary(lines, predictionResources);
@@ -2013,6 +2745,7 @@ function buildNotebookData({
       confidence: confidenceFromSamples,
     },
     horizonCharts,
+    cohortCurvesChart,
     paybackChart,
     breakdownRows,
     cohortMatrix,
@@ -2038,6 +2771,7 @@ function buildHorizonChart(
     title: `ROAS by cohort date · D${horizonDay}`,
     subtitle: `${projectLabel} · ${selection.revenueMode} · notebook-style cohort-date ROAS using live cohort revenue and spend.`,
     unit: "%",
+    historyHorizonDay: horizonDay,
     yAxis: {
       min: 0,
       referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
@@ -2060,6 +2794,45 @@ function buildHorizonChart(
   };
 }
 
+function buildHistoricalForecastChartSnapshot(
+  lines: GroupedLine[],
+  horizonDay: number,
+  cutoffDay: number,
+  artifacts: PredictionRuntimeArtifacts,
+  boundsCache: Map<number, Map<string, readonly [number, number]>>
+): ForecastHistoryChartSnapshot {
+  let visiblePointCount = 0;
+
+  return {
+    cutoffDay,
+    groups: lines.map((line) => ({
+      label: line.label,
+      series: line.cohorts.map((cohort) => {
+        const point = getHistoricalPredictionPoint(
+          cohort,
+          horizonDay,
+          cutoffDay,
+          artifacts,
+          boundsCache
+        );
+
+        if (point.predicted != null) {
+          visiblePointCount += 1;
+        }
+
+        return {
+          label: formatLabelDate(cohort.cohortDate),
+          value: point.predicted,
+          lower: point.lower,
+          upper: point.upper,
+          actual: point.actual,
+        };
+      }),
+    })),
+    visiblePointCount,
+  };
+}
+
 function buildPaybackChart(
   projectLabel: string,
   selection: ForecastNotebookSelection,
@@ -2069,7 +2842,7 @@ function buildPaybackChart(
   return {
     id: "forecast-payback-curve",
     title: `Payback curve by lifetime day · ${selection.revenueMode}`,
-    subtitle: `${projectLabel} · cumulative ROAS trajectory aggregated from the same live cohorts used for the date charts.`,
+    subtitle: `${projectLabel} · cumulative ROAS trajectory aggregated from the same live cohorts used for the date charts. Hide lines in the legend to rescale around the buckets you want to inspect.`,
     unit: "%",
     yAxis: {
       min: 0,
@@ -2079,7 +2852,7 @@ function buildPaybackChart(
       label: line.label,
       color: GROUP_COLORS[index % GROUP_COLORS.length],
       actualColor: GROUP_COLORS[index % GROUP_COLORS.length],
-      series: PAYBACK_CURVE_POINTS.map((dayPoint) => {
+      series: PAYBACK_CURVE_POINTS_WITH_ZERO.map((dayPoint) => {
         const aggregate = aggregatePaybackPoint(line.cohorts, dayPoint, predictionResources);
         return {
           label: `D${dayPoint}`,
@@ -2093,12 +2866,55 @@ function buildPaybackChart(
   };
 }
 
+function buildCohortCurvesChart(
+  projectLabel: string,
+  filters: DashboardFilters,
+  selection: ForecastNotebookSelection,
+  lines: GroupedLine[],
+  predictionResources: Map<string, LinePredictionResources>
+): ComparisonConfidenceChartData {
+  const cohortsByDate = new Map<string, ProcessedCohort[]>();
+  for (const cohort of lines.flatMap((line) => line.cohorts)) {
+    const current = cohortsByDate.get(cohort.cohortDate) ?? [];
+    current.push(cohort);
+    cohortsByDate.set(cohort.cohortDate, current);
+  }
+
+  return {
+    id: "forecast-cohort-curves",
+    title: `ROAS curves by lifetime day · ${selection.revenueMode}`,
+    subtitle: `${projectLabel} · each line is one cohort-date bucket from the current ${filters.granularityDays}d step. Hide cohort buckets in the legend to rescale the chart around the lines you care about.`,
+    unit: "%",
+    yAxis: {
+      min: 0,
+      referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
+    },
+    groups: Array.from(cohortsByDate.entries())
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([cohortDate, cohorts], index) => ({
+        label: formatCohortBucketLabel(cohortDate, filters.granularityDays, filters.to),
+        color: GROUP_COLORS[index % GROUP_COLORS.length],
+        actualColor: GROUP_COLORS[index % GROUP_COLORS.length],
+        series: PAYBACK_CURVE_POINTS_WITH_ZERO.map((dayPoint) => {
+          const aggregate = aggregatePaybackPoint(cohorts, dayPoint, predictionResources);
+          return {
+            label: `D${dayPoint}`,
+            value: aggregate.predicted,
+            lower: aggregate.lower,
+            upper: aggregate.upper,
+            actual: aggregate.actual,
+          };
+        }),
+      })),
+  };
+}
+
 function buildBreakdownRow(
   line: GroupedLine,
   predictionResources: Map<string, LinePredictionResources>
 ): AcquisitionBreakdownRow {
   const spend = line.cohorts.reduce((sum, cohort) => sum + cohort.spend, 0);
-  const installs = line.cohorts.reduce((sum, cohort) => sum + cohort.installs, 0);
+  const installs = line.cohorts.reduce((sum, cohort) => sum + cohort.cohortSize, 0);
   const d30 = aggregatePaybackPoint(line.cohorts, 30, predictionResources);
   const d60 = aggregatePaybackPoint(line.cohorts, 60, predictionResources);
   const d120 = aggregatePaybackPoint(line.cohorts, 120, predictionResources);
@@ -2137,7 +2953,7 @@ function buildSummary(
 ) {
   const allCohorts = lines.flatMap((line) => line.cohorts);
   const spend = allCohorts.reduce((sum, cohort) => sum + cohort.spend, 0);
-  const installs = allCohorts.reduce((sum, cohort) => sum + cohort.installs, 0);
+  const installs = allCohorts.reduce((sum, cohort) => sum + cohort.cohortSize, 0);
   const d30 = aggregatePaybackPoint(allCohorts, 30, predictionResources);
   const d60 = aggregatePaybackPoint(allCohorts, 60, predictionResources);
   const d120 = aggregatePaybackPoint(allCohorts, 120, predictionResources);
@@ -2168,8 +2984,8 @@ function buildCohortMatrix(
   return selectedLine.cohorts.map((cohort) => ({
     cohortDate: cohort.cohortDate,
     spend: Number(cohort.spend.toFixed(0)),
-    installs: Number(cohort.installs.toFixed(0)),
-    cpi: cohort.installs > 0 ? Number((cohort.spend / cohort.installs).toFixed(2)) : 0,
+    installs: Number(cohort.cohortSize.toFixed(0)),
+    cpi: cohort.cohortSize > 0 ? Number((cohort.spend / cohort.cohortSize).toFixed(2)) : 0,
     cells: horizons.map((horizon) => {
       const point = getPredictionPoint(cohort, horizon, predictionResources);
       return {
@@ -2181,6 +2997,34 @@ function buildCohortMatrix(
       };
     }),
   }));
+}
+
+function getHistoricalPredictionPoint(
+  cohort: ProcessedCohort,
+  horizon: number,
+  cutoffDay: number,
+  artifacts: PredictionRuntimeArtifacts,
+  boundsCache: Map<number, Map<string, readonly [number, number]>>
+): AggregatedPoint {
+  if (cohort.spend <= 0) {
+    const zeroBucket = cohort.cohortSize <= 0 || cohort.cohortNumDays <= 0;
+    return {
+      predicted: zeroBucket && cohort.cohortLifetime >= cutoffDay ? 0 : null,
+      lower: zeroBucket && cohort.cohortLifetime >= cutoffDay ? 0 : null,
+      upper: zeroBucket && cohort.cohortLifetime >= cutoffDay ? 0 : null,
+      actual: zeroBucket && cohort.cohortLifetime >= horizon ? 0 : null,
+    };
+  }
+
+  const prediction = predictHistoricalCohort(
+    cohort,
+    horizon,
+    cutoffDay,
+    artifacts,
+    boundsCache
+  );
+
+  return toRoasPoint(cohort, prediction);
 }
 
 function getPredictionPoint(
@@ -2199,6 +3043,10 @@ function getPredictionPoint(
   }
 
   const prediction = predictCohort(cohort, horizon, predictionResources);
+  return toRoasPoint(cohort, prediction);
+}
+
+function toRoasPoint(cohort: ProcessedCohort, prediction: PredictedPoint): AggregatedPoint {
   const realizedRevenue = prediction.actual ?? prediction.predictedRevenue;
   if (realizedRevenue == null || prediction.lowerRevenue == null || prediction.upperRevenue == null) {
     return {
@@ -2292,6 +3140,83 @@ function predictCohort(
   return cached;
 }
 
+function predictHistoricalCohort(
+  cohort: ProcessedCohort,
+  horizon: number,
+  cutoffDay: number,
+  artifacts: PredictionRuntimeArtifacts,
+  boundsCache: Map<number, Map<string, readonly [number, number]>>
+): PredictedPoint {
+  const actual =
+    cohort.cohortLifetime >= horizon && cohort.totalRevenue[horizon] != null
+      ? cohort.totalRevenue[horizon] ?? 0
+      : null;
+
+  if (cutoffDay >= horizon || cohort.cohortLifetime < cutoffDay) {
+    return {
+      predictedRevenue: null,
+      lowerRevenue: null,
+      upperRevenue: null,
+      actual,
+    };
+  }
+
+  if (cohort.cohortSize <= 0 || cohort.cohortNumDays <= 0) {
+    return {
+      predictedRevenue: 0,
+      lowerRevenue: 0,
+      upperRevenue: 0,
+      actual,
+    };
+  }
+
+  if (cohort.isCorrupted !== 0) {
+    return {
+      predictedRevenue: null,
+      lowerRevenue: null,
+      upperRevenue: null,
+      actual,
+    };
+  }
+
+  const predictedCurve = getUsableEstimatedCurve(
+    artifacts.estimatedCurves.get(`train:${cohort.groupValue}:${cohort.cohortDate}:${cutoffDay}`) ??
+      estimateCurveFallback(cohort.totalRevenue, cutoffDay, artifacts.maxRequiredHorizon)
+  );
+  const predictedRevenue =
+    predictedCurve && horizon < predictedCurve.length ? (predictedCurve[horizon] ?? null) : null;
+  const bounds =
+    predictedRevenue == null
+      ? null
+      : getNotebookBounds(
+          boundsCache,
+          artifacts.trainingRecords,
+          cohort.cohortSize,
+          cutoffDay,
+          horizon,
+          artifacts.maxRequiredHorizon,
+          artifacts.historyDays,
+          artifacts.predictionPeriods,
+          artifacts.notebookArtifactBounds
+        );
+
+  const lowerRevenue =
+    predictedRevenue == null || bounds == null
+      ? null
+      : Math.max(0, predictedRevenue + (predictedRevenue * bounds[0]) / 100);
+  const upperRevenue =
+    predictedRevenue == null || bounds == null
+      ? null
+      : Math.max(lowerRevenue ?? 0, predictedRevenue + (predictedRevenue * bounds[1]) / 100);
+
+  return {
+    predictedRevenue,
+    lowerRevenue,
+    upperRevenue,
+    actual,
+  };
+}
+
 function calculateRevenueRatios(cohorts: RawCohortRecord[]) {
   const ratios12: number[] = [];
   const ratios13: number[] = [];
@@ -2363,10 +3288,7 @@ function estimateCurvesWithNotebook(tasks: CurveEstimateTask[]) {
   }
 
   const scriptPath = join(process.cwd(), "scripts", "notebook_estimate_curve.py");
-  const localVenvPython = join(process.cwd(), ".venv", "bin", "python3");
-  const pythonBin =
-    process.env.ANALYTICS_NOTEBOOK_PYTHON_BIN ??
-    (existsSync(localVenvPython) ? localVenvPython : "python3");
+  const pythonBin = resolveNotebookPythonBin();
 
   try {
     const result = spawnSync(pythonBin, [scriptPath], {
@@ -2387,9 +3309,8 @@ function estimateCurvesWithNotebook(tasks: CurveEstimateTask[]) {
     }
     return output;
   } catch (error) {
-    if (process.env.NODE_ENV === "production") {
-      throw error;
-    }
+    const issue = error instanceof Error ? error.message : "Unknown notebook estimation error";
+    console.warn(`[forecast-notebook] notebook curve estimation fallback: ${issue}`);
 
     for (const task of tasks) {
       output.set(task.id, estimateCurveFallback(task.totalRevenue, task.cutoff, task.horizon));
@@ -2468,6 +3389,23 @@ function estimateCurveFallback(totalRevenue: number[], cutoff: number, horizon: 
   return curve;
 }
 
+function getUsableEstimatedCurve(curve: number[] | null | undefined) {
+  if (!curve) {
+    return null;
+  }
+
+  const normalized = [...curve];
+  if (normalized.length >= 2 && normalized[normalized.length - 1]! < normalized[normalized.length - 2]!) {
+    straightenPrediction(normalized);
+  }
+
+  if (isExplodingCurve(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
 function isExplodingCurve(curve: number[]) {
   if (curve.length < 3) {
     return false;
@@ -2489,32 +3427,8 @@ function straightenPrediction(curve: number[]) {
   }
 }
 
-function buildSpendLookup(rows: MirrorSpendRow[]) {
-  const lookup = new Map<string, { spend: number; installs: number }>();
-  for (const row of rows) {
-    const spend = Number(row.spend ?? 0);
-    const installs = Number(row.installs ?? 0);
-    const keys = buildSpendKeys({
-      cohortDate: row.cohort_date ?? "",
-      source: row.source ?? "unknown",
-      country: row.country ?? "UNKNOWN",
-      store: row.store ?? "unknown",
-      company: row.company ?? "Unknown",
-      campaign: row.campaign_id ?? "unknown",
-      creative: row.creative_id ?? "unknown",
-    });
-    for (const key of keys) {
-      const current = lookup.get(key) ?? { spend: 0, installs: 0 };
-      current.spend += spend;
-      current.installs += installs;
-      lookup.set(key, current);
-    }
-  }
-  return lookup;
-}
-
-function lookupSpend(
-  lookup: Map<string, { spend: number; installs: number }>,
+function selectSpendAllocationCandidates(
+  records: RawCohortRecord[],
   input: {
     cohortDate: string;
     source: string;
@@ -2525,16 +3439,110 @@ function lookupSpend(
     creative: string;
   }
 ) {
-  for (const key of buildSpendKeys(input)) {
-    const match = lookup.get(key);
-    if (match) {
-      return match;
-    }
+  const base = records.filter(
+    (record) =>
+      record.cohortDate === input.cohortDate &&
+      record.source === input.source &&
+      record.company === input.company
+  );
+  if (base.length === 0) {
+    return [];
   }
-  return { spend: 0, installs: 0 };
+
+  const tiers = buildSpendMatchTiers(input);
+  for (const tier of tiers) {
+    const matched = base.filter((record) => {
+      if (tier.country && record.country !== input.country) {
+        return false;
+      }
+      if (tier.store && record.store !== input.store) {
+        return false;
+      }
+      if (tier.campaign && record.campaign !== input.campaign) {
+        return false;
+      }
+      if (tier.creative && record.creative !== input.creative) {
+        return false;
+      }
+      return true;
+    });
+
+    if (matched.length === 0) {
+      continue;
+    }
+
+    const cohortsWithUsers = matched.filter((record) => record.cohortSize > 0);
+    return cohortsWithUsers.length > 0 ? cohortsWithUsers : matched;
+  }
+
+  return [];
 }
 
-function buildSpendKeys(input: {
+function spendRowMatchesSelection(
+  row: MirrorSpendRow,
+  platform: DashboardPlatformKey,
+  selection: ForecastNotebookSelection
+) {
+  const country = row.country ?? "UNKNOWN";
+  const source = row.source ?? "unknown";
+  const company = row.company ?? "Unknown";
+  const campaign = row.campaign_id ?? "unknown";
+  const creative = row.creative_id ?? "unknown";
+  const store = row.store ?? "unknown";
+
+  if (platform === "android" && store !== "google") {
+    return false;
+  }
+  if (platform === "ios" && store !== "apple") {
+    return false;
+  }
+  if (selection.country !== "all" && country !== selection.country) {
+    return false;
+  }
+  if (selection.source !== "all" && source !== selection.source) {
+    return false;
+  }
+  if (selection.company !== "all" && company !== selection.company) {
+    return false;
+  }
+  if (selection.campaign !== "all" && campaign !== selection.campaign) {
+    return false;
+  }
+  if (selection.creative !== "all" && creative !== selection.creative) {
+    return false;
+  }
+
+  return true;
+}
+
+function summarizeSpendDebugDimension(
+  rows: MirrorSpendRow[],
+  getValue: (row: MirrorSpendRow) => string
+) {
+  const aggregates = new Map<string, { spend: number; rows: number }>();
+  for (const row of rows) {
+    const key = getValue(row);
+    const current = aggregates.get(key) ?? { spend: 0, rows: 0 };
+    current.spend += Number(row.spend ?? 0);
+    current.rows += 1;
+    aggregates.set(key, current);
+  }
+
+  return Array.from(aggregates.entries())
+    .map(([value, aggregate]) => ({
+      value,
+      spend: roundDebugMetric(aggregate.spend),
+      rows: aggregate.rows,
+    }))
+    .sort((left, right) => right.spend - left.spend || right.rows - left.rows)
+    .slice(0, 12);
+}
+
+function roundDebugMetric(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function buildSpendMatchTiers(input: {
   cohortDate: string;
   source: string;
   country: string;
@@ -2543,13 +3551,64 @@ function buildSpendKeys(input: {
   campaign: string;
   creative: string;
 }) {
-  return [
-    `${input.cohortDate}|${input.source}|${input.country}|${input.store}|${input.company}|${input.campaign}|${input.creative}`,
-    `${input.cohortDate}|${input.source}|${input.country}|${input.store}|${input.company}|${input.campaign}|*`,
-    `${input.cohortDate}|${input.source}|${input.country}|${input.store}|${input.company}|*|*`,
-    `${input.cohortDate}|${input.source}|${input.country}|*|${input.company}|*|*`,
-    `${input.cohortDate}|${input.source}|*|*|${input.company}|*|*`,
-  ];
+  const hasCountry = isSpecificSpendDimension(input.country);
+  const hasStore = isSpecificSpendDimension(input.store);
+  const hasCampaign = isSpecificSpendDimension(input.campaign);
+  const hasCreative = isSpecificSpendDimension(input.creative);
+  const signatures = new Set<string>();
+  const tiers: Array<{
+    country: boolean;
+    store: boolean;
+    campaign: boolean;
+    creative: boolean;
+  }> = [];
+
+  const register = (tier: {
+    country: boolean;
+    store: boolean;
+    campaign: boolean;
+    creative: boolean;
+  }) => {
+    const signature = `${tier.country}:${tier.store}:${tier.campaign}:${tier.creative}`;
+    if (signatures.has(signature)) {
+      return;
+    }
+    signatures.add(signature);
+    tiers.push(tier);
+  };
+
+  register({
+    country: hasCountry,
+    store: hasStore,
+    campaign: hasCampaign,
+    creative: hasCampaign && hasCreative,
+  });
+  register({
+    country: hasCountry,
+    store: hasStore,
+    campaign: hasCampaign,
+    creative: false,
+  });
+
+  // Do not let spend rows with an explicit campaign spill into a broader
+  // country/store bucket when AppMetrica campaign parsing does not match.
+  if (!hasCampaign) {
+    register({
+      country: hasCountry,
+      store: hasStore,
+      campaign: false,
+      creative: false,
+    });
+  }
+
+  return tiers;
+}
+
+function isSpecificSpendDimension(value: string | null | undefined) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized !== "" && normalized !== "unknown" && normalized !== "*";
 }
 
 function ensureRawCohort(
@@ -2682,6 +3741,17 @@ function buildEmptyData(note: string): ForecastNotebookData {
       confidence: "No live cohort data",
     },
     horizonCharts: [],
+    cohortCurvesChart: {
+      id: "forecast-cohort-curves",
+      title: "ROAS curves by lifetime day",
+      subtitle: note,
+      unit: "%",
+      groups: [],
+      yAxis: {
+        min: 0,
+        referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
+      },
+    },
     paybackChart: {
       id: "forecast-payback-curve",
       title: "Payback curve by lifetime day",
@@ -2696,6 +3766,27 @@ function buildEmptyData(note: string): ForecastNotebookData {
     breakdownRows: [],
     cohortMatrix: [],
     notes: [note],
+  };
+}
+
+function buildIdleData(note: string): ForecastNotebookData {
+  return {
+    ...buildEmptyData(note),
+    summary: {
+      spend: 0,
+      installs: 0,
+      cpi: 0,
+      d30Roas: 0,
+      d60Roas: 0,
+      d120Roas: 0,
+      paybackDays: 0,
+      cohortCount: 0,
+      confidence: "Waiting for explicit load",
+    },
+    notes: [
+      note,
+      "Changing top-level project, range, platform, or day-step filters only updates the slice scope now. Live cohort revenue and bounds stay idle until you explicitly load the current settings.",
+    ],
   };
 }
 
@@ -2717,6 +3808,56 @@ function buildEmptyDiagnostics(
     visibleLineCount: 0,
     visibleCohortCount: 0,
     emptyReason: errorMessage,
+    boundsArtifactFallbackUsed: false,
+    boundsArtifactIssue: null,
+    boundsArtifactPath: null,
+    boundsArtifactSourceStatus: null,
+    boundsArtifactSourceLastSyncAt: null,
+    boundsArtifactSourceNextSyncAt: null,
+    boundsArtifactExpectedSizeCount: 0,
+    boundsArtifactLoadedSizeCount: 0,
+    boundsArtifactLoadedSizes: [],
+    boundsArtifactMissingSizes: [],
+    boundsArtifactIssueSamples: [],
+    boundsCoverage: [],
+  };
+}
+
+function buildIdleDiagnostics({
+  descriptorRowCount,
+  selectedDescriptorRowCount,
+  spendRowCount,
+}: {
+  descriptorRowCount: number;
+  selectedDescriptorRowCount: number;
+  spendRowCount: number;
+}): ForecastNotebookDiagnostics {
+  return {
+    contextStatus: "ready",
+    errorMessage: null,
+    descriptorRowCount,
+    selectedDescriptorRowCount,
+    cohortSizeRowCount: 0,
+    revenueRowCount: 0,
+    spendRowCount,
+    corruptedDayCount: 0,
+    rawCohortCount: 0,
+    processedCohortCount: 0,
+    visibleLineCount: 0,
+    visibleCohortCount: 0,
+    emptyReason: "Forecast data is idle until the current slice is explicitly applied.",
+    boundsArtifactFallbackUsed: false,
+    boundsArtifactIssue: null,
+    boundsArtifactPath: null,
+    boundsArtifactSourceStatus: null,
+    boundsArtifactSourceLastSyncAt: null,
+    boundsArtifactSourceNextSyncAt: null,
+    boundsArtifactExpectedSizeCount: 0,
+    boundsArtifactLoadedSizeCount: 0,
+    boundsArtifactLoadedSizes: [],
+    boundsArtifactMissingSizes: [],
+    boundsArtifactIssueSamples: [],
+    boundsCoverage: [],
   };
 }
 
@@ -2890,21 +4031,6 @@ function currentDataCutoffIso() {
   return new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-function cohortSizesToLook(target: number) {
-  const sizes = [target];
-  for (let delta = 1; delta < 1000; delta += 1) {
-    const lower = target - delta;
-    const upper = target + delta;
-    if (lower >= 1) {
-      sizes.push(lower);
-    }
-    if (upper <= 1000) {
-      sizes.push(upper);
-    }
-  }
-  return sizes;
-}
-
 function safeRatioAggregate(values: number[]) {
   const filtered = values.filter((value) => Number.isFinite(value));
   if (filtered.length >= 3) {
@@ -3009,6 +4135,20 @@ function formatPlatformLabel(value: string) {
   return value;
 }
 
+export const __testables = {
+  boundsKey,
+  buildBoundsCoverageSummary,
+  buildRawCohorts,
+  buildRevenueJoinConditionSql,
+  buildSummary,
+  buildSpendMatchTiers,
+  buildSourceSql,
+  buildBoundsForCohortSize,
+  fallbackYoungCohortPrediction,
+  getNotebookBounds,
+  normalizeBoundsCohortSize,
+};
+
 function formatGroupLabel(groupBy: DashboardGroupByKey, value: string) {
   if (groupBy === "country") {
     return formatCountryLabel(value);
@@ -3034,13 +4174,56 @@ function formatLabelDate(value: string) {
   }).format(date);
 }
 
+function formatCohortBucketLabel(startIso: string, stepDays: number, rangeEndIso: string) {
+  const start = new Date(`${startIso}T00:00:00Z`);
+  const rangeEnd = new Date(`${rangeEndIso}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(rangeEnd.getTime())) {
+    return formatLabelDate(startIso);
+  }
+
+  const bucketEnd = new Date(start);
+  bucketEnd.setUTCDate(bucketEnd.getUTCDate() + Math.max(stepDays - 1, 0));
+  const end = bucketEnd.getTime() <= rangeEnd.getTime() ? bucketEnd : rangeEnd;
+  if (end.getTime() <= start.getTime()) {
+    return formatLabelDate(startIso);
+  }
+
+  const partsFormatter = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+  const startMonth = partsFormatter.formatToParts(start).find((part) => part.type === "month")?.value ?? "";
+  const endMonth = partsFormatter.formatToParts(end).find((part) => part.type === "month")?.value ?? "";
+  const startDay = partsFormatter.formatToParts(start).find((part) => part.type === "day")?.value ?? "";
+  const endDay = partsFormatter.formatToParts(end).find((part) => part.type === "day")?.value ?? "";
+
+  if (startMonth === endMonth) {
+    return `${startMonth} ${startDay}-${endDay}`;
+  }
+
+  return `${partsFormatter.format(start)}-${partsFormatter.format(end)}`;
+}
+
 function supportedGroupBy(requested: DashboardGroupByKey) {
   const allowed = new Set<DashboardGroupByKey>(["none", "platform", "country", "source", "company", "campaign", "creative"]);
   return allowed.has(requested) ? requested : "none";
 }
 
+function cloneBoundsTables(
+  source: Map<number, Map<string, readonly [number, number]>>
+) {
+  return new Map(
+    Array.from(source.entries()).map(([cohortSize, table]) => [cohortSize, new Map(table)])
+  );
+}
+
 function uniqueSortedNumbers(values: number[]) {
   return Array.from(new Set(values.filter((value) => Number.isFinite(value) && value > 0))).sort((left, right) => left - right);
+}
+
+function uniqueSortedNonNegativeNumbers(values: number[]) {
+  return Array.from(new Set(values.filter((value) => Number.isFinite(value) && value >= 0))).sort((left, right) => left - right);
 }
 
 function clamp(value: number, min: number, max: number) {

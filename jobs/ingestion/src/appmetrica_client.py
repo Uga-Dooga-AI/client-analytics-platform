@@ -6,7 +6,8 @@ Docs: https://appmetrica.yandex.com/docs/en/mobile-api/logs/ref/
 
 Behavior:
   - Requests AppMetrica Logs API exports in JSON mode.
-  - Polls for 202 Accepted (export being prepared) with exponential back-off.
+  - Performs only a short polling burst inside one worker attempt.
+  - Defers long waits back to orchestration so Cloud Run does not sit idle for hours.
   - Normalizes empty strings to None for cleaner NDJSON → BigQuery loads.
   - Returns an empty iterator when APPMETRICA_TOKEN is not set (stub mode).
 """
@@ -58,10 +59,17 @@ _RUNTIME_CRITICAL_EVENT_NAMES = {
 
 _BASE_URL = "https://api.appmetrica.yandex.com/logs/v1/export"
 
-# Polling config
-_INITIAL_WAIT_S = 10
-_MAX_WAIT_S = 120
-_MAX_ATTEMPTS = 30
+_SHORT_POLL_WAIT_S = 15
+_SHORT_POLL_ATTEMPTS = 3
+_DEFERRED_RETRY_FLOOR_S = 3600
+
+
+class AppMetricaExportPending(RuntimeError):
+    def __init__(self, *, endpoint: str, retry_after_seconds: int, reason: str) -> None:
+        super().__init__(f"AppMetrica export pending for {endpoint}: {reason}")
+        self.endpoint = endpoint
+        self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
 
 
 class AppMetricaClient:
@@ -131,6 +139,8 @@ class AppMetricaClient:
             "appmetrica_device_id",
             "profile_id",
             "tracker_name",
+            "tracking_id",
+            "click_url_parameters",
             "country_iso_code",
             "os_name",
             "app_version_name",
@@ -200,27 +210,35 @@ class AppMetricaClient:
         url = f"{_BASE_URL}/{endpoint}"
         headers = {"Authorization": f"OAuth {self.token}"}
 
-        wait = _INITIAL_WAIT_S
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
+        for attempt in range(1, _SHORT_POLL_ATTEMPTS + 1):
             with requests.get(url, params=params, headers=headers, timeout=60, stream=True) as resp:
                 if resp.status_code == 200:
                     yield from self._iter_export_rows(resp, endpoint)
                     return
 
                 if resp.status_code == 202:
+                    retry_after = self._deferred_retry_after_seconds(resp.headers.get("Retry-After"))
+                    if attempt >= _SHORT_POLL_ATTEMPTS:
+                        raise AppMetricaExportPending(
+                            endpoint=endpoint,
+                            retry_after_seconds=retry_after,
+                            reason="export is still preparing",
+                        )
                     logger.info(
-                        "export not ready (202), attempt %d/%d — waiting %ds",
-                        attempt, _MAX_ATTEMPTS, wait,
+                        "export not ready (202), attempt %d/%d — brief retry before deferring",
+                        attempt,
+                        _SHORT_POLL_ATTEMPTS,
                     )
-                    time.sleep(wait)
-                    wait = min(wait * 2, _MAX_WAIT_S)
+                    time.sleep(_SHORT_POLL_WAIT_S)
                     continue
 
                 if resp.status_code == 429:
-                    retry_after = int(resp.headers.get("Retry-After", wait))
-                    logger.warning("rate limited (429), waiting %ds", retry_after)
-                    time.sleep(retry_after)
-                    continue
+                    retry_after = self._deferred_retry_after_seconds(resp.headers.get("Retry-After"))
+                    raise AppMetricaExportPending(
+                        endpoint=endpoint,
+                        retry_after_seconds=retry_after,
+                        reason="hit rate limit",
+                    )
 
                 body_preview = resp.text[:400]
                 logger.error(
@@ -231,8 +249,10 @@ class AppMetricaClient:
                 )
                 resp.raise_for_status()
 
-        raise RuntimeError(
-            f"AppMetrica export did not complete after {_MAX_ATTEMPTS} attempts: {endpoint}"
+        raise AppMetricaExportPending(
+            endpoint=endpoint,
+            retry_after_seconds=_DEFERRED_RETRY_FLOOR_S,
+            reason="short polling burst ended before export became ready",
         )
 
     @staticmethod
@@ -271,3 +291,15 @@ class AppMetricaClient:
             return True
 
         return event_name.startswith("ab_")
+
+    @staticmethod
+    def _deferred_retry_after_seconds(retry_after_header: str | None) -> int:
+        if retry_after_header:
+            try:
+                retry_after = max(int(retry_after_header), 0)
+            except ValueError:
+                retry_after = 0
+        else:
+            retry_after = 0
+
+        return max(retry_after, _DEFERRED_RETRY_FLOOR_S)

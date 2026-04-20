@@ -110,6 +110,21 @@ def should_force_reload(runtime_context) -> bool:
     return payload.get("forceReload") is True
 
 
+def current_retry_attempt(runtime_context) -> int:
+    if runtime_context.mode != "attached" or not runtime_context.run:
+        return 0
+
+    payload = runtime_context.run.get("payload")
+    if not isinstance(payload, dict):
+        return 0
+
+    value = payload.get("deferAttemptCount")
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def ensure_runtime_infrastructure(config: dict, uploader, loader) -> None:
     provisioning = config.get("provisioning", {})
     if not provisioning.get("auto_create_infrastructure", False):
@@ -188,7 +203,16 @@ def ingest_resource(
             raise ValueError(f"Unknown resource type: {resource}")
 
         # --- 2. Upload to GCS (idempotency check) ---
-        if uploader.blob_exists(blob_path):
+        if force_reload and uploader.blob_exists(blob_path):
+            logger.info("[%s] force_reload enabled — replacing staged blob: %s", run_id, gcs_uri)
+            uploader.delete_blob(blob_path)
+            upload_result = uploader.upload_ndjson(rows=rows, blob_path=blob_path)
+            gcs_uri = upload_result.uri
+            if upload_result.row_count == 0:
+                status = "skipped_empty"
+                logger.info("[%s] no %s rows returned after forced blob refresh — skipping BQ load", run_id, resource)
+                return
+        elif uploader.blob_exists(blob_path):
             existing_blob_size = uploader.blob_size(blob_path)
             if existing_blob_size == 0:
                 logger.info(
@@ -224,6 +248,7 @@ def ingest_resource(
             table=bq_table,
             schema=loader.appmetrica_schema(resource),
             partition_date=ingest_date,
+            force_reload=force_reload,
         )
 
     except Exception as exc:
@@ -299,7 +324,7 @@ def main() -> None:
             )
             return
 
-        from src.appmetrica_client import AppMetricaClient
+        from src.appmetrica_client import AppMetricaClient, AppMetricaExportPending
         from src.gcs_uploader import GCSUploader
         from src.bq_loader import BQLoader
 
@@ -308,8 +333,10 @@ def main() -> None:
         loader = BQLoader()
         ensure_runtime_infrastructure(config, uploader, loader)
         force_reload = should_force_reload(runtime_context)
+        retry_attempt = current_retry_attempt(runtime_context)
 
         failed: list[str] = []
+        deferred: list[dict[str, object]] = []
 
         for ingest_date in ingest_dates:
             for app_id in app_ids:
@@ -332,6 +359,17 @@ def main() -> None:
                             run_id_prefix=run_id_prefix,
                             force_reload=force_reload,
                         )
+                    except AppMetricaExportPending as exc:
+                        deferred.append(
+                            {
+                                "appId": app_id,
+                                "resource": resource,
+                                "date": ingest_date,
+                                "reason": exc.reason,
+                                "retryAfterSeconds": exc.retry_after_seconds,
+                                "endpoint": exc.endpoint,
+                            }
+                        )
                     except Exception:
                         failed.append(f"{app_id}/{resource}/{ingest_date}")
 
@@ -347,12 +385,55 @@ def main() -> None:
             )
             sys.exit(1)
 
+        if deferred:
+            retry_after_seconds = max(
+                int(entry.get("retryAfterSeconds", 3600))
+                for entry in deferred
+            )
+            defer_until = (datetime.now(timezone.utc) + timedelta(seconds=retry_after_seconds)).isoformat()
+            logger.info(
+                "=== ingestion deferred: pending_slices=%s retry_after_seconds=%s defer_until=%s ===",
+                [f"{entry['appId']}/{entry['resource']}/{entry['date']}" for entry in deferred],
+                retry_after_seconds,
+                defer_until,
+            )
+            patch_run_status(
+                runtime_context,
+                status="blocked",
+                message=(
+                    f"AppMetrica export is still preparing for {len(deferred)} slice(s); "
+                    f"retry will be eligible after {defer_until}."
+                ),
+                payload={
+                    "processedDates": ingest_dates,
+                    "appIds": app_ids,
+                    "gcsPrefix": gcs_prefix,
+                    "deferUntil": defer_until,
+                    "deferReason": "appmetrica_export_pending",
+                    "deferAttemptCount": retry_attempt + 1,
+                    "retryAfterSeconds": retry_after_seconds,
+                    "pendingSlices": deferred,
+                },
+                source_type="appmetrica_logs",
+                source_status="syncing",
+            )
+            return
+
         logger.info("=== AppMetrica ingestion job complete: dates=%s apps=%s ===", ingest_dates, app_ids)
         patch_run_status(
             runtime_context,
             status="succeeded",
             message=f"Ingestion completed for {len(ingest_dates)} date window(s).",
-            payload={"processedDates": ingest_dates, "appIds": app_ids, "gcsPrefix": gcs_prefix},
+            payload={
+                "processedDates": ingest_dates,
+                "appIds": app_ids,
+                "gcsPrefix": gcs_prefix,
+                "deferUntil": None,
+                "deferReason": None,
+                "deferAttemptCount": retry_attempt,
+                "retryAfterSeconds": None,
+                "pendingSlices": [],
+            },
             source_type="appmetrica_logs",
             source_status="ready",
         )

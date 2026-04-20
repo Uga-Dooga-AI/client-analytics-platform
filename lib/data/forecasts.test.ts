@@ -139,6 +139,38 @@ describe("forecast live reads", () => {
     expect(String(executeBigQueryMock.mock.calls[0]?.[1])).toContain("word_catcher_forecast_points_serving");
   });
 
+  it("hides published metrics that are not supported by the current revenue-only runtime contract", async () => {
+    const { getForecastTrajectories } = await import("@/lib/data/forecasts");
+    const bundle = makeBundle();
+    const context = makeContext(bundle);
+
+    listAnalyticsProjectsMock.mockResolvedValue([bundle]);
+    loadBigQueryContextsMock.mockResolvedValue(new Map([[bundle.project.id, context]]));
+    executeBigQueryMock.mockResolvedValue([
+      {
+        metric: "revenue",
+        forecast_date: "2026-04-18",
+        p50: 120.5,
+        p10: 100.1,
+        p90: 140.9,
+        generated_at: "2026-04-18T12:00:00Z",
+      },
+      {
+        metric: "dau",
+        forecast_date: "2026-04-18",
+        p50: 900,
+        p10: 850,
+        p90: 950,
+        generated_at: "2026-04-18T12:00:00Z",
+      },
+    ]);
+
+    const trajectories = await getForecastTrajectories({ projectKey: "all" });
+
+    expect(trajectories).toHaveLength(1);
+    expect(trajectories[0]?.metric).toBe("Revenue forecast");
+  });
+
   it("falls back to the raw forecast table when the serving table read fails", async () => {
     const { getForecastTrajectories } = await import("@/lib/data/forecasts");
     const bundle = makeBundle();

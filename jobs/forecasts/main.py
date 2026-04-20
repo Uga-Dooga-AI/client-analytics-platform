@@ -29,6 +29,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("forecasts")
 
+SUPPORTED_FORECAST_METRICS = ("revenue",)
+
 
 def load_config() -> dict:
     config_path = Path(os.environ.get("JOB_CONFIG_PATH", "config/job_config.example.yml"))
@@ -67,21 +69,46 @@ def should_anchor_history_window(runtime_context) -> bool:
 
 
 def resolve_metric_list(config: dict) -> list[str]:
+    def sanitize_metrics(raw_metrics: list[str]) -> list[str]:
+        supported = []
+        unsupported = []
+
+        for metric in raw_metrics:
+            normalized = str(metric).strip()
+            if not normalized:
+                continue
+            if normalized in SUPPORTED_FORECAST_METRICS:
+                if normalized not in supported:
+                    supported.append(normalized)
+            elif normalized not in unsupported:
+                unsupported.append(normalized)
+
+        if unsupported:
+            logger.warning(
+                "ignoring unsupported forecast metrics %s; current runtime only materializes decay-compatible metrics %s",
+                unsupported,
+                list(SUPPORTED_FORECAST_METRICS),
+            )
+
+        return supported
+
     env_override = (
         os.environ.get("ANALYTICS_FORECAST_METRICS")
         or os.environ.get("FORECAST_METRICS")
         or ""
     ).strip()
     if env_override:
-        metrics = [metric.strip() for metric in env_override.split(",") if metric.strip()]
+        metrics = sanitize_metrics(env_override.split(","))
         if metrics:
             return metrics
 
     forecast_cfg = config.get("forecast", {})
     metrics = forecast_cfg.get("metrics")
     if isinstance(metrics, list):
-        return [str(metric).strip() for metric in metrics if str(metric).strip()]
-    return ["revenue", "dau", "installs", "exposures", "activations"]
+        sanitized = sanitize_metrics(metrics)
+        if sanitized:
+            return sanitized
+    return list(SUPPORTED_FORECAST_METRICS)
 
 
 def resolve_hot_combination_limit(config: dict) -> int:
@@ -239,7 +266,11 @@ def main() -> None:
         )
         publish_forecast_serving_table(config)
 
-        message = f"Forecast job completed for {len(metrics)} metric(s)."
+        message = (
+            "Forecast job completed for revenue."
+            if metrics == ["revenue"]
+            else f"Forecast job completed for {len(metrics)} metric(s)."
+        )
         logger.info(message)
         patch_run_status(
             runtime_context,

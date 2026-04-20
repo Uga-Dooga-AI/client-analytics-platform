@@ -64,6 +64,7 @@ export type ComparisonConfidenceChartData = {
   subtitle: string;
   unit: string;
   groups: ComparisonChartGroup[];
+  historyHorizonDay?: number;
   yAxis?: {
     min?: number;
     max?: number;

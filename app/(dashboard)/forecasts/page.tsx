@@ -1,6 +1,7 @@
 import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
 import { CohortMatrixTable } from "@/components/cohort-matrix-table";
 import { ForecastCombinationTracker } from "@/components/forecast-combination-tracker";
+import { ForecastHistoryChart } from "@/components/forecast-history-chart";
 import { ForecastSelectionWorkbench } from "@/components/forecast-selection-workbench";
 import { TopFilterRail } from "@/components/top-filter-rail";
 import {
@@ -26,6 +27,7 @@ import { normalizeForecastHorizonDays } from "@/lib/data/forecast-horizons";
 import {
   getProjectLabel,
   parseDashboardSearchParams,
+  serializeDashboardFilters,
   type DashboardGroupByKey,
 } from "@/lib/dashboard-filters";
 import {
@@ -90,6 +92,15 @@ function hasAppliedForecastSelection(
   }
 
   return FORECAST_URL_PARAM_KEYS.some((key) => readSingleParam(raw, key) !== undefined);
+}
+
+function isActiveRunStatus(status: string) {
+  return (
+    status === "queued" ||
+    status === "blocked" ||
+    status === "running" ||
+    status === "waiting_credentials"
+  );
 }
 
 function deriveHistoricalForecastDraft(
@@ -245,6 +256,43 @@ function buildForecastDataDiagnostic({
   };
 }
 
+function buildBoundsArtifactDiagnostic({
+  selectedProjectLabel,
+  diagnostics,
+}: {
+  selectedProjectLabel: string;
+  diagnostics: Awaited<ReturnType<typeof getForecastNotebookSurface>>["diagnostics"];
+}) {
+  if (!diagnostics.boundsArtifactFallbackUsed || !diagnostics.boundsArtifactIssue) {
+    return null;
+  }
+
+  const missingPreview =
+    diagnostics.boundsArtifactMissingSizes.length > 0
+      ? diagnostics.boundsArtifactMissingSizes.slice(0, 8).join(", ")
+      : "unknown";
+  const missingSuffix =
+    diagnostics.boundsArtifactMissingSizes.length > 8
+      ? `, +${diagnostics.boundsArtifactMissingSizes.length - 8} more`
+      : "";
+  const sourceStatus = diagnostics.boundsArtifactSourceStatus ?? "unknown";
+  const lastSync = diagnostics.boundsArtifactSourceLastSyncAt
+    ? formatDateTime(new Date(diagnostics.boundsArtifactSourceLastSyncAt))
+    : "never";
+  const nextSync = diagnostics.boundsArtifactSourceNextSyncAt
+    ? formatDateTime(new Date(diagnostics.boundsArtifactSourceNextSyncAt))
+    : "not scheduled";
+  const issueSamples =
+    diagnostics.boundsArtifactIssueSamples.length > 0
+      ? ` Sample issues: ${diagnostics.boundsArtifactIssueSamples.join(" | ")}.`
+      : "";
+
+  return {
+    title: "Notebook Bounds Artifact Fallback",
+    body: `${selectedProjectLabel} rendered this slice with fallback bounds because notebook artifact files were not fully available. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
+  };
+}
+
 function formatStageTone(stage: ForecastPipelineStage) {
   switch (stage.status) {
     case "ready":
@@ -261,6 +309,27 @@ function formatStageTone(stage: ForecastPipelineStage) {
     default:
       return { label: "Failed", color: "var(--color-danger)", background: "#fee2e2" };
   }
+}
+
+function formatBoundsCoverageSource(source: "artifact" | "live_fallback" | "missing") {
+  switch (source) {
+    case "artifact":
+      return { label: "Artifact", color: "var(--color-success)", background: "#dcfce7" };
+    case "live_fallback":
+      return { label: "Live-built", color: "var(--color-signal-blue)", background: "var(--color-signal-blue-surface)" };
+    default:
+      return { label: "Missing", color: "var(--color-danger)", background: "#fee2e2" };
+  }
+}
+
+function formatBoundsCoverageRange(minValue: number | null, maxValue: number | null, prefix: string) {
+  if (minValue == null || maxValue == null) {
+    return "—";
+  }
+  if (minValue === maxValue) {
+    return `${prefix}${minValue}`;
+  }
+  return `${prefix}${minValue}–${prefix}${maxValue}`;
 }
 
 function MethodologyPanel() {
@@ -336,9 +405,6 @@ export default async function ForecastsPage({
   const scopedBundles = scopeBundles(bundles, filters.projectKey);
   const selectedBundle = scopedBundles[0] ?? null;
   const selectedProjectLabel = getProjectLabel(filters.projectKey);
-  const recentRuns = flattenRuns(scopedBundles).filter(({ run }) =>
-    run.runType === "forecast" || run.runType === "bounds_refresh"
-  );
 
   const notebookSelection = {
     revenueMode: localFilters.revenueMode,
@@ -388,6 +454,12 @@ export default async function ForecastsPage({
     listForecastCombinations(selectedBundle.project.id, 20),
     listForecastCombinations(selectedBundle.project.id, 20, { includeSystem: true }),
   ]);
+  const showBoundsHistory = selectedBundle.project.boundsIntervalHours > 0;
+  const recentRuns = flattenRuns(scopedBundles).filter(({ run }) =>
+    run.runType === "forecast" ||
+    (run.runType === "bounds_refresh" &&
+      (showBoundsHistory || isActiveRunStatus(run.status)))
+  );
   const latestHistoricalCombination = manualCombinations[0] ?? combinations[0] ?? null;
   const historicalDraft = deriveHistoricalForecastDraft(latestHistoricalCombination);
   const draftSelection = hasAppliedSelection
@@ -402,6 +474,7 @@ export default async function ForecastsPage({
     filters,
     selection: draftSelection,
     horizonDays: draftHorizonDays,
+    loadData: hasAppliedSelection,
   });
   const notebookData = notebookSurface.data;
   const trackerPayload = hasAppliedSelection
@@ -430,8 +503,29 @@ export default async function ForecastsPage({
         diagnostics: notebookSurface.diagnostics,
       })
     : null;
+  const boundsArtifactDiagnostic = hasAppliedSelection
+    ? buildBoundsArtifactDiagnostic({
+        selectedProjectLabel,
+        diagnostics: notebookSurface.diagnostics,
+      })
+    : null;
   const strategy = selectedBundle.project.settings.forecastStrategy ?? null;
   const strategyToggleValue = (enabled: boolean | undefined) => (enabled ? "On" : "Off");
+  const historyBaseQuery = hasAppliedSelection
+    ? (() => {
+        const params = serializeDashboardFilters({
+          ...filters,
+          projectKey: selectedBundle.project.slug,
+        });
+        params.set("revenueMode", notebookSelection.revenueMode);
+        params.set("country", notebookSelection.country);
+        params.set("source", notebookSelection.source);
+        params.set("company", notebookSelection.company);
+        params.set("campaign", notebookSelection.campaign);
+        params.set("creative", notebookSelection.creative);
+        return params.toString();
+      })()
+    : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -513,6 +607,10 @@ export default async function ForecastsPage({
 
         {hasAppliedSelection && forecastDataDiagnostic ? (
           <DiagnosticBanner title={forecastDataDiagnostic.title} body={forecastDataDiagnostic.body} />
+        ) : null}
+
+        {hasAppliedSelection && boundsArtifactDiagnostic ? (
+          <DiagnosticBanner title={boundsArtifactDiagnostic.title} body={boundsArtifactDiagnostic.body} />
         ) : null}
 
         {hasAppliedSelection && pipelineSnapshot ? (
@@ -650,15 +748,106 @@ export default async function ForecastsPage({
             background: "var(--color-panel-base)",
             border: "1px solid var(--color-border-soft)",
             borderRadius: 10,
-            padding: 18,
+            overflow: "hidden",
           }}
         >
-          <SectionHeader
-            title="Payback curve by lifetime day"
-            subtitle="Full-width live cohort payback curve for the selected slice. Use the legend chips on the chart to hide individual lines when grouped."
-          />
-          <ComparisonConfidenceChart chart={notebookData.paybackChart} />
+          <div style={{ padding: 18 }}>
+            <SectionHeader
+              title="Bounds Coverage"
+              subtitle="Which normalized cohort sizes currently have notebook bounds, whether they came from artifacts or live-built history, and how much history supports them."
+            />
+          </div>
+
+          {notebookSurface.diagnostics.boundsCoverage.length > 0 ? (
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Cohort size", "Slice cohorts", "Source", "Training records", "History days", "Prediction days", "Table keys"].map((column) => (
+                    <th
+                      key={column}
+                      style={{
+                        padding: "10px 18px",
+                        textAlign: "left",
+                        fontSize: 10.5,
+                        fontWeight: 600,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                        color: "var(--color-ink-500)",
+                        background: "var(--color-panel-soft)",
+                        borderBottom: "1px solid var(--color-border-soft)",
+                      }}
+                    >
+                      {column}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {notebookSurface.diagnostics.boundsCoverage.map((row, index) => {
+                  const tone = formatBoundsCoverageSource(row.source);
+                  return (
+                    <tr
+                      key={`bounds-${row.cohortSize}`}
+                      style={{
+                        borderBottom:
+                          index < notebookSurface.diagnostics.boundsCoverage.length - 1
+                            ? "1px solid var(--color-border-soft)"
+                            : "none",
+                      }}
+                    >
+                      <td style={{ padding: "14px 18px", fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                        {row.cohortSize}
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                        {row.sliceCohorts}
+                      </td>
+                      <td style={{ padding: "14px 18px" }}>
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            padding: "3px 8px",
+                            borderRadius: 999,
+                            background: tone.background,
+                            color: tone.color,
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                          }}
+                        >
+                          {tone.label}
+                        </span>
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                        {row.smoothedTrainingRecords}
+                        {row.minTrainingCohortSize != null && row.maxTrainingCohortSize != null ? (
+                          <div style={{ marginTop: 2, fontSize: 11, color: "var(--color-ink-500)" }}>
+                            window {row.minTrainingCohortSize}-{row.maxTrainingCohortSize}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                        {formatBoundsCoverageRange(row.minHistoryDay, row.maxHistoryDay, "D")}
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                        {formatBoundsCoverageRange(row.minPredictionDay, row.maxPredictionDay, "D")}
+                      </td>
+                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                        {row.tableKeyCount}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <div style={{ padding: 18, fontSize: 12.5, color: "var(--color-ink-500)" }}>
+              No cohort sizes requested bounds for the current slice yet.
+            </div>
+          )}
         </section>
+
+        <ComparisonConfidenceChart chart={notebookData.cohortCurvesChart} />
+
+        <ComparisonConfidenceChart chart={notebookData.paybackChart} />
 
         <section
           style={{
@@ -667,9 +856,25 @@ export default async function ForecastsPage({
             gap: 18,
           }}
         >
-          {notebookData.horizonCharts.map((chart) => (
-            <ComparisonConfidenceChart key={chart.id} chart={chart} />
-          ))}
+          <SectionHeader
+            title="Forecast curves by cohort date"
+            subtitle="Notebook-style forecast curves for the selected slice, split by horizon and plotted against cohort dates."
+          />
+
+          {notebookData.horizonCharts.length > 0 ? (
+            notebookData.horizonCharts.map((chart) => (
+              <ForecastHistoryChart
+                key={chart.id}
+                chart={chart}
+                projectKey={selectedBundle.project.slug}
+                historyBaseQuery={historyBaseQuery ?? ""}
+              />
+            ))
+          ) : (
+            <div style={{ fontSize: 12.5, color: "var(--color-ink-500)" }}>
+              No cohort-date forecast charts are available for the current slice yet.
+            </div>
+          )}
         </section>
 
         <section
@@ -781,7 +986,12 @@ export default async function ForecastsPage({
                 ["Precompute primary", strategyToggleValue(strategy?.precomputePrimaryForecasts)],
                 ["On-demand", strategyToggleValue(strategy?.enableOnDemandForecasts)],
                 ["Recent combination cap", strategy?.recentCombinationLimit?.toString() ?? "—"],
-                ["Bounds interval", `${selectedBundle.project.boundsIntervalHours}h`],
+                [
+                  "Bounds interval",
+                  selectedBundle.project.boundsIntervalHours > 0
+                    ? `${selectedBundle.project.boundsIntervalHours}h`
+                    : "Manual only",
+                ],
                 ["Forecast interval", `${selectedBundle.project.forecastIntervalHours}h`],
                 ["Bounds path", selectedBundle.project.boundsPath || "Not set"],
               ].map(([label, value]) => (
@@ -920,7 +1130,11 @@ export default async function ForecastsPage({
           <div style={{ padding: 18 }}>
             <SectionHeader
               title="Forecast-related run history"
-              subtitle="Bounds refresh and forecast job attempts from the live control plane."
+              subtitle={
+                showBoundsHistory
+                  ? "Bounds refresh and forecast job attempts from the live control plane."
+                  : "Forecast job attempts from the live control plane. Bounds rebuilds are manual-only here and stay hidden unless one is actively running."
+              }
             />
           </div>
 
@@ -951,7 +1165,9 @@ export default async function ForecastsPage({
               {recentRuns.length === 0 ? (
                 <tr>
                   <td colSpan={5} style={{ padding: 18, fontSize: 13, color: "var(--color-ink-500)" }}>
-                    No forecast or bounds runs have been recorded yet.
+                    {showBoundsHistory
+                      ? "No forecast or bounds runs have been recorded yet."
+                      : "No forecast runs have been recorded yet."}
                   </td>
                 </tr>
               ) : (

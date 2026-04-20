@@ -21,13 +21,22 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_METRICS = {
     "revenue": "SUM(COALESCE(revenue, 0))",
-    "dau": "SUM(COALESCE(dau, 0))",
-    "installs": "SUM(COALESCE(installed, 0))",
     "exposures": "SUM(COALESCE(exposures, 0))",
     "activations": "SUM(COALESCE(activations, 0))",
     "guardrail_crashes": "SUM(COALESCE(guardrail_crashes, 0))",
     "guardrail_errors": "SUM(COALESCE(guardrail_errors, 0))",
 }
+
+DATE_COLUMN_CANDIDATES = (
+    "date",
+    "run_date",
+    "install_date",
+    "event_date",
+    "cohort_date",
+    "segments_date",
+    "day",
+)
+TEMPORAL_TYPES = {"DATE", "DATETIME", "TIMESTAMP"}
 
 
 class MartReader:
@@ -50,17 +59,8 @@ class MartReader:
             or self._derive_companion_table("revenue_metrics")
             or "mart_revenue_metrics"
         )
-        self.daily_active_users_table = (
-            os.environ.get("BQ_DAILY_ACTIVE_USERS_TABLE")
-            or self._derive_companion_table("daily_active_users")
-            or "mart_daily_active_users"
-        )
-        self.installs_funnel_table = (
-            os.environ.get("BQ_INSTALLS_FUNNEL_TABLE")
-            or self._derive_companion_table("installs_funnel")
-            or "mart_installs_funnel"
-        )
         self.input_path = input_path or os.environ.get("FORECAST_INPUT_PATH")
+        self._resolved_date_fields: dict[str, tuple[str, str] | None] = {}
 
         if not self.project_id:
             logger.warning("GCP_PROJECT_ID not set — BigQuery reader will stay in fallback mode")
@@ -130,11 +130,11 @@ class MartReader:
 
         metric_names = [
             metric
-            for metric in (metrics or ["revenue", "dau", "installs", "exposures", "activations"])
+            for metric in (metrics or ["revenue"])
             if metric in ALLOWED_METRICS
         ]
         if not metric_names:
-            metric_names = ["revenue", "dau", "installs", "exposures", "activations"]
+            metric_names = ["revenue"]
 
         if self._client is None:
             return self._read_from_local_input(metric_names)
@@ -160,29 +160,32 @@ class MartReader:
 
         if metric == "revenue":
             table_name = self.revenue_metrics_table
-            date_column = "date"
             value_sql = "SUM(COALESCE(gross_revenue, 0))"
-        elif metric == "dau":
-            table_name = self.daily_active_users_table
-            date_column = "date"
-            value_sql = "SUM(COALESCE(dau, 0))"
-        elif metric == "installs":
-            table_name = self.installs_funnel_table
-            date_column = "install_date"
-            value_sql = "SUM(COALESCE(installed, 0))"
         else:
             table_name = self.experiment_daily_table
-            date_column = "date"
             value_sql = ALLOWED_METRICS[metric]
+
+        resolved_date_field = self._resolve_date_field(table_name)
+        if resolved_date_field is None:
+            logger.warning(
+                "skipping metric %s because no temporal column was found for %s.%s.%s",
+                metric,
+                self.project_id,
+                self.mart_dataset,
+                table_name,
+            )
+            return pd.DataFrame(columns=["date", "metric", "value"])
+
+        date_select_sql, date_filter_sql = resolved_date_field
 
         query = f"""
             SELECT
-              {date_column} AS date,
+              {date_select_sql} AS date,
               @metric AS metric,
               CAST({value_sql} AS FLOAT64) AS value
             FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
-            WHERE {date_column} BETWEEN @date_from AND @date_to
-            GROUP BY {date_column}
+            WHERE {date_filter_sql} BETWEEN @date_from AND @date_to
+            GROUP BY 1, 2
         """
         job_config = self._bq.QueryJobConfig(
             query_parameters=[
@@ -215,21 +218,18 @@ class MartReader:
             return None
 
         candidates = [
-            (self.experiment_daily_table, "date"),
-            (self.revenue_metrics_table, "date"),
-            (self.daily_active_users_table, "date"),
-            (self.installs_funnel_table, "install_date"),
+            self.experiment_daily_table,
+            self.revenue_metrics_table,
         ]
         latest_dates: list[date] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
 
-        for table_name, date_column in candidates:
-            key = (table_name, date_column)
-            if key in seen:
+        for table_name in candidates:
+            if table_name in seen:
                 continue
-            seen.add(key)
+            seen.add(table_name)
 
-            latest_date = self._latest_available_date_for_table(table_name, date_column)
+            latest_date = self._latest_available_date_for_table(table_name)
             if latest_date is not None:
                 latest_dates.append(latest_date)
 
@@ -238,12 +238,24 @@ class MartReader:
 
         return max(latest_dates)
 
-    def _latest_available_date_for_table(self, table_name: str, date_column: str) -> date | None:
+    def _latest_available_date_for_table(self, table_name: str) -> date | None:
         if self._client is None:
             return None
 
+        resolved_date_field = self._resolve_date_field(table_name)
+        if resolved_date_field is None:
+            logger.warning(
+                "latest date probe skipped because no temporal column was found for %s.%s.%s",
+                self.project_id,
+                self.mart_dataset,
+                table_name,
+            )
+            return None
+
+        _, date_filter_sql = resolved_date_field
+
         query = f"""
-            SELECT MAX({date_column}) AS latest_date
+            SELECT MAX({date_filter_sql}) AS latest_date
             FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
         """
         try:
@@ -273,6 +285,79 @@ class MartReader:
             return date.fromisoformat(str(latest_value))
         except ValueError:
             return None
+
+    def _resolve_date_field(self, table_name: str) -> tuple[str, str] | None:
+        if table_name in self._resolved_date_fields:
+            return self._resolved_date_fields[table_name]
+
+        resolved = self._resolve_date_field_uncached(table_name)
+        self._resolved_date_fields[table_name] = resolved
+        return resolved
+
+    def _resolve_date_field_uncached(self, table_name: str) -> tuple[str, str] | None:
+        if self._client is None:
+            return ("date", "date")
+
+        query = f"""
+            SELECT column_name, data_type
+            FROM `{self.project_id}.{self.mart_dataset}.INFORMATION_SCHEMA.COLUMNS`
+            WHERE table_name = @table_name
+            ORDER BY ordinal_position
+        """
+        job_config = self._bq.QueryJobConfig(
+            query_parameters=[
+                self._bq.ScalarQueryParameter("table_name", "STRING", table_name),
+            ]
+        )
+
+        try:
+            df = self._client.query(query, job_config=job_config).to_dataframe()
+        except Exception as error:
+            message = str(error)
+            if "Not found: Table" in message:
+                logger.warning(
+                    "date field resolution skipped because source table is unavailable: %s",
+                    message,
+                )
+                return None
+            raise
+
+        if df.empty:
+            return None
+
+        columns = [
+            (str(row["column_name"]), str(row["data_type"]).upper())
+            for _, row in df.iterrows()
+        ]
+
+        for candidate in DATE_COLUMN_CANDIDATES:
+            match = next((column for column in columns if column[0] == candidate), None)
+            if match is not None:
+                return self._build_date_field_sql(*match)
+
+        fallback_temporal = next(
+            (column for column in columns if column[1] in TEMPORAL_TYPES),
+            None,
+        )
+        if fallback_temporal is not None:
+            logger.warning(
+                "table %s.%s.%s does not expose a preferred date column; falling back to %s (%s)",
+                self.project_id,
+                self.mart_dataset,
+                table_name,
+                fallback_temporal[0],
+                fallback_temporal[1],
+            )
+            return self._build_date_field_sql(*fallback_temporal)
+
+        return None
+
+    def _build_date_field_sql(self, column_name: str, data_type: str) -> tuple[str, str]:
+        if data_type in {"TIMESTAMP", "DATETIME"}:
+            expression = f"DATE({column_name})"
+            return expression, expression
+
+        return column_name, column_name
 
     def _read_from_local_input(self, metrics: list[str]) -> "pd.DataFrame":
         import pandas as pd

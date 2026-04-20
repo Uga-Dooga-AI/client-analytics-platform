@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ForecastSliceControls, type ForecastSliceSelection } from "@/components/forecast-slice-controls";
 import { serializeForecastHorizonDays } from "@/lib/data/forecast-horizons";
@@ -44,6 +44,7 @@ export function ForecastSelectionWorkbench({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const [isApplyingSelection, startTransition] = useTransition();
   const [draftSelection, setDraftSelection] = useState<ForecastSliceSelection>(initialDraftSelection);
   const [draftHorizonDays, setDraftHorizonDays] = useState<number[]>(initialDraftHorizonDays);
 
@@ -61,6 +62,10 @@ export function ForecastSelectionWorkbench({
     !sameDays(draftHorizonDays, appliedHorizonDays);
 
   const statusMessage = useMemo(() => {
+    if (isApplyingSelection) {
+      return "The current slice is being applied now. The page is updating URL state and loading only the exact cohort/revenue surface for this selection.";
+    }
+
     if (!hasAppliedSelection) {
       if (latestHistoryLabel) {
         const viewedAt = latestHistoryViewedAt
@@ -73,7 +78,7 @@ export function ForecastSelectionWorkbench({
     }
 
     return "The charts above still reflect the previously applied slice. Apply the current draft to load and, if needed, queue only this exact combination.";
-  }, [hasAppliedSelection, latestHistoryLabel, latestHistoryViewedAt]);
+  }, [hasAppliedSelection, isApplyingSelection, latestHistoryLabel, latestHistoryViewedAt]);
 
   function applySelection() {
     const next = new URLSearchParams(searchParams.toString());
@@ -87,7 +92,9 @@ export function ForecastSelectionWorkbench({
     next.set("creative", draftSelection.creative);
     next.set("horizonDays", serializeForecastHorizonDays(draftHorizonDays));
 
-    router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+    startTransition(() => {
+      router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+    });
   }
 
   return (
@@ -135,7 +142,11 @@ export function ForecastSelectionWorkbench({
           >
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-ink-950)" }}>
-                {hasAppliedSelection ? "Current settings changed" : "Current settings are not loaded yet"}
+                {isApplyingSelection
+                  ? "Applying current settings"
+                  : hasAppliedSelection
+                    ? "Current settings changed"
+                    : "Current settings are not loaded yet"}
               </div>
               <div
                 style={{
@@ -147,11 +158,33 @@ export function ForecastSelectionWorkbench({
               >
                 {statusMessage}
               </div>
+              {isApplyingSelection ? (
+                <div
+                  style={{
+                    marginTop: 8,
+                    height: 4,
+                    borderRadius: 999,
+                    background: "rgba(15, 23, 42, 0.08)",
+                    overflow: "hidden",
+                    maxWidth: 320,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: "68%",
+                      height: "100%",
+                      borderRadius: 999,
+                      background: "var(--color-ink-950)",
+                    }}
+                  />
+                </div>
+              ) : null}
             </div>
 
             <button
               type="button"
               onClick={applySelection}
+              disabled={isApplyingSelection}
               style={{
                 border: "none",
                 borderRadius: 12,
@@ -162,10 +195,15 @@ export function ForecastSelectionWorkbench({
                 fontSize: 13,
                 fontWeight: 700,
                 whiteSpace: "nowrap",
-                cursor: "pointer",
+                cursor: isApplyingSelection ? "progress" : "pointer",
+                opacity: isApplyingSelection ? 0.7 : 1,
               }}
             >
-              {hasAppliedSelection ? "Update Data For Current Settings" : "Display Data For Current Settings"}
+              {isApplyingSelection
+                ? "Loading Current Settings…"
+                : hasAppliedSelection
+                  ? "Update Data For Current Settings"
+                  : "Display Data For Current Settings"}
             </button>
           </div>
         </div>

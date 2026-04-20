@@ -72,6 +72,8 @@ _APPMETRICA_RESOURCE_SCHEMAS = {
         ("appmetrica_device_id", "STRING"),
         ("profile_id", "STRING"),
         ("tracker_name", "STRING"),
+        ("tracking_id", "STRING"),
+        ("click_url_parameters", "STRING"),
         ("country_iso_code", "STRING"),
         ("os_name", "STRING"),
         ("app_version_name", "STRING"),
@@ -147,6 +149,7 @@ class BQLoader:
         table: str,
         schema: list | None = None,
         partition_date: str | None = None,
+        force_reload: bool = False,
     ) -> int:
         """
         Trigger a BigQuery load job from a GCS URI into a raw/stg table.
@@ -171,7 +174,13 @@ class BQLoader:
             logger.info("stub load_from_gcs: %s → %s (no credentials)", gcs_uri, destination)
             return 0
 
-        job_config = self._bq.LoadJobConfig(**_LOAD_CONFIG)
+        load_config = {
+            **_LOAD_CONFIG,
+            "write_disposition": (
+                "WRITE_TRUNCATE" if force_reload and partition_date else _LOAD_CONFIG["write_disposition"]
+            ),
+        }
+        job_config = self._bq.LoadJobConfig(**load_config)
         if schema:
             job_config.schema = schema
             job_config.autodetect = False
@@ -179,6 +188,7 @@ class BQLoader:
             job_config.autodetect = True
 
         if partition_date:
+            self._ensure_partitioned_appmetrica_table(table, schema)
             job_config.time_partitioning = self._bq.TimePartitioning(
                 type_=self._bq.TimePartitioningType.DAY
             )
@@ -190,7 +200,12 @@ class BQLoader:
             dest_ref,
             job_config=job_config,
         )
-        logger.info("BQ load job started: %s → %s", gcs_uri, destination)
+        logger.info(
+            "BQ load job started: %s → %s (force_reload=%s)",
+            gcs_uri,
+            destination,
+            force_reload,
+        )
 
         try:
             load_job.result()  # blocks until complete
@@ -303,6 +318,7 @@ class BQLoader:
         replacement.time_partitioning = self._bq.TimePartitioning(
             type_=self._bq.TimePartitioningType.DAY
         )
+        replacement.require_partition_filter = True
         self._client.create_table(replacement)
 
         column_names = [field.name for field in schema]
@@ -319,6 +335,53 @@ class BQLoader:
         logger.warning("Rehydrating rebuilt raw table from backup: %s", source_table_id)
         query_job = self._client.query(insert_sql)
         query_job.result()
+
+    def _ensure_partitioned_appmetrica_table(self, table: str, schema: list | None) -> None:
+        if self._client is None or self._bq is None or not schema:
+            return
+
+        if "_appmetrica_" not in table:
+            return
+
+        from google.cloud.exceptions import NotFound  # type: ignore[import-untyped]
+
+        table_id = f"{self.project_id}.{self.dataset}.{table}"
+
+        try:
+            existing = self._client.get_table(table_id)
+        except NotFound:
+            raw_table = self._bq.Table(table_id, schema=schema)
+            raw_table.time_partitioning = self._bq.TimePartitioning(
+                type_=self._bq.TimePartitioningType.DAY
+            )
+            raw_table.require_partition_filter = True
+            self._client.create_table(raw_table)
+            logger.info(
+                "Created partitioned raw AppMetrica table with required partition filter: %s",
+                table_id,
+            )
+            return
+
+        partitioning = existing.time_partitioning
+        is_day_partitioned = (
+            partitioning is not None
+            and getattr(partitioning, "type_", None) == self._bq.TimePartitioningType.DAY
+        )
+
+        if not is_day_partitioned:
+            logger.warning(
+                "Raw AppMetrica table %s is not DAY-partitioned; rebuilding it as a partitioned table.",
+                table_id,
+            )
+            self._rebuild_appmetrica_table(table, schema)
+            return
+
+        if existing.require_partition_filter:
+            return
+
+        existing.require_partition_filter = True
+        self._client.update_table(existing, ["require_partition_filter"])
+        logger.info("Enabled require_partition_filter on raw AppMetrica table: %s", table_id)
 
     def has_successful_slice(
         self,

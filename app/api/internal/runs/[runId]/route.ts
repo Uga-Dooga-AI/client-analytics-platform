@@ -14,6 +14,7 @@ export const runtime = "nodejs";
 
 const RUN_STATUSES: AnalyticsRunStatus[] = [
   "queued",
+  "blocked",
   "running",
   "succeeded",
   "failed",

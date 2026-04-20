@@ -68,6 +68,14 @@ models:
           - not_null
       - name: tracker_name
         description: Название трекера / источника установки (AppsFlyer, Organic и т.д.)
+      - name: tracking_id
+        description: Идентификатор tracking link / source binding из AppMetrica installs export
+      - name: click_url_parameters
+        description: Сырые click URL параметры; источник для notebook-style campaign / creative parsing
+      - name: campaign_id
+        description: Campaign identifier, extracted from AppMetrica click URL parameters using the same logic as notebook helpers
+      - name: creative_id
+        description: Creative identifier, extracted from AppMetrica click URL parameters using the same logic as notebook helpers
       - name: os_name
         description: Операционная система в нижнем регистре
       - name: app_version

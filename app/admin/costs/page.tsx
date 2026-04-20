@@ -122,7 +122,7 @@ export default async function AdminCostsPage() {
             Ops & Cost
           </h1>
           <p style={{ margin: "4px 0 0", fontSize: 14, color: "var(--color-ink-500)" }}>
-            Реальные объёмы ingest/query/storage по проектам, плюс provisional и finalized cost view.
+            Реальные объёмы ingest/query/managed storage по проектам, плюс provisional run-rate и finalized billing view.
           </p>
         </div>
         <div style={{ fontSize: 12, color: "var(--color-ink-500)" }}>
@@ -163,12 +163,12 @@ export default async function AdminCostsPage() {
         <StatCard
           label="Estimated today"
           value={formatUsd(snapshot.totals.estimatedTotalTodayUsd)}
-          sub="Provisional BigQuery + storage estimate for the current UTC day"
+          sub="Provisional BigQuery + managed storage run-rate for the current UTC day"
         />
         <StatCard
           label="Estimated 30d"
           value={formatUsd(snapshot.totals.estimatedTotal30dUsd)}
-          sub="Trailing 30-day estimate based on billed bytes + retained staged storage"
+          sub="30-day run-rate based on billed bytes plus current retained managed storage"
         />
         <StatCard
           label="Finalized actual 30d"
@@ -182,7 +182,7 @@ export default async function AdminCostsPage() {
         <StatCard
           label="Transfer 30d"
           value={formatBytes(snapshot.totals.stagedTransferBytes30d)}
-          sub="Total staged NDJSON volume written into GCS over the last 30 days"
+          sub="Total managed GCS object volume written over the last 30 days"
         />
       </section>
 
@@ -212,7 +212,7 @@ export default async function AdminCostsPage() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
             {[
               ["BigQuery on-demand", `${snapshot.estimationCoefficients.bigQueryUsdPerTib} USD / TiB billed`],
-              ["Storage retained bytes", `${snapshot.estimationCoefficients.storageUsdPerGibMonth} USD / GiB-month`],
+              ["Managed storage retained bytes", `${snapshot.estimationCoefficients.storageUsdPerGibMonth} USD / GiB-month`],
               ["Billing export", snapshot.billingExportConfigured ? snapshot.billingExportTable ?? "Configured" : "Not configured"],
               ["Billing export freshness", formatDateTime(snapshot.billingExportLastUpdatedAt)],
             ].map(([label, value]) => (
@@ -255,19 +255,24 @@ export default async function AdminCostsPage() {
             Platform totals
           </div>
           <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-500)" }}>
-            Shared warehouse workload across all client projects.
+            Aggregated workload across all client projects and warehouse groups.
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
             {[
               ["Rows loaded today", formatCompact(snapshot.totals.rowsLoadedToday)],
               ["Rows loaded 30d", formatCompact(snapshot.totals.rowsLoaded30d)],
-              ["Retained staged bytes", formatBytes(snapshot.totals.retainedStageBytes)],
+              ["Retained managed bytes", formatBytes(snapshot.totals.retainedStageBytes)],
               ["Transfer today", formatBytes(snapshot.totals.stagedTransferBytesToday)],
               ["BQ estimate today", formatUsd(snapshot.totals.estimatedBigQueryCostTodayUsd)],
               ["Storage estimate today", formatUsd(snapshot.totals.estimatedStorageCostTodayUsd)],
               ["Reported actual today", formatUsd(snapshot.totals.reportedActualTodayUsd)],
-              ["Warehouse project", snapshot.warehouseProjectId ?? "—"],
+              [
+                "Warehouses",
+                snapshot.warehouseProjectIds.length > 0
+                  ? snapshot.warehouseProjectIds.join(", ")
+                  : "—",
+              ],
             ].map(([label, value]) => (
               <div
                 key={label}
@@ -311,7 +316,7 @@ export default async function AdminCostsPage() {
             Per-project operational telemetry
           </div>
           <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-500)" }}>
-            Rows, staged bytes, BigQuery workload, provisional cost, and apportioned finalized cost share.
+            Rows, managed storage, BigQuery workload, provisional cost, and allocated finalized cost share.
           </div>
         </div>
 
@@ -325,12 +330,12 @@ export default async function AdminCostsPage() {
                   "Latest success",
                   "Rows today / 30d",
                   "Transfer today / 30d",
-                  "Retained stage",
+                  "Retained storage",
                   "BQ billed 30d",
                   "Jobs today / 30d",
                   "Est. today",
                   "Est. 30d",
-                  "Attributed actual 30d",
+                  "Allocated actual 30d",
                   "Notes",
                 ].map((label) => (
                   <th
@@ -450,7 +455,7 @@ export default async function AdminCostsPage() {
             Finalized actual by service
           </div>
           <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-500)" }}>
-            Cloud-reported cost from billing export when configured. Current day remains provisional.
+            Aggregated Cloud Billing export across configured warehouse projects. Current day remains provisional.
           </div>
         </div>
 

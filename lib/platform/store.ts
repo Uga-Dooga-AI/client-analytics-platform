@@ -773,6 +773,40 @@ function resolveChunkedBackfillWindow(
   };
 }
 
+function isRecentTailIngestionPayload(payload: Record<string, unknown> | undefined) {
+  if (!payload) {
+    return false;
+  }
+
+  return payload.sequence === "post-backfill-refresh" || payload.windowKind === "recent-tail";
+}
+
+function resolveChunkedRecentTailIngestionWindow(
+  bundle: AnalyticsProjectBundle,
+  windowFrom: string | null | undefined,
+  windowTo: string | null | undefined
+) {
+  const requestedWindow = resolveRequestedBackfillWindow(bundle, windowFrom, windowTo);
+  const maxChunkWindowTo = addDaysToIsoDate(
+    requestedWindow.windowFrom,
+    Math.max(MAX_BACKFILL_CHUNK_DAYS - 1, 0)
+  );
+
+  return {
+    windowFrom: requestedWindow.windowFrom,
+    windowTo:
+      compareIsoDates(maxChunkWindowTo, requestedWindow.windowTo) < 0
+        ? maxChunkWindowTo
+        : requestedWindow.windowTo,
+    payload: {
+      ingestionRequestedWindowFrom: requestedWindow.windowFrom,
+      ingestionRequestedWindowTo: requestedWindow.windowTo,
+      ingestionChunkDays: MAX_BACKFILL_CHUNK_DAYS,
+      windowKind: "recent-tail",
+    },
+  };
+}
+
 function secretHintForValue(sourceType: AnalyticsSourceType, value?: string) {
   if (!value) {
     return null;
@@ -3078,6 +3112,12 @@ function activeProjectRuns(bundle: AnalyticsProjectBundle) {
   return bundle.latestRuns.filter((run) => run.status === "queued" || run.status === "running");
 }
 
+function deferredRunReadyAt(run: AnalyticsSyncRunRecord) {
+  const deferUntil =
+    typeof run.payload.deferUntil === "string" ? parseOptionalDateTime(run.payload.deferUntil) : null;
+  return deferUntil;
+}
+
 function activeRunBlocksCandidate(
   activeRun: AnalyticsSyncRunRecord,
   candidateRunType: AnalyticsRunType
@@ -3344,6 +3384,82 @@ function buildBackfillContinuationRun(
   } satisfies AnalyticsSyncRunRecord;
 }
 
+function buildRecentTailIngestionContinuationRun(
+  bundle: AnalyticsProjectBundle,
+  currentRun: AnalyticsSyncRunRecord
+) {
+  if (
+    currentRun.runType !== "ingestion" ||
+    !currentRun.windowTo ||
+    !isRecentTailIngestionPayload(currentRun.payload)
+  ) {
+    return null;
+  }
+
+  const requestedWindowTo =
+    typeof currentRun.payload.ingestionRequestedWindowTo === "string"
+      ? currentRun.payload.ingestionRequestedWindowTo
+      : currentRun.windowTo;
+
+  if (compareIsoDates(currentRun.windowTo, requestedWindowTo) >= 0) {
+    return null;
+  }
+
+  const nextChunk = resolveChunkedRecentTailIngestionWindow(
+    bundle,
+    addDaysToIsoDate(currentRun.windowTo, 1),
+    requestedWindowTo
+  );
+  const requiredSources = requiredSourceStatusesForRun(bundle, "ingestion");
+  const missing = requiredSources.filter((sourceType) => {
+    const source = bundle.sources.find((entry) => entry.sourceType === sourceType);
+    return !source || source.status !== "ready";
+  });
+  const blockingRun =
+    activeProjectRuns(bundle).find((run) => activeRunBlocksCandidate(run, "ingestion")) ?? null;
+  const status: AnalyticsRunStatus =
+    missing.length > 0 ? "waiting_credentials" : blockingRun ? "blocked" : "queued";
+
+  return {
+    id: randomUUID(),
+    projectId: bundle.project.id,
+    runType: "ingestion" as const,
+    triggerKind: currentRun.triggerKind,
+    sourceType: requiredSources[0] ?? null,
+    status,
+    requestedBy: currentRun.requestedBy,
+    requestedAt: new Date(),
+    startedAt: null,
+    finishedAt: null,
+    windowFrom: nextChunk.windowFrom,
+    windowTo: nextChunk.windowTo,
+    message:
+      status === "queued"
+        ? `Recent-tail ingestion continuation queued for ${nextChunk.windowFrom} → ${nextChunk.windowTo}.`
+        : status === "waiting_credentials"
+          ? `Waiting for ${missing.join(", ")} configuration before recent-tail ingestion can continue.`
+          : "Waiting for the current ingestion run to release the recent-tail lane.",
+    payload: {
+      requiredSources,
+      projectSlug: bundle.project.slug,
+      dependencies: [],
+      ...currentRun.payload,
+      ...nextChunk.payload,
+      recentTailContinuation: true,
+    },
+  } satisfies AnalyticsSyncRunRecord;
+}
+
+function buildChunkedSourceContinuationRun(
+  bundle: AnalyticsProjectBundle,
+  currentRun: AnalyticsSyncRunRecord
+) {
+  return (
+    buildBackfillContinuationRun(bundle, currentRun) ??
+    buildRecentTailIngestionContinuationRun(bundle, currentRun)
+  );
+}
+
 function promoteBlockedRuns(
   bundle: AnalyticsProjectBundle,
   runs: AnalyticsSyncRunRecord[]
@@ -3381,6 +3497,16 @@ function promoteBlockedRuns(
       continue;
     }
 
+    const deferUntil = deferredRunReadyAt(candidate);
+    if (deferUntil && deferUntil.getTime() > Date.now()) {
+      nextRuns[index] = {
+        ...candidate,
+        status: "blocked",
+        message: `Waiting until ${deferUntil.toISOString()} before retrying ${candidate.runType.replace(/_/g, " ")}.`,
+      };
+      continue;
+    }
+
     if (activeOtherRuns.length > 0 || !hasSuccessfulDependency(evaluationBundle, candidate.runType)) {
       continue;
     }
@@ -3388,7 +3514,9 @@ function promoteBlockedRuns(
     nextRuns[index] = {
       ...candidate,
       status: "queued",
-      message: `${candidate.runType.replace(/_/g, " ")} unblocked and queued automatically.`,
+      message: deferUntil
+        ? `${candidate.runType.replace(/_/g, " ")} retry window reached; queued automatically.`
+        : `${candidate.runType.replace(/_/g, " ")} unblocked and queued automatically.`,
     };
   }
 
@@ -3439,6 +3567,18 @@ export async function requestAnalyticsSync(
             overrides?.windowTo ?? input.windowTo ?? null
           )
         : null;
+    const combinedPayload = {
+      ...input.payload,
+      ...overrides?.payload,
+    };
+    const chunkedRecentTailIngestionWindow =
+      runType === "ingestion" && isRecentTailIngestionPayload(combinedPayload)
+        ? resolveChunkedRecentTailIngestionWindow(
+            bundle,
+            overrides?.windowFrom ?? input.windowFrom ?? null,
+            overrides?.windowTo ?? input.windowTo ?? null
+          )
+        : null;
 
     return {
       id: randomUUID(),
@@ -3452,15 +3592,24 @@ export async function requestAnalyticsSync(
       startedAt: null,
       finishedAt: null,
       windowFrom:
-        chunkedBackfillWindow?.windowFrom ?? overrides?.windowFrom ?? input.windowFrom ?? null,
+        chunkedBackfillWindow?.windowFrom ??
+        chunkedRecentTailIngestionWindow?.windowFrom ??
+        overrides?.windowFrom ??
+        input.windowFrom ??
+        null,
       windowTo:
-        chunkedBackfillWindow?.windowTo ?? overrides?.windowTo ?? input.windowTo ?? null,
+        chunkedBackfillWindow?.windowTo ??
+        chunkedRecentTailIngestionWindow?.windowTo ??
+        overrides?.windowTo ??
+        input.windowTo ??
+        null,
       message: buildRunMessage(bundle, input, status, requiredSources, missing, blockingRun),
       payload: {
         requiredSources,
         projectSlug: bundle.project.slug,
         dependencies: runDependencies(runType),
         ...(chunkedBackfillWindow?.payload ?? {}),
+        ...(chunkedRecentTailIngestionWindow?.payload ?? {}),
         ...input.payload,
         ...overrides?.payload,
       },
@@ -3491,9 +3640,6 @@ export async function requestAnalyticsSync(
     .map((run) => findEquivalentPendingRun(bundle.latestRuns, run))
     .find((run): run is AnalyticsSyncRunRecord => Boolean(run));
   if (existingBundleDuplicate) {
-    if (!useDemoStore() && existingBundleDuplicate.status === "queued") {
-      await dispatchAnalyticsRunSafely(existingBundleDuplicate, bundle);
-    }
     return existingBundleDuplicate;
   }
 
@@ -3745,7 +3891,7 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
         let projectRuns = store.runs.filter((run) => run.projectId === nextRun.projectId);
         const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
         const continuationRunsToDispatch: AnalyticsSyncRunRecord[] = [];
-        const continuationRun = buildBackfillContinuationRun(
+        const continuationRun = buildChunkedSourceContinuationRun(
           { project, sources: projectSources, latestRuns: projectRuns },
           nextRun
         );
@@ -3880,7 +4026,7 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
         );
         const statusBeforePromotion = new Map(projectRuns.map((run) => [run.id, run.status]));
         const continuationRunsToDispatch: AnalyticsSyncRunRecord[] = [];
-        const continuationRun = buildBackfillContinuationRun(
+        const continuationRun = buildChunkedSourceContinuationRun(
           { project, sources: projectSources, latestRuns: projectRuns },
           nextRun
         );
@@ -3988,7 +4134,15 @@ export async function claimNextAnalyticsRun(
   if (useDemoStore()) {
     seedDemoStore();
     const store = getDemoStore();
-    const nextRun = store.runs
+    const projectRuns = store.runs.filter((run) => run.projectId === resolvedProjectId);
+    const promotedRuns = promoteBlockedRuns(
+      { project: bundle.project, sources: bundle.sources, latestRuns: projectRuns },
+      projectRuns
+    );
+    const promotedMap = new Map(promotedRuns.map((run) => [run.id, run]));
+    store.runs = store.runs.map((run) => promotedMap.get(run.id) ?? run);
+
+    const nextRun = promotedRuns
       .filter(
         (run) =>
           run.projectId === resolvedProjectId &&
@@ -4004,7 +4158,8 @@ export async function claimNextAnalyticsRun(
     const claimedRun: AnalyticsSyncRunRecord = {
       ...nextRun,
       status: "running",
-      startedAt: nextRun.startedAt ?? new Date(),
+      startedAt: new Date(),
+      finishedAt: null,
       message: claimMessage,
     };
 
@@ -4013,6 +4168,37 @@ export async function claimNextAnalyticsRun(
   }
 
   return withPgTransaction(async (client) => {
+    const projectSources = await getPgProjectSources(client, [resolvedProjectId]);
+    const projectRuns = (await getPgProjectRuns(client, [resolvedProjectId])).filter(
+      (run) => run.projectId === resolvedProjectId
+    );
+    const promotedRuns = promoteBlockedRuns(
+      { project: bundle.project, sources: projectSources, latestRuns: projectRuns },
+      projectRuns
+    );
+    const projectRunsById = new Map(projectRuns.map((run) => [run.id, run]));
+    for (const promotedRun of promotedRuns) {
+      const previous = projectRunsById.get(promotedRun.id);
+      if (!previous) {
+        continue;
+      }
+
+      if (previous.status === promotedRun.status && previous.message === promotedRun.message) {
+        continue;
+      }
+
+      await client.query(
+        `
+          UPDATE analytics_sync_runs
+          SET
+            status = $2,
+            message = $3
+          WHERE id = $1
+        `,
+        [promotedRun.id, promotedRun.status, promotedRun.message]
+      );
+    }
+
     const params: unknown[] = [projectId];
     params[0] = resolvedProjectId;
     let runTypeClause = "";
@@ -4044,7 +4230,8 @@ export async function claimNextAnalyticsRun(
     const claimedRun: AnalyticsSyncRunRecord = {
       ...current,
       status: "running",
-      startedAt: current.startedAt ?? new Date(),
+      startedAt: new Date(),
+      finishedAt: null,
       message: claimMessage,
     };
 
@@ -4053,7 +4240,8 @@ export async function claimNextAnalyticsRun(
         UPDATE analytics_sync_runs
         SET
           status = 'running',
-          started_at = COALESCE(started_at, NOW()),
+          started_at = NOW(),
+          finished_at = NULL,
           message = $2
         WHERE id = $1
       `,

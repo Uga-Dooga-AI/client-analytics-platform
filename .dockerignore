@@ -21,3 +21,4 @@ test-results
 firebase-debug.log
 firestore-debug.log
 .npmrc
+.venv
