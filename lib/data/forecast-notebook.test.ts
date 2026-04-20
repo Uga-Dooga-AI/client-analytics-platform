@@ -1127,6 +1127,82 @@ describe("forecast notebook live surface", () => {
     expect(rows[0]?.installs ?? 0).toBe(48);
   });
 
+  it("falls back to unattributed AppMetrica cohorts when explicit Unity campaign rows cannot match", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+
+    const raw = __testables.buildRawCohorts({
+      cohortSizeRows: [
+        {
+          cohort_date: "2026-03-22",
+          platform: "android",
+          country: "US",
+          source: "unity_ads",
+          company: "Unity Ads",
+          campaign: "3",
+          creative: "unknown",
+          cohort_size: 30,
+        },
+        {
+          cohort_date: "2026-03-22",
+          platform: "android",
+          country: "US",
+          source: "unity_ads",
+          company: "Unity Ads",
+          campaign: "unknown",
+          creative: "unknown",
+          cohort_size: 10,
+        },
+        {
+          cohort_date: "2026-03-22",
+          platform: "android",
+          country: "US",
+          source: "unity_ads",
+          company: "Unity Ads",
+          campaign: "campaign-b",
+          creative: "creative-b",
+          cohort_size: 60,
+        },
+      ],
+      revenueRows: [],
+      spendRows: [
+        {
+          cohort_date: "2026-03-22",
+          source: "unity_ads",
+          company: "Unity Ads",
+          country: "US",
+          store: "google",
+          campaign_id: "campaign-a",
+          campaign_name: "Campaign A",
+          creative_id: "creative-a",
+          creative_name: "Creative A",
+          spend: 120,
+          installs: 48,
+        },
+      ],
+      filters: makeFilters({
+        from: "2026-03-22",
+        to: "2026-03-22",
+        platform: "android",
+        groupBy: "none",
+      }),
+      selection: {
+        revenueMode: "total",
+        country: "US",
+        source: "unity_ads",
+        company: "Unity Ads",
+        campaign: "all",
+        creative: "all",
+      },
+      groupBy: "none",
+    });
+
+    const rows = Array.from(raw.values()).sort((left, right) => left.campaign.localeCompare(right.campaign));
+
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => row.spend)).toEqual([90, 0, 30]);
+    expect(rows.map((row) => row.installs)).toEqual([36, 60, 12]);
+  });
+
   it("does not broaden explicit Unity campaign spend into unrelated cohorts", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
 

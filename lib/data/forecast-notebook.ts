@@ -3563,6 +3563,24 @@ function selectSpendAllocationCandidates(
     return cohortsWithUsers.length > 0 ? cohortsWithUsers : matched;
   }
 
+  if (isSpecificSpendDimension(input.campaign)) {
+    const fallback = base.filter((record) => {
+      if (isSpecificSpendDimension(input.country) && record.country !== input.country) {
+        return false;
+      }
+      if (isSpecificSpendDimension(input.store) && record.store !== input.store) {
+        return false;
+      }
+
+      return isNonAttributableCampaignValue(record.campaign);
+    });
+
+    if (fallback.length > 0) {
+      const cohortsWithUsers = fallback.filter((record) => record.cohortSize > 0);
+      return cohortsWithUsers.length > 0 ? cohortsWithUsers : fallback;
+    }
+  }
+
   return [];
 }
 
@@ -3733,6 +3751,17 @@ function matchesComparableSpendDimension(
     const normalizedCandidate = normalizeComparableSpendDimensionValue(candidateValue);
     return normalizedCandidate.length > 0 && normalizedCandidate === normalizedRecord;
   });
+}
+
+function isNonAttributableCampaignValue(value: string | null | undefined) {
+  const normalized = normalizeComparableSpendDimensionValue(value);
+
+  return (
+    normalized.length === 0 ||
+    normalized === "unknown" ||
+    normalized === "*" ||
+    /^[0-9]{1,8}$/.test(normalized)
+  );
 }
 
 function isSpecificSpendDimension(value: string | null | undefined) {
