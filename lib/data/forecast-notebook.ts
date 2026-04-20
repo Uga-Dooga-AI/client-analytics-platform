@@ -3164,23 +3164,20 @@ function aggregatePaybackPoint(
   let actualSpend = 0;
 
   for (const cohort of cohorts) {
-    const point = predictCohort(cohort, horizon, predictionResources);
-    if (point.actual != null) {
-      predictedRevenue += point.actual;
-      lowerRevenue += point.actual;
-      upperRevenue += point.actual;
-      predictedSpend += cohort.spend;
-      actualRevenue += point.actual;
-      actualSpend += cohort.spend;
+    const point = resolvePaybackContribution(cohort, horizon, predictionResources);
+    if (!point) {
       continue;
     }
-    if (point.predictedRevenue == null || point.lowerRevenue == null || point.upperRevenue == null) {
-      continue;
-    }
+
     predictedRevenue += point.predictedRevenue;
     lowerRevenue += point.lowerRevenue;
     upperRevenue += point.upperRevenue;
     predictedSpend += cohort.spend;
+
+    if (point.actualRevenue != null) {
+      actualRevenue += point.actualRevenue;
+      actualSpend += cohort.spend;
+    }
   }
 
   return {
@@ -3188,6 +3185,67 @@ function aggregatePaybackPoint(
     lower: predictedSpend > 0 ? Number(((lowerRevenue / predictedSpend) * 100).toFixed(2)) : null,
     upper: predictedSpend > 0 ? Number(((upperRevenue / predictedSpend) * 100).toFixed(2)) : null,
     actual: actualSpend > 0 ? Number(((actualRevenue / actualSpend) * 100).toFixed(2)) : null,
+  };
+}
+
+function resolvePaybackContribution(
+  cohort: ProcessedCohort,
+  horizon: number,
+  predictionResources: Map<string, LinePredictionResources>
+) {
+  const exact = toPaybackContribution(predictCohort(cohort, horizon, predictionResources), true);
+  const fallback = findPreviousPaybackContribution(cohort, horizon, predictionResources);
+
+  if (!exact) {
+    return fallback;
+  }
+
+  if (!fallback) {
+    return exact;
+  }
+
+  return {
+    predictedRevenue: Math.max(exact.predictedRevenue, fallback.predictedRevenue),
+    lowerRevenue: Math.max(exact.lowerRevenue, fallback.lowerRevenue),
+    upperRevenue: Math.max(exact.upperRevenue, fallback.upperRevenue),
+    actualRevenue: exact.actualRevenue,
+  };
+}
+
+function findPreviousPaybackContribution(
+  cohort: ProcessedCohort,
+  horizon: number,
+  predictionResources: Map<string, LinePredictionResources>
+) {
+  for (const day of [...PAYBACK_CURVE_POINTS_WITH_ZERO].filter((value) => value < horizon).sort((left, right) => right - left)) {
+    const contribution = toPaybackContribution(predictCohort(cohort, day, predictionResources), false);
+    if (contribution) {
+      return contribution;
+    }
+  }
+
+  return null;
+}
+
+function toPaybackContribution(point: PredictedPoint, includeActualRevenue: boolean) {
+  if (point.actual != null) {
+    return {
+      predictedRevenue: point.actual,
+      lowerRevenue: point.actual,
+      upperRevenue: point.actual,
+      actualRevenue: includeActualRevenue ? point.actual : null,
+    };
+  }
+
+  if (point.predictedRevenue == null || point.lowerRevenue == null || point.upperRevenue == null) {
+    return null;
+  }
+
+  return {
+    predictedRevenue: point.predictedRevenue,
+    lowerRevenue: point.lowerRevenue,
+    upperRevenue: point.upperRevenue,
+    actualRevenue: null,
   };
 }
 
@@ -3483,6 +3541,7 @@ function getUsableEstimatedCurve(curve: number[] | null | undefined) {
     return null;
   }
 
+  enforceNonDecreasingCurve(normalized);
   return normalized;
 }
 
@@ -3504,6 +3563,15 @@ function straightenPrediction(curve: number[]) {
   }
   for (let index = maxIndex; index < curve.length; index += 1) {
     curve[index] = curve[maxIndex] ?? curve[index] ?? 0;
+  }
+}
+
+function enforceNonDecreasingCurve(curve: number[]) {
+  let floor = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < curve.length; index += 1) {
+    const value = curve[index] ?? 0;
+    floor = Math.max(floor, value);
+    curve[index] = floor;
   }
 }
 

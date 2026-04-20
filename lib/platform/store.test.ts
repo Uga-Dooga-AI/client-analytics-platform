@@ -187,6 +187,76 @@ describe("analytics run orchestration", () => {
     expect(forecastRun.message).toContain("bounds refresh");
   });
 
+  it("does not auto-queue bounds refresh for manual-only projects and still allows forecast reuse", async () => {
+    const {
+      createAnalyticsProject,
+      listAnalyticsProjectRuns,
+      requestAnalyticsSync,
+      updateAnalyticsSyncRun,
+    } = await import("./store");
+
+    const bundle = await createAnalyticsProject(
+      {
+        slug: "manual-only-bounds",
+        displayName: "Manual Only Bounds",
+        autoBootstrapOnCreate: false,
+        precomputePrimaryForecasts: false,
+        appmetricaAppIds: ["3927166"],
+        appmetricaToken: "test-token",
+        bigquerySourceProjectId: "analytics-platform-493522",
+        bigquerySourceDataset: "raw",
+        bigqueryServiceAccountJson:
+          '{"client_email":"railway-bq@analytics-platform-493522.iam.gserviceaccount.com","private_key":"test"}',
+      },
+      "tester@example.com"
+    );
+
+    const demoStore = globalStore.__analyticsPlatformDemoDataStore as {
+      projects: Array<{ id: string; boundsIntervalHours: number }>;
+      sources: Array<{
+        projectId: string;
+        sourceType: string;
+        status: string;
+        lastSyncAt: Date | null;
+      }>;
+    };
+    const demoProject = demoStore.projects.find((project) => project.id === bundle.project.id);
+    const boundsSource = demoStore.sources.find(
+      (source) => source.projectId === bundle.project.id && source.sourceType === "bounds_artifacts"
+    );
+
+    demoProject!.boundsIntervalHours = 0;
+    boundsSource!.status = "ready";
+    boundsSource!.lastSyncAt = new Date("2026-04-19T00:00:00.000Z");
+
+    const ingestionRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "ingestion",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    expect(ingestionRun.status).toBe("queued");
+
+    await updateAnalyticsSyncRun(ingestionRun.id, {
+      status: "succeeded",
+      sourceType: "appmetrica_logs",
+      message: "Manual-only ingestion completed in test.",
+    });
+
+    const runsAfterIngestion = await listAnalyticsProjectRuns(bundle.project.id);
+
+    expect(runsAfterIngestion.filter((run) => run.runType === "bounds_refresh")).toHaveLength(0);
+    expect(runsAfterIngestion.filter((run) => run.runType === "forecast")).toHaveLength(0);
+
+    const forecastRun = await requestAnalyticsSync(bundle.project.id, {
+      runType: "forecast",
+      requestedBy: "tester@example.com",
+      triggerKind: "manual",
+    });
+
+    expect(forecastRun.status).toBe("queued");
+  });
+
   it("allows appmetrica backfill with warehouse credentials even when source dataset mapping is absent", async () => {
     const {
       createAnalyticsProject,

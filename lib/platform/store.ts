@@ -3255,6 +3255,24 @@ function compareRunFreshness(left: AnalyticsSyncRunRecord, right: AnalyticsSyncR
   return left.requestedAt.getTime() - right.requestedAt.getTime();
 }
 
+function isManualOnlyBoundsProject(bundle: AnalyticsProjectBundle) {
+  return bundle.project.boundsIntervalHours <= 0;
+}
+
+function hasReusableBoundsArtifacts(bundle: AnalyticsProjectBundle) {
+  const boundsSource = bundle.sources.find((source) => source.sourceType === "bounds_artifacts");
+  if (boundsSource?.status !== "ready") {
+    return false;
+  }
+
+  if (boundsSource.lastSyncAt) {
+    return true;
+  }
+
+  const latestBoundsRefresh = latestSuccessfulRun(bundle, ["bounds_refresh"]);
+  return Boolean(latestBoundsRefresh?.finishedAt);
+}
+
 function hasSuccessfulDependency(bundle: AnalyticsProjectBundle, runType: AnalyticsRunType) {
   if (runType === "bounds_refresh") {
     return bundle.latestRuns.some(
@@ -3265,6 +3283,10 @@ function hasSuccessfulDependency(bundle: AnalyticsProjectBundle, runType: Analyt
   }
 
   if (runType === "forecast") {
+    if (isManualOnlyBoundsProject(bundle)) {
+      return hasReusableBoundsArtifacts(bundle);
+    }
+
     const latestBoundsRefresh = latestSuccessfulRun(bundle, ["bounds_refresh"]);
     if (!latestBoundsRefresh?.finishedAt) {
       return false;
@@ -3623,16 +3645,20 @@ export async function requestAnalyticsSync(
             message: `Bootstrap queued initial backfill for ${bundle.project.initialBackfillDays} days.`,
             payload: { stage: "bootstrap-1", sequence: "initial-bootstrap" },
           }),
-          buildRunRecord("bounds_refresh", {
-            status: "blocked",
-            message: "Waiting for initial backfill to complete before rebuilding bounds.",
-            payload: { stage: "bootstrap-2", sequence: "initial-bootstrap" },
-          }),
-          buildRunRecord("forecast", {
-            status: "blocked",
-            message: "Waiting for bounds refresh to complete before forecasting.",
-            payload: { stage: "bootstrap-3", sequence: "initial-bootstrap" },
-          }),
+          ...(!isManualOnlyBoundsProject(bundle)
+            ? [
+                buildRunRecord("bounds_refresh", {
+                  status: "blocked",
+                  message: "Waiting for initial backfill to complete before rebuilding bounds.",
+                  payload: { stage: "bootstrap-2", sequence: "initial-bootstrap" },
+                }),
+                buildRunRecord("forecast", {
+                  status: "blocked",
+                  message: "Waiting for bounds refresh to complete before forecasting.",
+                  payload: { stage: "bootstrap-3", sequence: "initial-bootstrap" },
+                }),
+              ]
+            : []),
         ]
       : [buildRunRecord(input.runType)];
 
@@ -3726,6 +3752,7 @@ export async function requestAnalyticsSync(
   if (
     queuedRun.id === runs[0].id &&
     input.runType === "bootstrap" &&
+    !isManualOnlyBoundsProject(bundle) &&
     bundle.project.settings.forecastStrategy.precomputePrimaryForecasts
   ) {
     await seedPrimaryForecastCombinations(bundle.project.id, input.requestedBy, {
@@ -3755,8 +3782,9 @@ export async function updateAnalyticsSyncRun(runId: string, patch: AnalyticsRunU
     }
 
     const followUpRequests: AnalyticsSyncRequestInput[] = [];
+    const manualOnlyBounds = isManualOnlyBoundsProject(bundle);
 
-    if (run.runType === "backfill" || run.runType === "ingestion") {
+    if (!manualOnlyBounds && (run.runType === "backfill" || run.runType === "ingestion")) {
       followUpRequests.push(
         {
           runType: "bounds_refresh",

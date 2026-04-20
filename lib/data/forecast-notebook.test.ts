@@ -396,6 +396,181 @@ describe("forecast notebook live surface", () => {
     ).toBe("2026-04-18");
   });
 
+  it("keeps payback curves flat when later horizons lose forecast coverage", async () => {
+    const { getForecastNotebookSurface } = await import("@/lib/data/forecast-notebook");
+    const bundle = makeBundle();
+    const context = makeContext(bundle);
+
+    vi.setSystemTime(new Date("2026-04-15T00:00:00.000Z"));
+    loadBigQueryContextsMock.mockResolvedValue(new Map([[bundle.project.id, context]]));
+    executeBigQueryMock.mockImplementation(async (_context: ProjectQueryContext, sql: string) => {
+      if (sql.includes("INFORMATION_SCHEMA.COLUMNS") && sql.includes("table_name = @table_name")) {
+        return [
+          { column_name: "install_datetime" },
+          { column_name: "appmetrica_device_id" },
+          { column_name: "profile_id" },
+          { column_name: "tracker_name" },
+          { column_name: "tracking_id" },
+          { column_name: "click_url_parameters" },
+          { column_name: "country_iso_code" },
+          { column_name: "os_name" },
+        ];
+      }
+
+      if (sql.includes("COUNT(*) AS count")) {
+        return [
+          {
+            platform: "ios",
+            country: "US",
+            source: "google_ads",
+            company: "Google Ads",
+            campaign: "camp-1",
+            creative: "creative-1",
+            count: 100,
+            first_seen: "2026-03-25",
+            last_seen: "2026-03-25",
+          },
+        ];
+      }
+
+      if (sql.includes("COUNT(DISTINCT user_key) AS cohort_size")) {
+        return [
+          {
+            cohort_date: "2026-03-25",
+            platform: "ios",
+            country: "US",
+            source: "google_ads",
+            company: "Google Ads",
+            campaign: "camp-1",
+            creative: "creative-1",
+            cohort_size: 100,
+          },
+        ];
+      }
+
+      if (sql.includes("DATE_DIFF(e.event_date, i.cohort_date, DAY) AS lifetime_day")) {
+        return [
+          {
+            cohort_date: "2026-03-25",
+            platform: "ios",
+            country: "US",
+            source: "google_ads",
+            company: "Google Ads",
+            campaign: "camp-1",
+            creative: "creative-1",
+            event_date: "2026-03-25",
+            lifetime_day: 0,
+            revenue: 20,
+          },
+          {
+            cohort_date: "2026-03-25",
+            platform: "ios",
+            country: "US",
+            source: "google_ads",
+            company: "Google Ads",
+            campaign: "camp-1",
+            creative: "creative-1",
+            event_date: "2026-04-01",
+            lifetime_day: 7,
+            revenue: 20,
+          },
+          {
+            cohort_date: "2026-03-25",
+            platform: "ios",
+            country: "US",
+            source: "google_ads",
+            company: "Google Ads",
+            campaign: "camp-1",
+            creative: "creative-1",
+            event_date: "2026-04-08",
+            lifetime_day: 14,
+            revenue: 10,
+          },
+          {
+            cohort_date: "2026-03-25",
+            platform: "ios",
+            country: "US",
+            source: "google_ads",
+            company: "Google Ads",
+            campaign: "camp-1",
+            creative: "creative-1",
+            event_date: "2026-04-15",
+            lifetime_day: 21,
+            revenue: 10,
+          },
+        ];
+      }
+
+      if (sql.includes("COUNT(*) AS event_count")) {
+        return [
+          { event_date: "2026-03-25", event_count: 10 },
+          { event_date: "2026-04-01", event_count: 10 },
+          { event_date: "2026-04-08", event_count: 10 },
+          { event_date: "2026-04-15", event_count: 10 },
+        ];
+      }
+
+      if (sql.includes("INFORMATION_SCHEMA.COLUMNS")) {
+        return [
+          { table_name: "google_ads_campaign_20260325", column_name: "date" },
+          { table_name: "google_ads_campaign_20260325", column_name: "country" },
+          { table_name: "google_ads_campaign_20260325", column_name: "campaign_id" },
+          { table_name: "google_ads_campaign_20260325", column_name: "creative_id" },
+          { table_name: "google_ads_campaign_20260325", column_name: "spend" },
+          { table_name: "google_ads_campaign_20260325", column_name: "installs" },
+          { table_name: "google_ads_campaign_20260325", column_name: "platform" },
+        ];
+      }
+
+      if (sql.includes("WITH raw_spend AS")) {
+        return [
+          {
+            cohort_date: "2026-03-25",
+            source: "google_ads",
+            company: "Google Ads",
+            country: "US",
+            store: "apple",
+            campaign_id: "camp-1",
+            campaign_name: "Search Campaign Alpha",
+            creative_id: "creative-1",
+            creative_name: "Playable Variant 7",
+            spend: 100,
+            installs: 100,
+          },
+        ];
+      }
+
+      return [];
+    });
+
+    const surface = await getForecastNotebookSurface({
+      bundle,
+      projectLabel: "Word Catcher",
+      filters: makeFilters({
+        from: "2026-03-25",
+        to: "2026-04-15",
+      }),
+      selection: {
+        revenueMode: "total",
+        country: "all",
+        source: "all",
+        company: "all",
+        campaign: "all",
+        creative: "all",
+      },
+      horizonDays: [30],
+    });
+
+    const paybackSeries = surface.data.paybackChart.groups[0]?.series ?? [];
+    const d21 = paybackSeries.find((point) => point.label === "D21");
+    const d30 = paybackSeries.find((point) => point.label === "D30");
+
+    expect(surface.data.cohortMatrix[0]?.cells[0]?.value).toBeNull();
+    expect(d21?.value).toBeTypeOf("number");
+    expect(d30?.value).toBe(d21?.value ?? null);
+    expect(d30?.actual).toBeNull();
+  });
+
   it("tracks slice filters and custom horizons in the combination payload", async () => {
     const { buildForecastNotebookTrackingPayload } = await import("@/lib/data/forecast-notebook");
 
