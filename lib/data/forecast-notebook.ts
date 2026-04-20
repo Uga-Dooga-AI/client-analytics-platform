@@ -826,10 +826,14 @@ function buildCampaignSql(clickExpr: string, trackerExpr: string, trackingIdExpr
       WHEN ${clickExpr} IN ('Unconfigured AdWords', 'AutocreatedGoogle Ads', 'Autocreated Google Ads') THEN 'google_ads'
       WHEN ${clickExpr} = 'unknown' THEN 'unknown'
       WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'gclid=') THEN REGEXP_EXTRACT(${clickExpr}, r'gclid=([^&]+)')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'campaign_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'campaign_id=([^&]+)')
       WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'c=[^&]+&c_ifa=') THEN REGEXP_EXTRACT(${clickExpr}, r'c=([^&]+)&c_ifa=')
       WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'c=[^&]+&campaign_name=') THEN REGEXP_EXTRACT(${clickExpr}, r'c=([^&]+)&campaign_name=')
-      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'appmetrica_tracking_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'appmetrica_tracking_id=([^&]+)&ym_tracking_id=')
-      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'afpub_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'afpub_id=([^&]+)&click_id=')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'campaign_name=') THEN REGEXP_EXTRACT(${clickExpr}, r'campaign_name=([^&]+)')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'campaign=') THEN REGEXP_EXTRACT(${clickExpr}, r'campaign=([^&]+)')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'utm_campaign=') THEN REGEXP_EXTRACT(${clickExpr}, r'utm_campaign=([^&]+)')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'appmetrica_tracking_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'appmetrica_tracking_id=([^&]+)')
+      WHEN NULLIF(${clickExpr}, '') IS NOT NULL AND REGEXP_CONTAINS(${clickExpr}, r'afpub_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'afpub_id=([^&]+)')
       WHEN NULLIF(${trackingIdExpr}, '') IS NOT NULL THEN ${trackingIdExpr}
       WHEN LOWER(COALESCE(${trackerExpr}, '')) = 'google play' THEN 'organic'
       WHEN LOWER(COALESCE(${trackerExpr}, '')) IN ('unconfigured adwords', 'autocreatedgoogle ads', 'autocreated google ads') THEN 'google_ads'
@@ -844,6 +848,10 @@ function buildCreativeSql(clickExpr: string) {
       WHEN ${clickExpr} IN ('Google Play', 'Unconfigured AdWords', 'AutocreatedGoogle Ads', 'Autocreated Google Ads', 'unknown') THEN 'unknown'
       WHEN NULLIF(${clickExpr}, '') IS NULL THEN 'unknown'
       WHEN REGEXP_CONTAINS(${clickExpr}, r'custom_creative_pack_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'custom_creative_pack_id=([^&]+)')
+      WHEN REGEXP_CONTAINS(${clickExpr}, r'creative_id=') THEN REGEXP_EXTRACT(${clickExpr}, r'creative_id=([^&]+)')
+      WHEN REGEXP_CONTAINS(${clickExpr}, r'creative_pack_name=') THEN REGEXP_EXTRACT(${clickExpr}, r'creative_pack_name=([^&]+)')
+      WHEN REGEXP_CONTAINS(${clickExpr}, r'creative_name=') THEN REGEXP_EXTRACT(${clickExpr}, r'creative_name=([^&]+)')
+      WHEN REGEXP_CONTAINS(${clickExpr}, r'ad_name=') THEN REGEXP_EXTRACT(${clickExpr}, r'ad_name=([^&]+)')
       ELSE 'unknown'
     END
   `;
@@ -1686,7 +1694,9 @@ function allocateSpendToRawCohorts(
       store: row.store ?? "unknown",
       company: row.company ?? "Unknown",
       campaign: row.campaign_id ?? "unknown",
+      campaignName: row.campaign_name ?? "unknown",
       creative: row.creative_id ?? "unknown",
+      creativeName: row.creative_name ?? "unknown",
     });
     if (candidates.length === 0) {
       continue;
@@ -3506,7 +3516,9 @@ function selectSpendAllocationCandidates(
     store: string;
     company: string;
     campaign: string;
+    campaignName: string;
     creative: string;
+    creativeName: string;
   }
 ) {
   const base = records.filter(
@@ -3528,10 +3540,16 @@ function selectSpendAllocationCandidates(
       if (tier.store && record.store !== input.store) {
         return false;
       }
-      if (tier.campaign && record.campaign !== input.campaign) {
+      if (
+        tier.campaign &&
+        !matchesComparableSpendDimension(record.campaign, input.campaign, input.campaignName)
+      ) {
         return false;
       }
-      if (tier.creative && record.creative !== input.creative) {
+      if (
+        tier.creative &&
+        !matchesComparableSpendDimension(record.creative, input.creative, input.creativeName)
+      ) {
         return false;
       }
       return true;
@@ -3557,7 +3575,9 @@ function spendRowMatchesSelection(
   const source = row.source ?? "unknown";
   const company = row.company ?? "Unknown";
   const campaign = row.campaign_id ?? "unknown";
+  const campaignName = row.campaign_name ?? "unknown";
   const creative = row.creative_id ?? "unknown";
+  const creativeName = row.creative_name ?? "unknown";
   const store = row.store ?? "unknown";
 
   if (platform === "android" && store !== "google") {
@@ -3575,10 +3595,16 @@ function spendRowMatchesSelection(
   if (selection.company !== "all" && company !== selection.company) {
     return false;
   }
-  if (selection.campaign !== "all" && campaign !== selection.campaign) {
+  if (
+    selection.campaign !== "all" &&
+    !matchesComparableSpendDimension(selection.campaign, campaign, campaignName)
+  ) {
     return false;
   }
-  if (selection.creative !== "all" && creative !== selection.creative) {
+  if (
+    selection.creative !== "all" &&
+    !matchesComparableSpendDimension(selection.creative, creative, creativeName)
+  ) {
     return false;
   }
 
@@ -3672,6 +3698,41 @@ function buildSpendMatchTiers(input: {
   }
 
   return tiers;
+}
+
+function normalizeComparableSpendDimensionValue(value: string | null | undefined) {
+  const trimmed = String(value ?? "").trim();
+  if (trimmed.length === 0) {
+    return "";
+  }
+
+  const withSpaces = trimmed.replace(/\+/g, " ");
+  const decoded = safelyDecodeComparableSpendValue(withSpaces);
+
+  return decoded.trim().toLowerCase();
+}
+
+function safelyDecodeComparableSpendValue(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function matchesComparableSpendDimension(
+  recordValue: string | null | undefined,
+  ...candidateValues: Array<string | null | undefined>
+) {
+  const normalizedRecord = normalizeComparableSpendDimensionValue(recordValue);
+  if (!normalizedRecord) {
+    return false;
+  }
+
+  return candidateValues.some((candidateValue) => {
+    const normalizedCandidate = normalizeComparableSpendDimensionValue(candidateValue);
+    return normalizedCandidate.length > 0 && normalizedCandidate === normalizedRecord;
+  });
 }
 
 function isSpecificSpendDimension(value: string | null | undefined) {
@@ -4201,6 +4262,7 @@ function formatPlatformLabel(value: string) {
 export const __testables = {
   boundsKey,
   buildBoundsCoverageSummary,
+  buildCampaignSql,
   buildRawCohorts,
   buildRevenueJoinConditionSql,
   buildSummary,

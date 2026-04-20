@@ -807,6 +807,19 @@ describe("forecast notebook live surface", () => {
     expect(sourceSql).toContain("THEN 'unity_ads'");
   });
 
+  it("prefers explicit campaign markers over appmetrica internal tracking ids", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const sql = __testables.buildCampaignSql(
+      "click_url_parameters",
+      "tracker_name",
+      "tracking_id"
+    );
+
+    expect(sql).toContain("campaign_name=");
+    expect(sql).toContain("appmetrica_tracking_id=");
+    expect(sql.indexOf("campaign_name=")).toBeLessThan(sql.indexOf("appmetrica_tracking_id="));
+  });
+
   it("joins forecast revenue on either profile id or device id", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
 
@@ -937,6 +950,62 @@ describe("forecast notebook live surface", () => {
     expect(rows[0]?.installs ?? 0).toBe(40);
   });
 
+  it("matches spend rows by Unity campaign and creative names when AppMetrica parsed names", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+
+    const raw = __testables.buildRawCohorts({
+      cohortSizeRows: [
+        {
+          cohort_date: "2026-03-25",
+          platform: "android",
+          country: "US",
+          source: "unity_ads",
+          company: "Unity Ads",
+          campaign: "PS. Unity. Android. RU. ROAS D7. 18032026",
+          creative: "RU. PS. Story",
+          cohort_size: 40,
+        },
+      ],
+      revenueRows: [],
+      spendRows: [
+        {
+          cohort_date: "2026-03-25",
+          source: "unity_ads",
+          company: "Unity Ads",
+          country: "US",
+          store: "google",
+          campaign_id: "69bae3e98bc237f7685ac1c4",
+          campaign_name: "PS. Unity. Android. RU. ROAS D7. 18032026",
+          creative_id: "67fcfed0631fb064d140053f",
+          creative_name: "RU. PS. Story",
+          spend: 120,
+          installs: 48,
+        },
+      ],
+      filters: makeFilters({
+        from: "2026-03-25",
+        to: "2026-03-25",
+        platform: "android",
+        groupBy: "none",
+      }),
+      selection: {
+        revenueMode: "total",
+        country: "US",
+        source: "unity_ads",
+        company: "Unity Ads",
+        campaign: "all",
+        creative: "all",
+      },
+      groupBy: "none",
+    });
+
+    const rows = Array.from(raw.values());
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.spend ?? 0).toBe(120);
+    expect(rows[0]?.installs ?? 0).toBe(48);
+  });
+
   it("filters spend rows by the active slice before allocating them", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
 
@@ -1000,6 +1069,62 @@ describe("forecast notebook live surface", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.spend ?? 0).toBe(0);
     expect(rows[0]?.installs ?? 0).toBe(40);
+  });
+
+  it("keeps spend rows when the active campaign selection matches Unity campaign_name", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+
+    const raw = __testables.buildRawCohorts({
+      cohortSizeRows: [
+        {
+          cohort_date: "2026-03-25",
+          platform: "android",
+          country: "US",
+          source: "unity_ads",
+          company: "Unity Ads",
+          campaign: "PS. Unity. Android. RU. ROAS D7. 18032026",
+          creative: "RU. PS. Story",
+          cohort_size: 40,
+        },
+      ],
+      revenueRows: [],
+      spendRows: [
+        {
+          cohort_date: "2026-03-25",
+          source: "unity_ads",
+          company: "Unity Ads",
+          country: "US",
+          store: "google",
+          campaign_id: "69bae3e98bc237f7685ac1c4",
+          campaign_name: "PS. Unity. Android. RU. ROAS D7. 18032026",
+          creative_id: "67fcfed0631fb064d140053f",
+          creative_name: "RU. PS. Story",
+          spend: 120,
+          installs: 48,
+        },
+      ],
+      filters: makeFilters({
+        from: "2026-03-25",
+        to: "2026-03-25",
+        platform: "android",
+        groupBy: "none",
+      }),
+      selection: {
+        revenueMode: "total",
+        country: "US",
+        source: "unity_ads",
+        company: "Unity Ads",
+        campaign: "PS. Unity. Android. RU. ROAS D7. 18032026",
+        creative: "all",
+      },
+      groupBy: "none",
+    });
+
+    const rows = Array.from(raw.values());
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.spend ?? 0).toBe(120);
+    expect(rows[0]?.installs ?? 0).toBe(48);
   });
 
   it("does not broaden explicit Unity campaign spend into unrelated cohorts", async () => {
