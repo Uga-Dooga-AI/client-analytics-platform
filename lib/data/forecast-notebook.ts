@@ -256,7 +256,9 @@ type MirrorSpendRow = {
   country: string | null;
   store: string | null;
   campaign_id: string | null;
+  campaign_name: string | null;
   creative_id: string | null;
+  creative_name: string | null;
   spend: number | null;
   installs: number | null;
 };
@@ -342,6 +344,11 @@ type AggregatedPoint = {
   lower: number | null;
   upper: number | null;
   actual: number | null;
+};
+
+type ForecastCatalogAliases = {
+  campaigns: Map<string, string>;
+  creatives: Map<string, string>;
 };
 
 type CurveEstimateTask = {
@@ -445,15 +452,20 @@ export async function getForecastNotebookSurface({
       loadInstallDescriptors(context, filters, installSql),
       loadSpendRows(context, filters, selection),
     ]);
+    const catalogAliases = buildForecastCatalogAliases(spendRows);
 
-    const catalog = buildCatalog(descriptorRows, {
-      platform: filters.platform,
-      country: selection.country,
-      source: selection.source,
-      company: selection.company,
-      campaign: selection.campaign,
-      creative: selection.creative,
-    });
+    const catalog = buildCatalog(
+      descriptorRows,
+      {
+        platform: filters.platform,
+        country: selection.country,
+        source: selection.source,
+        company: selection.company,
+        campaign: selection.campaign,
+        creative: selection.creative,
+      },
+      catalogAliases
+    );
 
     const groupBy = supportedGroupBy(filters.groupBy);
     const selectedDescriptorRows = applySelectionToDescriptors(descriptorRows, {
@@ -1281,10 +1293,20 @@ async function discoverMirrorSpendSchema(
       : campaignNameColumn
         ? `NULLIF(TRIM(CAST(${campaignNameColumn} AS STRING)), '')`
         : "'unknown'";
+    const campaignNameExpr = campaignNameColumn
+      ? `NULLIF(TRIM(CAST(${campaignNameColumn} AS STRING)), '')`
+      : campaignIdColumn
+        ? `NULLIF(TRIM(CAST(${campaignIdColumn} AS STRING)), '')`
+        : "'unknown'";
     const creativeExpr = creativeIdColumn
       ? `NULLIF(TRIM(CAST(${creativeIdColumn} AS STRING)), '')`
       : creativeNameColumn
         ? `NULLIF(TRIM(CAST(${creativeNameColumn} AS STRING)), '')`
+        : "'unknown'";
+    const creativeNameExpr = creativeNameColumn
+      ? `NULLIF(TRIM(CAST(${creativeNameColumn} AS STRING)), '')`
+      : creativeIdColumn
+        ? `NULLIF(TRIM(CAST(${creativeIdColumn} AS STRING)), '')`
         : "'unknown'";
     const spendExpr =
       spendColumn.includes("micros")
@@ -1303,12 +1325,14 @@ async function discoverMirrorSpendSchema(
           ${countryExpr} AS country,
           ${storeExpr} AS store,
           ${campaignExpr} AS campaign_id,
+          ${campaignNameExpr} AS campaign_name,
           ${creativeExpr} AS creative_id,
+          ${creativeNameExpr} AS creative_name,
           SUM(COALESCE(${spendExpr}, 0)) AS spend,
           SUM(COALESCE(${installsExpr}, 0)) AS installs
         FROM ${tableRef}
         WHERE (${cohortDateExpr}) BETWEEN CAST(@from AS STRING) AND CAST(@to AS STRING)
-        GROUP BY 1, 2, 3, 4, 5, 6, 7
+        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
       `,
     ];
   });
@@ -1329,12 +1353,14 @@ async function discoverMirrorSpendSchema(
         country,
         store,
         campaign_id,
+        campaign_name,
         creative_id,
+        creative_name,
         SUM(spend) AS spend,
         SUM(installs) AS installs
       FROM raw_spend
       WHERE cohort_date IS NOT NULL
-      GROUP BY 1, 2, 3, 4, 5, 6, 7
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
     `,
     company: sourceCompany,
     source: sourceKey,
@@ -1353,7 +1379,8 @@ function buildCatalog(
     company: string;
     campaign: string;
     creative: string;
-  }
+  },
+  aliases: ForecastCatalogAliases
 ): ForecastNotebookCatalog {
   const normalized = rows.map((row) => ({
     platform: row.platform ?? "unknown",
@@ -1410,9 +1437,71 @@ function buildCatalog(
     countries: buildOptions(filteredCountries, "country", "All countries", formatCountryLabel),
     sources: buildOptions(filteredSources, "source", "All traffic sources", formatSourceLabel),
     companies: buildOptions(filteredCompanies, "company", "All companies", (value) => value),
-    campaigns: buildOptions(filteredCampaigns, "campaign", "All campaigns", (value) => value),
-    creatives: buildOptions(filteredCreatives, "creative", "All creatives", (value) => value),
+    campaigns: buildOptions(
+      filteredCampaigns,
+      "campaign",
+      "All campaigns",
+      (value) => aliases.campaigns.get(value) ?? formatMirrorLabel(value)
+    ),
+    creatives: buildOptions(
+      filteredCreatives,
+      "creative",
+      "All creatives",
+      (value) => aliases.creatives.get(value) ?? formatMirrorLabel(value)
+    ),
   };
+}
+
+function buildForecastCatalogAliases(spendRows: MirrorSpendRow[]): ForecastCatalogAliases {
+  return {
+    campaigns: buildMirrorAliasMap(
+      spendRows.map((row) => ({
+        id: row.campaign_id,
+        name: row.campaign_name,
+      }))
+    ),
+    creatives: buildMirrorAliasMap(
+      spendRows.map((row) => ({
+        id: row.creative_id,
+        name: row.creative_name,
+      }))
+    ),
+  };
+}
+
+function buildMirrorAliasMap(
+  rows: Array<{ id: string | null; name: string | null }>
+) {
+  const votesById = new Map<string, Map<string, number>>();
+
+  for (const row of rows) {
+    const id = row.id?.trim();
+    const name = row.name?.trim();
+    if (!id || !name || id === "unknown" || name.toLowerCase() === "unknown") {
+      continue;
+    }
+
+    const votes = votesById.get(id) ?? new Map<string, number>();
+    votes.set(name, (votes.get(name) ?? 0) + 1);
+    votesById.set(id, votes);
+  }
+
+  const aliases = new Map<string, string>();
+  for (const [id, votes] of votesById.entries()) {
+    const winner = Array.from(votes.entries()).sort((left, right) => {
+      if (right[1] !== left[1]) {
+        return right[1] - left[1];
+      }
+
+      return left[0].localeCompare(right[0]);
+    })[0]?.[0];
+
+    if (winner) {
+      aliases.set(id, winner);
+    }
+  }
+
+  return aliases;
 }
 
 function applySelectionToDescriptors(
@@ -4093,6 +4182,10 @@ function formatSourceLabel(value: string) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function formatMirrorLabel(value: string) {
+  return value === "unknown" ? "Unknown" : value;
 }
 
 function formatPlatformLabel(value: string) {

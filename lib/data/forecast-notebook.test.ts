@@ -306,7 +306,9 @@ describe("forecast notebook live surface", () => {
             country: "US",
             store: "apple",
             campaign_id: "camp-1",
+            campaign_name: "Search Campaign Alpha",
             creative_id: "creative-1",
+            creative_name: "Playable Variant 7",
             spend: 100,
             installs: 80,
           },
@@ -317,7 +319,9 @@ describe("forecast notebook live surface", () => {
             country: "US",
             store: "apple",
             campaign_id: "camp-1",
+            campaign_name: "Search Campaign Alpha",
             creative_id: "creative-1",
+            creative_name: "Playable Variant 7",
             spend: 50,
             installs: 40,
           },
@@ -328,7 +332,9 @@ describe("forecast notebook live surface", () => {
             country: "US",
             store: "apple",
             campaign_id: "camp-1",
+            campaign_name: "Search Campaign Alpha",
             creative_id: "creative-1",
+            creative_name: "Playable Variant 7",
             spend: 60,
             installs: 24,
           },
@@ -357,6 +363,8 @@ describe("forecast notebook live surface", () => {
     expect(surface.catalog.sources.map((entry) => entry.value)).toContain("google_ads");
     expect(surface.catalog.campaigns.map((entry) => entry.value)).toContain("camp-1");
     expect(surface.catalog.creatives.map((entry) => entry.value)).toContain("creative-1");
+    expect(surface.catalog.campaigns.find((entry) => entry.value === "camp-1")?.label).toBe("Search Campaign Alpha");
+    expect(surface.catalog.creatives.find((entry) => entry.value === "creative-1")?.label).toBe("Playable Variant 7");
     expect(surface.data.summary.spend).toBe(210);
     expect(surface.data.summary.installs).toBe(144);
     expect(surface.data.summary.cpi).toBeCloseTo(1.46, 2);
