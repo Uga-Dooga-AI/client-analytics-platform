@@ -586,6 +586,52 @@ describe("forecast notebook live surface", () => {
     expect(fallbackBounds).toEqual(expect.any(Array));
   });
 
+  it("ignores placeholder [-15%, +15%] artifact bounds in strict chart mode", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const artifactCache = new Map<number, Map<string, readonly [number, number]>>([
+      [1000, new Map([[__testables.boundsKey(30, 7), [-15, 15] as const]])],
+    ]);
+    const trainingRecords = Array.from({ length: 12 }, (_, index) => ({
+      cohortDate: `2026-02-${String(index + 1).padStart(2, "0")}`,
+      cohortSize: 1000,
+      trueRevenue: [0, 0, 0, 0, 0, 0, 0],
+      trueFor: new Map<number, number>([[30, 100]]),
+      predictedForByCutoff: new Map<string, number>([
+        [__testables.boundsKey(30, 7), 90],
+      ]),
+      badByCutoff: new Set<number>(),
+    }));
+
+    const strictBounds = __testables.getNotebookBounds(
+      new Map(),
+      trainingRecords,
+      1000,
+      7,
+      30,
+      30,
+      [7],
+      [30],
+      artifactCache,
+      { allowLiveFallback: false }
+    );
+
+    const diagnosticBounds = __testables.getNotebookBounds(
+      new Map(),
+      trainingRecords,
+      1000,
+      7,
+      30,
+      30,
+      [7],
+      [30],
+      artifactCache
+    );
+
+    expect(__testables.isPlaceholderArtifactBounds([-15, 15])).toBe(true);
+    expect(strictBounds).toBeNull();
+    expect(diagnosticBounds).toEqual(expect.any(Array));
+  });
+
   it("matches notebook young-cohort fallback by keeping zero realized revenues in previous predictions", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
 

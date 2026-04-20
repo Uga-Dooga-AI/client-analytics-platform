@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
 import { CohortMatrixTable } from "@/components/cohort-matrix-table";
 import { ForecastCombinationTracker } from "@/components/forecast-combination-tracker";
@@ -71,6 +72,7 @@ const FORECAST_URL_PARAM_KEYS = [
   "creative",
   "horizonDays",
 ] as const;
+const BOUNDS_COVERAGE_PAGE_SIZE = 12;
 
 function formatPercent(value: number) {
   return `${value.toFixed(1)}%`;
@@ -92,6 +94,54 @@ function hasAppliedForecastSelection(
   }
 
   return FORECAST_URL_PARAM_KEYS.some((key) => readSingleParam(raw, key) !== undefined);
+}
+
+function readPositivePageParam(
+  raw: Record<string, string | string[] | undefined>,
+  key: string
+) {
+  const value = Number.parseInt(readSingleParam(raw, key) ?? "", 10);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function buildSearchParams(
+  raw: Record<string, string | string[] | undefined>
+) {
+  const params = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(raw)) {
+    if (Array.isArray(value)) {
+      value.forEach((entry) => {
+        if (typeof entry === "string") {
+          params.append(key, entry);
+        }
+      });
+      continue;
+    }
+
+    if (typeof value === "string") {
+      params.set(key, value);
+    }
+  }
+
+  return params;
+}
+
+function buildForecastPageHref(
+  raw: Record<string, string | string[] | undefined>,
+  updates: Record<string, string | null>
+) {
+  const params = buildSearchParams(raw);
+
+  for (const [key, value] of Object.entries(updates)) {
+    params.delete(key);
+    if (value) {
+      params.set(key, value);
+    }
+  }
+
+  const query = params.toString();
+  return query ? `/forecasts?${query}` : "/forecasts";
 }
 
 function isActiveRunStatus(status: string) {
@@ -399,6 +449,7 @@ export default async function ForecastsPage({
   searchParams: SearchParamsInput;
 }) {
   const rawSearchParams = await searchParams;
+  const requestedBoundsCoveragePage = readPositivePageParam(rawSearchParams, "boundsPage");
   const filters = parseDashboardSearchParams(rawSearchParams, "/forecasts");
   const localFilters = parseAcquisitionSearchParams(rawSearchParams);
   const bundles = await listAnalyticsProjects();
@@ -511,6 +562,17 @@ export default async function ForecastsPage({
     : null;
   const strategy = selectedBundle.project.settings.forecastStrategy ?? null;
   const strategyToggleValue = (enabled: boolean | undefined) => (enabled ? "On" : "Off");
+  const boundsCoverageRows = notebookSurface.diagnostics.boundsCoverage;
+  const boundsCoveragePageCount = Math.max(
+    1,
+    Math.ceil(boundsCoverageRows.length / BOUNDS_COVERAGE_PAGE_SIZE)
+  );
+  const boundsCoveragePage = Math.min(requestedBoundsCoveragePage, boundsCoveragePageCount);
+  const boundsCoveragePageStart = (boundsCoveragePage - 1) * BOUNDS_COVERAGE_PAGE_SIZE;
+  const visibleBoundsCoverageRows = boundsCoverageRows.slice(
+    boundsCoveragePageStart,
+    boundsCoveragePageStart + BOUNDS_COVERAGE_PAGE_SIZE
+  );
   const historyBaseQuery = hasAppliedSelection
     ? (() => {
         const params = serializeDashboardFilters({
@@ -741,108 +803,6 @@ export default async function ForecastsPage({
               </tbody>
             </table>
           </div>
-        </section>
-
-        <section
-          style={{
-            background: "var(--color-panel-base)",
-            border: "1px solid var(--color-border-soft)",
-            borderRadius: 10,
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ padding: 18 }}>
-            <SectionHeader
-              title="Bounds Coverage"
-              subtitle="Which normalized cohort sizes have published notebook bounds, and where only a diagnostic live-built table exists but is intentionally not rendered on charts."
-            />
-          </div>
-
-          {notebookSurface.diagnostics.boundsCoverage.length > 0 ? (
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {["Cohort size", "Slice cohorts", "Source", "Training records", "History days", "Prediction days", "Table keys"].map((column) => (
-                    <th
-                      key={column}
-                      style={{
-                        padding: "10px 18px",
-                        textAlign: "left",
-                        fontSize: 10.5,
-                        fontWeight: 600,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.06em",
-                        color: "var(--color-ink-500)",
-                        background: "var(--color-panel-soft)",
-                        borderBottom: "1px solid var(--color-border-soft)",
-                      }}
-                    >
-                      {column}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {notebookSurface.diagnostics.boundsCoverage.map((row, index) => {
-                  const tone = formatBoundsCoverageSource(row.source);
-                  return (
-                    <tr
-                      key={`bounds-${row.cohortSize}`}
-                      style={{
-                        borderBottom:
-                          index < notebookSurface.diagnostics.boundsCoverage.length - 1
-                            ? "1px solid var(--color-border-soft)"
-                            : "none",
-                      }}
-                    >
-                      <td style={{ padding: "14px 18px", fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-950)" }}>
-                        {row.cohortSize}
-                      </td>
-                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                        {row.sliceCohorts}
-                      </td>
-                      <td style={{ padding: "14px 18px" }}>
-                        <span
-                          style={{
-                            display: "inline-flex",
-                            padding: "3px 8px",
-                            borderRadius: 999,
-                            background: tone.background,
-                            color: tone.color,
-                            fontSize: 11.5,
-                            fontWeight: 600,
-                          }}
-                        >
-                          {tone.label}
-                        </span>
-                      </td>
-                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                        {row.smoothedTrainingRecords}
-                        {row.minTrainingCohortSize != null && row.maxTrainingCohortSize != null ? (
-                          <div style={{ marginTop: 2, fontSize: 11, color: "var(--color-ink-500)" }}>
-                            window {row.minTrainingCohortSize}-{row.maxTrainingCohortSize}
-                          </div>
-                        ) : null}
-                      </td>
-                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                        {formatBoundsCoverageRange(row.minHistoryDay, row.maxHistoryDay, "D")}
-                      </td>
-                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                        {formatBoundsCoverageRange(row.minPredictionDay, row.maxPredictionDay, "D")}
-                      </td>
-                      <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
-                        {row.tableKeyCount}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : (
-            <div style={{ padding: 18, fontSize: 12.5, color: "var(--color-ink-500)" }}>
-              No cohort sizes requested bounds for the current slice yet.
-            </div>
-          )}
         </section>
 
         <ComparisonConfidenceChart chart={notebookData.paybackChart} />
@@ -1220,6 +1180,235 @@ export default async function ForecastsPage({
             </tbody>
           </table>
         </section>
+
+        {hasAppliedSelection ? (
+          <section
+            style={{
+              background: "var(--color-panel-base)",
+              border: "1px solid var(--color-border-soft)",
+              borderRadius: 10,
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 18 }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 16,
+                  alignItems: "flex-start",
+                  flexWrap: "wrap",
+                }}
+              >
+                <SectionHeader
+                  title="Bounds Coverage"
+                  subtitle="Diagnostic view of normalized cohort-size bounds tables. Only clean artifact bounds are chart-eligible; live-built diagnostics never render on charts."
+                />
+
+                {boundsCoverageRows.length > 0 ? (
+                  <div style={{ display: "grid", gap: 8, justifyItems: "end" }}>
+                    <div style={{ fontSize: 11.5, color: "var(--color-ink-500)" }}>
+                      Showing {boundsCoveragePageStart + 1}-
+                      {Math.min(
+                        boundsCoveragePageStart + visibleBoundsCoverageRows.length,
+                        boundsCoverageRows.length
+                      )}{" "}
+                      of {boundsCoverageRows.length}
+                    </div>
+
+                    {boundsCoveragePageCount > 1 ? (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        {boundsCoveragePage > 1 ? (
+                          <Link
+                            href={buildForecastPageHref(rawSearchParams, {
+                              boundsPage:
+                                boundsCoveragePage - 1 > 1
+                                  ? String(boundsCoveragePage - 1)
+                                  : null,
+                            })}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              minHeight: 32,
+                              padding: "0 12px",
+                              borderRadius: 999,
+                              border: "1px solid var(--color-border-soft)",
+                              background: "var(--color-panel-base)",
+                              color: "var(--color-ink-700)",
+                              fontSize: 12,
+                              fontWeight: 600,
+                              textDecoration: "none",
+                            }}
+                          >
+                            Previous
+                          </Link>
+                        ) : (
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              minHeight: 32,
+                              padding: "0 12px",
+                              borderRadius: 999,
+                              border: "1px solid var(--color-border-soft)",
+                              background: "var(--color-panel-soft)",
+                              color: "var(--color-ink-400)",
+                              fontSize: 12,
+                              fontWeight: 600,
+                            }}
+                          >
+                            Previous
+                          </span>
+                        )}
+
+                        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--color-ink-600)" }}>
+                          Page {boundsCoveragePage} / {boundsCoveragePageCount}
+                        </span>
+
+                        {boundsCoveragePage < boundsCoveragePageCount ? (
+                          <Link
+                            href={buildForecastPageHref(rawSearchParams, {
+                              boundsPage: String(boundsCoveragePage + 1),
+                            })}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              minHeight: 32,
+                              padding: "0 12px",
+                              borderRadius: 999,
+                              border: "1px solid var(--color-border-soft)",
+                              background: "var(--color-panel-base)",
+                              color: "var(--color-ink-700)",
+                              fontSize: 12,
+                              fontWeight: 600,
+                              textDecoration: "none",
+                            }}
+                          >
+                            Next
+                          </Link>
+                        ) : (
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              minHeight: 32,
+                              padding: "0 12px",
+                              borderRadius: 999,
+                              border: "1px solid var(--color-border-soft)",
+                              background: "var(--color-panel-soft)",
+                              color: "var(--color-ink-400)",
+                              fontSize: 12,
+                              fontWeight: 600,
+                            }}
+                          >
+                            Next
+                          </span>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+
+              <div style={{ marginTop: 4, fontSize: 11.5, lineHeight: 1.55, color: "var(--color-ink-500)" }}>
+                `Artifact` means a cleaned notebook bounds table loaded from GCS and eligible for chart rendering.
+                `Live-built only` means runtime diagnostics rebuilt a table locally, but those intervals stay hidden on
+                charts. `Missing` means neither a usable artifact table nor a diagnostic table exists for that cohort
+                size.
+              </div>
+            </div>
+
+            {boundsCoverageRows.length > 0 ? (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    {["Cohort size", "Slice cohorts", "Source", "Training records", "History days", "Prediction days", "Table keys"].map((column) => (
+                      <th
+                        key={column}
+                        style={{
+                          padding: "10px 18px",
+                          textAlign: "left",
+                          fontSize: 10.5,
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.06em",
+                          color: "var(--color-ink-500)",
+                          background: "var(--color-panel-soft)",
+                          borderBottom: "1px solid var(--color-border-soft)",
+                        }}
+                      >
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleBoundsCoverageRows.map((row, index) => {
+                    const tone = formatBoundsCoverageSource(row.source);
+                    return (
+                      <tr
+                        key={`bounds-${row.cohortSize}`}
+                        style={{
+                          borderBottom:
+                            index < visibleBoundsCoverageRows.length - 1
+                              ? "1px solid var(--color-border-soft)"
+                              : "none",
+                        }}
+                      >
+                        <td style={{ padding: "14px 18px", fontSize: 12.5, fontWeight: 600, color: "var(--color-ink-950)" }}>
+                          {row.cohortSize}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {row.sliceCohorts}
+                        </td>
+                        <td style={{ padding: "14px 18px" }}>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              padding: "3px 8px",
+                              borderRadius: 999,
+                              background: tone.background,
+                              color: tone.color,
+                              fontSize: 11.5,
+                              fontWeight: 600,
+                            }}
+                          >
+                            {tone.label}
+                          </span>
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {row.smoothedTrainingRecords}
+                          {row.minTrainingCohortSize != null && row.maxTrainingCohortSize != null ? (
+                            <div style={{ marginTop: 2, fontSize: 11, color: "var(--color-ink-500)" }}>
+                              window {row.minTrainingCohortSize}-{row.maxTrainingCohortSize}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatBoundsCoverageRange(row.minHistoryDay, row.maxHistoryDay, "D")}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {formatBoundsCoverageRange(row.minPredictionDay, row.maxPredictionDay, "D")}
+                        </td>
+                        <td style={{ padding: "14px 18px", fontSize: 12, color: "var(--color-ink-700)" }}>
+                          {row.tableKeyCount}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{ padding: 18, fontSize: 12.5, color: "var(--color-ink-500)" }}>
+                No cohort sizes requested bounds for the current slice yet.
+              </div>
+            )}
+          </section>
+        ) : null}
       </main>
     </div>
   );

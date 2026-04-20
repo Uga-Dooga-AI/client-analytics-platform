@@ -179,6 +179,12 @@ type NotebookBoundsArtifactLoadResult = {
   issue: string | null;
 };
 
+type DecodedNotebookBoundsArtifact = {
+  table: Map<string, readonly [number, number]>;
+  filteredPlaceholderCount: number;
+  totalEntryCount: number;
+};
+
 type BoundsCoverageSummary = {
   rows: ForecastNotebookBoundsCoverageRow[];
   prebuiltFallbackTables: Map<number, Map<string, readonly [number, number]>>;
@@ -400,6 +406,8 @@ const MIRROR_COUNTRY_COLUMN_CANDIDATES = [
 ];
 const MIRROR_STORE_COLUMN_CANDIDATES = ["store", "platform", "os_name", "source_app_store"];
 const MIRROR_SPEND_COLUMN_CANDIDATES = ["spend", "cost", "cost_micros", "amount_micros"];
+const PLACEHOLDER_BOUNDS_PAIR = [-15, 15] as const;
+const PLACEHOLDER_BOUNDS_EPSILON = 1e-9;
 const MIRROR_INSTALLS_COLUMN_CANDIDATES = ["installs", "all_conversions", "conversions"];
 const NOTEBOOK_BOUNDS_ARTIFACT_CACHE = new Map<
   string,
@@ -2299,12 +2307,23 @@ function decodeNotebookBoundsArtifact(payload: Buffer) {
   const parsed = JSON.parse(result.stdout || "{}") as {
     bounds?: Record<string, [number, number]>;
   };
-  return new Map(
-    Object.entries(parsed.bounds ?? {}).map(([key, bounds]) => [
-      key,
-      [Number(bounds[0] ?? 0), Number(bounds[1] ?? 0)] as const,
-    ])
-  );
+  const table = new Map<string, readonly [number, number]>();
+  let filteredPlaceholderCount = 0;
+
+  for (const [key, bounds] of Object.entries(parsed.bounds ?? {})) {
+    const pair = [Number(bounds[0] ?? 0), Number(bounds[1] ?? 0)] as const;
+    if (isPlaceholderArtifactBounds(pair)) {
+      filteredPlaceholderCount += 1;
+      continue;
+    }
+    table.set(key, pair);
+  }
+
+  return {
+    table,
+    filteredPlaceholderCount,
+    totalEntryCount: Object.keys(parsed.bounds ?? {}).length,
+  } satisfies DecodedNotebookBoundsArtifact;
 }
 
 async function fetchNotebookBoundsArtifact(
@@ -2360,8 +2379,22 @@ async function fetchNotebookBoundsArtifact(
       }
 
       const payload = Buffer.from(await response.arrayBuffer());
+      const decoded = decodeNotebookBoundsArtifact(payload);
+      if (decoded.table.size === 0 && decoded.filteredPlaceholderCount > 0) {
+        return {
+          artifact: null,
+          issue: `Artifact file gs://${scope.bucket}/${objectPath} contained only placeholder [-15%, +15%] bounds entries and was ignored.`,
+        };
+      }
+
+      if (decoded.filteredPlaceholderCount > 0) {
+        console.warn(
+          `[forecast-notebook] filtered ${decoded.filteredPlaceholderCount}/${decoded.totalEntryCount} placeholder artifact bounds entries for ${context.bundle.project.slug} cohort size ${normalizedCohortSize}`
+        );
+      }
+
       return {
-        artifact: decodeNotebookBoundsArtifact(payload),
+        artifact: decoded.table,
         issue: null,
       };
     } catch (error) {
@@ -2469,7 +2502,7 @@ function getNotebookBounds(
   const notebookHorizon = clamp(Math.round(horizon), 7, 365);
   const key = boundsKey(notebookHorizon, nearestHistoryDay(cutoff));
   const artifactBounds = artifactCache?.get(normalizedCohortSize)?.get(key);
-  if (artifactBounds) {
+  if (artifactBounds && !isPlaceholderArtifactBounds(artifactBounds)) {
     return artifactBounds;
   }
 
@@ -4083,8 +4116,16 @@ export const __testables = {
   buildBoundsForCohortSize,
   fallbackYoungCohortPrediction,
   getNotebookBounds,
+  isPlaceholderArtifactBounds,
   normalizeBoundsCohortSize,
 };
+
+function isPlaceholderArtifactBounds(bounds: readonly [number, number]) {
+  return (
+    Math.abs(bounds[0] - PLACEHOLDER_BOUNDS_PAIR[0]) <= PLACEHOLDER_BOUNDS_EPSILON &&
+    Math.abs(bounds[1] - PLACEHOLDER_BOUNDS_PAIR[1]) <= PLACEHOLDER_BOUNDS_EPSILON
+  );
+}
 
 function formatGroupLabel(groupBy: DashboardGroupByKey, value: string) {
   if (groupBy === "country") {
