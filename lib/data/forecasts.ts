@@ -29,16 +29,6 @@ function sanitizeForecastRunLabel(label: string) {
   return containsUnsupportedForecastMetric(label) ? "Forecast run" : label;
 }
 
-const SUPPORTED_PUBLISHED_FORECAST_METRICS = new Set(["revenue"]);
-
-function containsUnsupportedForecastMetric(text: string) {
-  return /\bdau\b|\binstalls?\b/i.test(text);
-}
-
-function sanitizeForecastRunLabel(label: string) {
-  return containsUnsupportedForecastMetric(label) ? "Forecast run" : label;
-}
-
 type ForecastTableCandidate = {
   kind: "serving" | "raw";
   table: string;
