@@ -54,7 +54,6 @@ export type ForecastNotebookSummary = {
 export type ForecastNotebookData = {
   summary: ForecastNotebookSummary;
   horizonCharts: ComparisonConfidenceChartData[];
-  cohortCurvesChart: ComparisonConfidenceChartData;
   paybackChart: ComparisonConfidenceChartData;
   breakdownRows: AcquisitionBreakdownRow[];
   cohortMatrix: CohortMatrixRow[];
@@ -2721,13 +2720,6 @@ function buildNotebookData({
   const horizonCharts = horizonDays.map((horizonDay) =>
     buildHorizonChart(projectLabel, filters, selection, lines, horizonDay, predictionResources)
   );
-  const cohortCurvesChart = buildCohortCurvesChart(
-    projectLabel,
-    filters,
-    selection,
-    lines,
-    predictionResources
-  );
   const paybackChart = buildPaybackChart(projectLabel, selection, lines, predictionResources);
   const breakdownRows = lines.map((line) => buildBreakdownRow(line, predictionResources));
   const summary = buildSummary(lines, predictionResources);
@@ -2744,7 +2736,6 @@ function buildNotebookData({
       confidence: confidenceFromSamples,
     },
     horizonCharts,
-    cohortCurvesChart,
     paybackChart,
     breakdownRows,
     cohortMatrix,
@@ -2862,49 +2853,6 @@ function buildPaybackChart(
         };
       }),
     })),
-  };
-}
-
-function buildCohortCurvesChart(
-  projectLabel: string,
-  filters: DashboardFilters,
-  selection: ForecastNotebookSelection,
-  lines: GroupedLine[],
-  predictionResources: Map<string, LinePredictionResources>
-): ComparisonConfidenceChartData {
-  const cohortsByDate = new Map<string, ProcessedCohort[]>();
-  for (const cohort of lines.flatMap((line) => line.cohorts)) {
-    const current = cohortsByDate.get(cohort.cohortDate) ?? [];
-    current.push(cohort);
-    cohortsByDate.set(cohort.cohortDate, current);
-  }
-
-  return {
-    id: "forecast-cohort-curves",
-    title: `ROAS curves by lifetime day · ${selection.revenueMode}`,
-    subtitle: `${projectLabel} · each line is one cohort-date bucket from the current ${filters.granularityDays}d step. Hide cohort buckets in the legend to rescale the chart around the lines you care about.`,
-    unit: "%",
-    yAxis: {
-      min: 0,
-      referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
-    },
-    groups: Array.from(cohortsByDate.entries())
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([cohortDate, cohorts], index) => ({
-        label: formatCohortBucketLabel(cohortDate, filters.granularityDays, filters.to),
-        color: GROUP_COLORS[index % GROUP_COLORS.length],
-        actualColor: GROUP_COLORS[index % GROUP_COLORS.length],
-        series: PAYBACK_CURVE_POINTS_WITH_ZERO.map((dayPoint) => {
-          const aggregate = aggregatePaybackPoint(cohorts, dayPoint, predictionResources);
-          return {
-            label: `D${dayPoint}`,
-            value: aggregate.predicted,
-            lower: aggregate.lower,
-            upper: aggregate.upper,
-            actual: aggregate.actual,
-          };
-        }),
-      })),
   };
 }
 
@@ -3741,17 +3689,6 @@ function buildEmptyData(note: string): ForecastNotebookData {
       confidence: "No live cohort data",
     },
     horizonCharts: [],
-    cohortCurvesChart: {
-      id: "forecast-cohort-curves",
-      title: "ROAS curves by lifetime day",
-      subtitle: note,
-      unit: "%",
-      groups: [],
-      yAxis: {
-        min: 0,
-        referenceLines: [{ value: 100, label: "100%", color: "rgba(5, 150, 105, 0.6)", dasharray: "6 4" }],
-      },
-    },
     paybackChart: {
       id: "forecast-payback-curve",
       title: "Payback curve by lifetime day",
@@ -4172,37 +4109,6 @@ function formatLabelDate(value: string) {
     day: "numeric",
     timeZone: "UTC",
   }).format(date);
-}
-
-function formatCohortBucketLabel(startIso: string, stepDays: number, rangeEndIso: string) {
-  const start = new Date(`${startIso}T00:00:00Z`);
-  const rangeEnd = new Date(`${rangeEndIso}T00:00:00Z`);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(rangeEnd.getTime())) {
-    return formatLabelDate(startIso);
-  }
-
-  const bucketEnd = new Date(start);
-  bucketEnd.setUTCDate(bucketEnd.getUTCDate() + Math.max(stepDays - 1, 0));
-  const end = bucketEnd.getTime() <= rangeEnd.getTime() ? bucketEnd : rangeEnd;
-  if (end.getTime() <= start.getTime()) {
-    return formatLabelDate(startIso);
-  }
-
-  const partsFormatter = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
-  const startMonth = partsFormatter.formatToParts(start).find((part) => part.type === "month")?.value ?? "";
-  const endMonth = partsFormatter.formatToParts(end).find((part) => part.type === "month")?.value ?? "";
-  const startDay = partsFormatter.formatToParts(start).find((part) => part.type === "day")?.value ?? "";
-  const endDay = partsFormatter.formatToParts(end).find((part) => part.type === "day")?.value ?? "";
-
-  if (startMonth === endMonth) {
-    return `${startMonth} ${startDay}-${endDay}`;
-  }
-
-  return `${partsFormatter.format(start)}-${partsFormatter.format(end)}`;
 }
 
 function supportedGroupBy(requested: DashboardGroupByKey) {

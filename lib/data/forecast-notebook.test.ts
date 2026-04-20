@@ -365,8 +365,6 @@ describe("forecast notebook live surface", () => {
     expect(
       surface.data.horizonCharts[0]?.groups[0]?.series.find((point) => point.label === "Apr 13")
     ).toBeDefined();
-    expect(surface.data.cohortCurvesChart.groups[0]?.label).toBe("Mar 20-31");
-    expect(surface.data.cohortCurvesChart.groups[0]?.series[0]?.label).toBe("D0");
     expect(surface.data.paybackChart.groups[0]?.series[0]?.label).toBe("D0");
     expect(surface.data.breakdownRows[0]?.spend).toBe(210);
     expect(surface.data.cohortMatrix[0]?.cohortDate).toBe("2026-03-20");

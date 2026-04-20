@@ -1,4 +1,3 @@
-import { ActualMultiSeriesChart } from "@/components/actual-multi-series-chart";
 import { ComparisonConfidenceChart } from "@/components/comparison-confidence-chart";
 import { CohortMatrixTable } from "@/components/cohort-matrix-table";
 import { ForecastCombinationTracker } from "@/components/forecast-combination-tracker";
@@ -31,7 +30,6 @@ import {
   serializeDashboardFilters,
   type DashboardGroupByKey,
 } from "@/lib/dashboard-filters";
-import type { ActualMultiSeriesChart as ActualMultiSeriesChartData } from "@/lib/data/forecast-workbench";
 import {
   buildForecastCombinationKey,
   listAnalyticsProjects,
@@ -395,32 +393,6 @@ function MethodologyPanel() {
   );
 }
 
-function buildLegacyCohortCurvesChart(
-  chart: Awaited<ReturnType<typeof getForecastNotebookSurface>>["data"]["cohortCurvesChart"]
-): ActualMultiSeriesChartData | null {
-  if (chart.groups.length === 0) {
-    return null;
-  }
-
-  return {
-    id: `${chart.id}-legacy-scaled`,
-    title: `${chart.title} · scaled view`,
-    subtitle:
-      "Legacy multi-series layout restored from the earlier forecasts implementation. Uses the same lifetime ROAS curves and rescales around visible lines.",
-    unit: chart.unit,
-    groups: chart.groups.map((group) => ({
-      id: `${chart.id}-${group.label}`,
-      label: group.label,
-      color: group.color,
-      total: group.series.reduce((sum, point) => sum + Math.max(point.value ?? 0, 0), 0),
-      points: group.series.map((point) => ({
-        label: point.label,
-        value: point.value ?? 0,
-      })),
-    })),
-  };
-}
-
 export default async function ForecastsPage({
   searchParams,
 }: {
@@ -553,9 +525,6 @@ export default async function ForecastsPage({
         params.set("creative", notebookSelection.creative);
         return params.toString();
       })()
-    : null;
-  const legacyCohortCurvesChart = hasAppliedSelection
-    ? buildLegacyCohortCurvesChart(notebookData.cohortCurvesChart)
     : null;
 
   return (
@@ -875,12 +844,6 @@ export default async function ForecastsPage({
             </div>
           )}
         </section>
-
-        <ComparisonConfidenceChart chart={notebookData.cohortCurvesChart} />
-
-        {legacyCohortCurvesChart ? (
-          <ActualMultiSeriesChart chart={legacyCohortCurvesChart} />
-        ) : null}
 
         <ComparisonConfidenceChart chart={notebookData.paybackChart} />
 
