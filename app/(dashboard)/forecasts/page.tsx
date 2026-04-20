@@ -290,8 +290,8 @@ function buildBoundsArtifactDiagnostic({
       : "";
 
   return {
-    title: "Notebook Bounds Artifact Fallback",
-    body: `${selectedProjectLabel} rendered this slice with fallback bounds because notebook artifact files were not fully available. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
+    title: "Notebook Bounds Are Missing",
+    body: `${selectedProjectLabel} could not load notebook artifact bounds for part of this slice, so affected forecast intervals stay blank instead of falling back to synthetic bands. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
   };
 }
 
@@ -318,7 +318,7 @@ function formatBoundsCoverageSource(source: "artifact" | "live_fallback" | "miss
     case "artifact":
       return { label: "Artifact", color: "var(--color-success)", background: "#dcfce7" };
     case "live_fallback":
-      return { label: "Live-built", color: "var(--color-signal-blue)", background: "var(--color-signal-blue-surface)" };
+      return { label: "Live-built only", color: "var(--color-signal-blue)", background: "var(--color-signal-blue-surface)" };
     default:
       return { label: "Missing", color: "var(--color-danger)", background: "#fee2e2" };
   }
@@ -785,7 +785,7 @@ export default async function ForecastsPage({
           <div style={{ padding: 18 }}>
             <SectionHeader
               title="Bounds Coverage"
-              subtitle="Which normalized cohort sizes currently have notebook bounds, whether they came from artifacts or live-built history, and how much history supports them."
+              subtitle="Which normalized cohort sizes have published notebook bounds, and where only a diagnostic live-built table exists but is intentionally not rendered on charts."
             />
           </div>
 

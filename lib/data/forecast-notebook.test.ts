@@ -547,6 +547,47 @@ describe("forecast notebook live surface", () => {
     expect(__testables.normalizeBoundsCohortSize(1904.6)).toBe(1000);
   });
 
+  it("returns null in strict mode when only live-built bounds are available", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const trainingRecords = Array.from({ length: 12 }, (_, index) => ({
+      cohortDate: `2026-02-${String(index + 1).padStart(2, "0")}`,
+      cohortSize: 100,
+      trueRevenue: [0, 0, 0, 0, 0, 0, 0],
+      trueFor: new Map<number, number>([[30, 100]]),
+      predictedForByCutoff: new Map<string, number>([
+        [__testables.boundsKey(30, 7), 90],
+      ]),
+      badByCutoff: new Set<number>(),
+    }));
+
+    const strictBounds = __testables.getNotebookBounds(
+      new Map(),
+      trainingRecords,
+      100,
+      7,
+      30,
+      30,
+      [7],
+      [30],
+      undefined,
+      { allowLiveFallback: false }
+    );
+
+    const fallbackBounds = __testables.getNotebookBounds(
+      new Map(),
+      trainingRecords,
+      100,
+      7,
+      30,
+      30,
+      [7],
+      [30]
+    );
+
+    expect(strictBounds).toBeNull();
+    expect(fallbackBounds).toEqual(expect.any(Array));
+  });
+
   it("matches notebook young-cohort fallback by keeping zero realized revenues in previous predictions", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
 

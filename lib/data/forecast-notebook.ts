@@ -187,7 +187,6 @@ type BoundsCoverageSummary = {
 
 type PredictionRuntimeArtifacts = {
   notebookArtifactBounds: Map<number, Map<string, readonly [number, number]>>;
-  prebuiltFallbackTables: Map<number, Map<string, readonly [number, number]>>;
   trainingRecords: BoundsTrainingRecord[];
   estimatedCurves: Map<string, number[] | null>;
   historyDays: number[];
@@ -628,7 +627,7 @@ export async function* streamForecastNotebookHistorySnapshots({
     context
   );
   const requestedCutoffs = getForecastHistoryCutoffDays(horizonDay);
-  const boundsCache = cloneBoundsTables(predictionResourcesResult.artifacts.prebuiltFallbackTables);
+  const boundsCache = new Map<number, Map<string, readonly [number, number]>>();
 
   for (const cutoffDay of requestedCutoffs) {
     yield buildHistoricalForecastChartSnapshot(
@@ -1833,7 +1832,6 @@ async function buildPredictionResources(
         predictionPeriods,
         maxRequiredHorizon,
         notebookArtifactBounds.tables,
-        boundsCoverage.prebuiltFallbackTables,
         trainingRecords,
         estimatedCurves
       )
@@ -1845,7 +1843,6 @@ async function buildPredictionResources(
     boundsCoverage: boundsCoverage.rows,
     artifacts: {
       notebookArtifactBounds: notebookArtifactBounds.tables,
-      prebuiltFallbackTables: boundsCoverage.prebuiltFallbackTables,
       trainingRecords,
       estimatedCurves,
       historyDays,
@@ -1863,16 +1860,10 @@ async function buildLinePredictionResources(
   predictionPeriods: readonly number[],
   maxRequiredHorizon: number,
   notebookArtifactBounds: Map<number, Map<string, readonly [number, number]>>,
-  prebuiltFallbackTables: Map<number, Map<string, readonly [number, number]>>,
   trainingRecords: BoundsTrainingRecord[],
   estimatedCurves: Map<string, number[] | null>
 ): Promise<LinePredictionResources> {
-  const liveBoundsByCohortSize = new Map<number, Map<string, readonly [number, number]>>(
-    Array.from(prebuiltFallbackTables.entries()).map(([cohortSize, table]) => [
-      cohortSize,
-      new Map(table),
-    ])
-  );
+  const liveBoundsByCohortSize = new Map<number, Map<string, readonly [number, number]>>();
   const predictionsByCohortDate = new Map<string, CurvePrediction>();
   const history: CurvePrediction[] = [];
 
@@ -1965,7 +1956,8 @@ async function buildLinePredictionResources(
             maxRequiredHorizon,
             historyDays,
             predictionPeriods,
-            notebookArtifactBounds
+            notebookArtifactBounds,
+            { allowLiveFallback: false }
           )
         : null;
       const lowerRevenue =
@@ -2441,8 +2433,8 @@ async function loadNotebookBoundsArtifacts(
   let issue: string | null = null;
   if (fallbackUsed) {
     issue = scopeUri
-      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. This request used live-built fallback bounds for the missing sizes, so the result is not strict notebook parity.`
-      : "Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. This request used live-built fallback bounds instead.";
+      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. Forecast intervals stay blank for the missing sizes so the issue remains visible. Live-built fallback tables are computed for diagnostics only.`
+      : "Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. Forecast intervals stay blank until artifact publication is fixed. Live-built fallback tables are computed for diagnostics only.";
   }
 
   return {
@@ -2469,7 +2461,10 @@ function getNotebookBounds(
   maxPredictionHorizon: number,
   historyDays: readonly number[],
   predictionPeriods: readonly number[],
-  artifactCache?: Map<number, Map<string, readonly [number, number]>>
+  artifactCache?: Map<number, Map<string, readonly [number, number]>>,
+  options?: {
+    allowLiveFallback?: boolean;
+  }
 ) {
   const normalizedCohortSize = normalizeBoundsCohortSize(cohortSize);
   const notebookHorizon = clamp(Math.round(horizon), 7, 365);
@@ -2477,6 +2472,10 @@ function getNotebookBounds(
   const artifactBounds = artifactCache?.get(normalizedCohortSize)?.get(key);
   if (artifactBounds) {
     return artifactBounds;
+  }
+
+  if (options?.allowLiveFallback === false) {
+    return null;
   }
 
   let boundsTable = cache.get(normalizedCohortSize);
@@ -3197,7 +3196,8 @@ function predictHistoricalCohort(
           artifacts.maxRequiredHorizon,
           artifacts.historyDays,
           artifacts.predictionPeriods,
-          artifacts.notebookArtifactBounds
+          artifacts.notebookArtifactBounds,
+          { allowLiveFallback: false }
         );
 
   const lowerRevenue =
