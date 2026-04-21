@@ -183,6 +183,17 @@ type NotebookBoundsArtifactLoadResult = {
   issue: string | null;
 };
 
+type NotebookBoundsArtifactManifest = {
+  artifactExpectedSizeCount: number | null;
+  artifactGeneratedSizeCount: number | null;
+  artifactOmittedSizeCount: number | null;
+  artifactOmittedForCoverageCount: number | null;
+  artifactOmittedForEmptyTableCount: number | null;
+  artifactMinPredictionsRequired: number | null;
+  artifactSizeSmoothCoeff: number | null;
+  artifactOmittedSizeRanges: Array<{ from: number; to: number }>;
+};
+
 type DecodedNotebookBoundsArtifact = {
   table: Map<string, readonly [number, number]>;
   filteredPlaceholderCount: number;
@@ -423,6 +434,10 @@ const MIRROR_INSTALLS_COLUMN_CANDIDATES = ["installs", "all_conversions", "conve
 const NOTEBOOK_BOUNDS_ARTIFACT_CACHE = new Map<
   string,
   Promise<{ artifact: Map<string, readonly [number, number]> | null; issue: string | null }>
+>();
+const NOTEBOOK_BOUNDS_MANIFEST_CACHE = new Map<
+  string,
+  Promise<NotebookBoundsArtifactManifest | null>
 >();
 
 const STORE_SQL = `
@@ -2487,6 +2502,96 @@ function decodeNotebookBoundsArtifact(payload: Buffer) {
   } satisfies DecodedNotebookBoundsArtifact;
 }
 
+function normalizeBoundsArtifactManifest(
+  value: unknown
+): NotebookBoundsArtifactManifest | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const normalizeNumber = (input: unknown) =>
+    typeof input === "number" && Number.isFinite(input) ? input : null;
+  const normalizeRanges = Array.isArray(record.artifactOmittedSizeRanges)
+    ? record.artifactOmittedSizeRanges.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          return [];
+        }
+        const item = entry as Record<string, unknown>;
+        const from = normalizeNumber(item.from);
+        const to = normalizeNumber(item.to);
+        return from !== null && to !== null ? [{ from, to }] : [];
+      })
+    : [];
+
+  return {
+    artifactExpectedSizeCount: normalizeNumber(record.artifactExpectedSizeCount),
+    artifactGeneratedSizeCount: normalizeNumber(record.artifactGeneratedSizeCount),
+    artifactOmittedSizeCount: normalizeNumber(record.artifactOmittedSizeCount),
+    artifactOmittedForCoverageCount: normalizeNumber(record.artifactOmittedForCoverageCount),
+    artifactOmittedForEmptyTableCount: normalizeNumber(record.artifactOmittedForEmptyTableCount),
+    artifactMinPredictionsRequired: normalizeNumber(record.artifactMinPredictionsRequired),
+    artifactSizeSmoothCoeff: normalizeNumber(record.artifactSizeSmoothCoeff),
+    artifactOmittedSizeRanges: normalizeRanges,
+  };
+}
+
+function formatBoundsArtifactRanges(
+  ranges: Array<{ from: number; to: number }>,
+  limit = 8
+) {
+  if (ranges.length === 0) {
+    return "none";
+  }
+
+  const preview = ranges.slice(0, limit);
+  const rendered = preview
+    .map((range) => (range.from === range.to ? String(range.from) : `${range.from}-${range.to}`))
+    .join(", ");
+  const suffix = ranges.length > limit ? `, +${ranges.length - limit} more` : "";
+  return `${rendered}${suffix}`;
+}
+
+function describeBoundsArtifactManifest(
+  manifest: NotebookBoundsArtifactManifest | null
+) {
+  if (!manifest || (manifest.artifactOmittedSizeCount ?? 0) <= 0) {
+    return null;
+  }
+
+  const parts = [
+    `Latest bounds manifest omitted ${manifest.artifactOmittedSizeCount} cohort size file(s).`,
+  ];
+
+  if ((manifest.artifactOmittedForCoverageCount ?? 0) > 0) {
+    const minPredictions =
+      manifest.artifactMinPredictionsRequired !== null
+        ? ` (<${manifest.artifactMinPredictionsRequired} smoothed training records)`
+        : "";
+    const smoothCoeff =
+      manifest.artifactSizeSmoothCoeff !== null
+        ? ` with smooth coeff ${manifest.artifactSizeSmoothCoeff}`
+        : "";
+    parts.push(
+      `${manifest.artifactOmittedForCoverageCount} were skipped for insufficient smoothed coverage${minPredictions}${smoothCoeff}.`
+    );
+  }
+
+  if ((manifest.artifactOmittedForEmptyTableCount ?? 0) > 0) {
+    parts.push(
+      `${manifest.artifactOmittedForEmptyTableCount} were skipped because no empirical bounds keys were produced.`
+    );
+  }
+
+  if (manifest.artifactOmittedSizeRanges.length > 0) {
+    parts.push(
+      `Omitted size ranges: ${formatBoundsArtifactRanges(manifest.artifactOmittedSizeRanges)}.`
+    );
+  }
+
+  return parts.join(" ");
+}
+
 async function fetchNotebookBoundsArtifact(
   context: ProjectQueryContext,
   cohortSize: number
@@ -2576,6 +2681,76 @@ async function fetchNotebookBoundsArtifact(
   return pending;
 }
 
+async function fetchNotebookBoundsArtifactManifest(context: ProjectQueryContext) {
+  const scope = resolveBoundsArtifactScope(context.bundle);
+  if (!scope?.bucket) {
+    return null;
+  }
+
+  if (process.env.NODE_ENV === "test") {
+    return null;
+  }
+
+  const objectPaths = [
+    [scope.prefix, "bounds-latest.json"].filter(Boolean).join("/"),
+    [scope.prefix, "latest.json"].filter(Boolean).join("/"),
+  ];
+
+  for (const objectPath of objectPaths) {
+    const cacheKey = `${scope.bucket}/${objectPath}`;
+    const cached = NOTEBOOK_BOUNDS_MANIFEST_CACHE.get(cacheKey);
+    if (cached) {
+      const manifest = await cached;
+      if (manifest) {
+        return manifest;
+      }
+      continue;
+    }
+
+    const pending = (async () => {
+      try {
+        const token = await getAccessToken(context.serviceAccount);
+        const response = await fetch(
+          `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(scope.bucket)}/o/${encodeURIComponent(objectPath)}?alt=media`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "x-goog-user-project": context.warehouseProjectId,
+            },
+            cache: "no-store",
+          }
+        );
+
+        if (response.status === 404) {
+          return null;
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            `GCS bounds manifest fetch failed: ${response.status} ${await response.text()}`
+          );
+        }
+
+        return normalizeBoundsArtifactManifest((await response.json()) as unknown);
+      } catch (error) {
+        const issue = error instanceof Error ? error.message : "Unknown error";
+        console.warn(
+          `[forecast-notebook] bounds manifest fetch failed for ${context.bundle.project.slug}: ${issue}`
+        );
+        return null;
+      }
+    })();
+
+    NOTEBOOK_BOUNDS_MANIFEST_CACHE.set(cacheKey, pending);
+    const manifest = await pending;
+    if (manifest) {
+      return manifest;
+    }
+  }
+
+  return null;
+}
+
 async function loadNotebookBoundsArtifacts(
   context: ProjectQueryContext,
   cohortSizes: number[]
@@ -2588,6 +2763,7 @@ async function loadNotebookBoundsArtifacts(
   const boundsSource = context.bundle.sources.find((source) => source.sourceType === "bounds_artifacts");
   const scope = resolveBoundsArtifactScope(context.bundle);
   const scopeUri = scope?.bucket ? `gs://${scope.bucket}${scope.prefix ? `/${scope.prefix}` : ""}` : null;
+  const manifest = await fetchNotebookBoundsArtifactManifest(context);
   const tables = new Map<number, Map<string, readonly [number, number]>>();
   const loadedSizes: number[] = [];
   const missingSizes: number[] = [];
@@ -2625,9 +2801,10 @@ async function loadNotebookBoundsArtifacts(
   const fallbackUsed = missingSizes.length > 0;
   let issue: string | null = null;
   if (fallbackUsed) {
+    const manifestSummary = describeBoundsArtifactManifest(manifest);
     issue = scopeUri
-      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. Forecast intervals stay blank for the missing sizes so the issue remains visible. Live-built fallback tables are computed for diagnostics only.`
-      : "Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. Forecast intervals stay blank until artifact publication is fixed. Live-built fallback tables are computed for diagnostics only.";
+      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. Forecast intervals stay blank for the missing sizes so the issue remains visible. Live-built fallback tables are computed for diagnostics only.${manifestSummary ? ` ${manifestSummary}` : ""}`
+      : `Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. Forecast intervals stay blank until artifact publication is fixed. Live-built fallback tables are computed for diagnostics only.${manifestSummary ? ` ${manifestSummary}` : ""}`;
   }
 
   return {

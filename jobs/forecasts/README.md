@@ -109,8 +109,10 @@ gcloud scheduler jobs create http forecasts-daily \
 
 ## Bounds behavior
 
-- `bounds_refresh` currently rebuilds upstream marts only.
-- The published `p10 / p50 / p90` bands are generated inside the forecast run itself.
+- `bounds_refresh` rebuilds upstream marts and republishes notebook-style bounds artifacts under the configured GCS prefix.
+- Sizes without enough smoothed historical coverage are omitted entirely instead of being backfilled with synthetic `[-15%, +15%]` placeholders.
+- Partially calculated tables stay sparse: missing cutoff / horizon keys remain absent so the UI can surface the gap instead of masking it.
+- The published `p10 / p50 / p90` bands are still generated inside the forecast run itself.
 - Holt intervals use residual standard deviation around the fitted series, scaled by the configured confidence interval.
 - Prophet intervals use `yhat_lower / yhat / yhat_upper` directly from Prophet output.
 - All bands are clipped to non-negative values before publishing.

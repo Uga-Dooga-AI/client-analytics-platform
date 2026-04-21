@@ -1,5 +1,5 @@
 """
-BigQuery mart → forecast engine → output writer job.
+BigQuery mart -> forecast engine -> output writer job.
 
 This worker can run in two modes:
   - local/manual mode from a static config file
@@ -29,7 +29,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("forecasts")
 
-SUPPORTED_FORECAST_METRICS = ("revenue",)
+
+def summarize_source_diagnostics(diagnostics: list[dict[str, object]]) -> str:
+    parts: list[str] = []
+    for diagnostic in diagnostics:
+        metric = str(diagnostic.get("metric", "unknown"))
+        table = str(diagnostic.get("table", "unknown"))
+        buckets = diagnostic.get("dateBucketCount", 0)
+        latest = diagnostic.get("latestAvailableDate") or "none"
+        parts.append(f"{metric}<{table}>={buckets} buckets, latest={latest}")
+    return "; ".join(parts[:4])
 
 
 def load_config() -> dict:
@@ -47,21 +56,18 @@ def resolve_history_window(config: dict, runtime_context) -> tuple[str, str]:
     max_history_days = max(min_history_days * 4, horizon_days, 120)
     date_to = date.today().isoformat()
     date_from = (date.today() - timedelta(days=max_history_days)).isoformat()
-
     if runtime_context.mode == "attached" and runtime_context.run:
         run = runtime_context.run
         if isinstance(run.get("windowFrom"), str):
             date_from = run["windowFrom"]
         if isinstance(run.get("windowTo"), str):
             date_to = run["windowTo"]
-
     return date_from, date_to
 
 
 def should_anchor_history_window(runtime_context) -> bool:
     if runtime_context.mode != "attached" or not runtime_context.run:
         return True
-
     run = runtime_context.run
     return not (
         isinstance(run.get("windowFrom"), str) or isinstance(run.get("windowTo"), str)
@@ -69,46 +75,20 @@ def should_anchor_history_window(runtime_context) -> bool:
 
 
 def resolve_metric_list(config: dict) -> list[str]:
-    def sanitize_metrics(raw_metrics: list[str]) -> list[str]:
-        supported = []
-        unsupported = []
-
-        for metric in raw_metrics:
-            normalized = str(metric).strip()
-            if not normalized:
-                continue
-            if normalized in SUPPORTED_FORECAST_METRICS:
-                if normalized not in supported:
-                    supported.append(normalized)
-            elif normalized not in unsupported:
-                unsupported.append(normalized)
-
-        if unsupported:
-            logger.warning(
-                "ignoring unsupported forecast metrics %s; current runtime only materializes decay-compatible metrics %s",
-                unsupported,
-                list(SUPPORTED_FORECAST_METRICS),
-            )
-
-        return supported
-
     env_override = (
         os.environ.get("ANALYTICS_FORECAST_METRICS")
         or os.environ.get("FORECAST_METRICS")
         or ""
     ).strip()
     if env_override:
-        metrics = sanitize_metrics(env_override.split(","))
+        metrics = [metric.strip() for metric in env_override.split(",") if metric.strip()]
         if metrics:
             return metrics
-
     forecast_cfg = config.get("forecast", {})
     metrics = forecast_cfg.get("metrics")
     if isinstance(metrics, list):
-        sanitized = sanitize_metrics(metrics)
-        if sanitized:
-            return sanitized
-    return list(SUPPORTED_FORECAST_METRICS)
+        return [str(metric).strip() for metric in metrics if str(metric).strip()]
+    return ["revenue", "dau", "installs", "exposures", "activations"]
 
 
 def resolve_hot_combination_limit(config: dict) -> int:
@@ -135,7 +115,6 @@ def main() -> None:
     if runtime_context.mode == "idle":
         logger.info("no queued forecast/bounds runs were available")
         return
-
     patch_run_status(
         runtime_context,
         status="running",
@@ -143,12 +122,13 @@ def main() -> None:
         source_type="bounds_artifacts",
         source_status="syncing",
     )
-
     try:
         config = load_config()
         bigquery_cfg = config.get("bigquery", {})
         forecast_cfg = config.get("forecast", {})
-        requested_date_from, requested_date_to = resolve_history_window(config, runtime_context)
+        requested_date_from, requested_date_to = resolve_history_window(
+            config, runtime_context
+        )
         date_from, date_to = requested_date_from, requested_date_to
         run_type = (
             str(runtime_context.run.get("runType", "forecast"))
@@ -160,7 +140,6 @@ def main() -> None:
         hot_combinations = list_hot_forecast_combinations(
             runtime_context, limit=resolve_hot_combination_limit(config)
         )
-
         logger.info(
             "config loaded: project=%s mart=%s metrics=%s range=%s..%s hot_combinations=%s prewarm_estimate=%s",
             bigquery_cfg.get("project_id"),
@@ -171,26 +150,72 @@ def main() -> None:
             len(hot_combinations),
             prewarm_plan.get("estimatedCombinationCount"),
         )
-
         if run_type == "bounds_refresh":
+            from src.bounds_artifacts import BoundsArtifactBuilder
             from src.dbt_runner import build_upstream_marts
+            from src.results_writer import ResultsWriter
 
             build_upstream_marts(config)
-            message = (
-                "Bounds refresh rebuilt project-scoped marts without recomputing forecasts. "
-                "Forecast execution still owns the actual p10/p50/p90 materialization."
+            builder = BoundsArtifactBuilder(
+                project_id=str(bigquery_cfg.get("project_id") or ""),
+                raw_dataset=str(bigquery_cfg.get("raw_dataset") or "raw"),
+                project_slug=str(config.get("project_slug") or ""),
+                run_date=date.today().isoformat(),
+                bounds_history_days=(
+                    int(forecast_cfg.get("bounds_history_days"))
+                    if forecast_cfg.get("bounds_history_days") is not None
+                    else None
+                ),
             )
-            logger.info(message)
+            writer = ResultsWriter(
+                project_id=bigquery_cfg.get("project_id"),
+                mart_dataset=bigquery_cfg.get("mart_dataset"),
+                forecast_table=bigquery_cfg.get("forecast_table"),
+                bounds_bucket=forecast_cfg.get("bounds_bucket"),
+                bounds_prefix=forecast_cfg.get("bounds_prefix"),
+            )
+            artifacts, artifact_metadata = builder.build()
+            output = writer.write_bounds_artifacts(
+                artifacts,
+                run_date=date.today().isoformat(),
+                metadata={
+                    "requestedSourceRange": {
+                        "from": requested_date_from,
+                        "to": requested_date_to,
+                    },
+                    "sourceRange": {
+                        "from": artifact_metadata.get("artifactWindow", {}).get("from"),
+                        "to": artifact_metadata.get("artifactWindow", {}).get("to"),
+                    },
+                    **artifact_metadata,
+                },
+            )
+            message = (
+                "Bounds refresh rebuilt marts and published "
+                f"{output['artifactCount']} notebook bounds artifacts without synthetic placeholder bands."
+            )
+            logger.info("%s output=%s", message, output)
             patch_run_status(
                 runtime_context,
                 status="succeeded",
                 message=message,
                 payload={
-                    "sourceRange": {"from": date_from, "to": date_to},
+                    "requestedSourceRange": {
+                        "from": requested_date_from,
+                        "to": requested_date_to,
+                    },
+                    "sourceRange": {
+                        "from": artifact_metadata.get("artifactWindow", {}).get("from"),
+                        "to": artifact_metadata.get("artifactWindow", {}).get("to"),
+                    },
                     "hotCombinations": hot_combinations,
                     "prewarmPlan": prewarm_plan,
-                    "executionMode": "bounds_refresh_transform",
+                    "executionMode": "bounds_refresh_transform_and_publish",
+                    "artifactMetadata": artifact_metadata,
+                    "output": output,
                 },
+                source_type="bounds_artifacts",
+                source_status="ready",
             )
             return
 
@@ -222,22 +247,46 @@ def main() -> None:
             min_history_days=int(forecast_cfg.get("min_history_days", 14)),
             engine=str(forecast_cfg.get("engine", "auto")),
         )
-
         source_df = reader.read_experiment_daily(date_from, date_to, metrics)
+        source_diagnostics = reader.get_source_diagnostics()
         if source_df.empty:
+            diagnostic_summary = summarize_source_diagnostics(source_diagnostics)
             message = "No source rows were returned for the requested history window."
-            logger.info(message)
+            if diagnostic_summary:
+                message = f"{message} {diagnostic_summary}"
+            logger.warning(
+                "forecast source is empty: requested_range=%s..%s resolved_range=%s..%s metrics=%s diagnostics=%s",
+                requested_date_from,
+                requested_date_to,
+                date_from,
+                date_to,
+                metrics,
+                source_diagnostics,
+            )
             output = writer.write_forecast(
                 source_df,
                 run_date=date.today().isoformat(),
-                metadata={"sourceRange": {"from": date_from, "to": date_to}, "metrics": metrics},
+                metadata={
+                    "requestedSourceRange": {
+                        "from": requested_date_from,
+                        "to": requested_date_to,
+                    },
+                    "sourceRange": {"from": date_from, "to": date_to},
+                    "metrics": metrics,
+                    "sourceDiagnostics": source_diagnostics,
+                },
             )
             patch_run_status(
                 runtime_context,
                 status="succeeded",
                 message=message,
                 payload={
+                    "requestedSourceRange": {
+                        "from": requested_date_from,
+                        "to": requested_date_to,
+                    },
                     "sourceRange": {"from": date_from, "to": date_to},
+                    "sourceDiagnostics": source_diagnostics,
                     "hotCombinations": hot_combinations,
                     "prewarmPlan": prewarm_plan,
                     "output": output,
@@ -246,10 +295,11 @@ def main() -> None:
                 source_status="ready",
             )
             return
-
         run_id = (
             str(runtime_context.run.get("id"))
-            if runtime_context.mode == "attached" and runtime_context.run and runtime_context.run.get("id")
+            if runtime_context.mode == "attached"
+            and runtime_context.run
+            and runtime_context.run.get("id")
             else None
         )
         forecast_df = engine.forecast(source_df, run_id=run_id)
@@ -257,7 +307,12 @@ def main() -> None:
             forecast_df,
             run_date=date.today().isoformat(),
             metadata={
+                "requestedSourceRange": {
+                    "from": requested_date_from,
+                    "to": requested_date_to,
+                },
                 "sourceRange": {"from": date_from, "to": date_to},
+                "sourceDiagnostics": source_diagnostics,
                 "sourceRows": int(len(source_df.index)),
                 "metrics": metrics,
                 "hotCombinations": hot_combinations,
@@ -265,19 +320,19 @@ def main() -> None:
             },
         )
         publish_forecast_serving_table(config)
-
-        message = (
-            "Forecast job completed for revenue."
-            if metrics == ["revenue"]
-            else f"Forecast job completed for {len(metrics)} metric(s)."
-        )
+        message = f"Forecast job completed for {len(metrics)} metric(s)."
         logger.info(message)
         patch_run_status(
             runtime_context,
             status="succeeded",
             message=message,
             payload={
+                "requestedSourceRange": {
+                    "from": requested_date_from,
+                    "to": requested_date_to,
+                },
                 "sourceRange": {"from": date_from, "to": date_to},
+                "sourceDiagnostics": source_diagnostics,
                 "sourceRows": int(len(source_df.index)),
                 "forecastRows": int(len(forecast_df.index)),
                 "hotCombinationCount": len(hot_combinations),

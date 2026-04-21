@@ -1,6 +1,5 @@
 """
 BigQuery mart reader for forecast jobs.
-
 Supports two modes:
   - live BigQuery reads from mart_experiment_daily
   - local CSV fallback via FORECAST_INPUT_PATH for dry-runs without credentials
@@ -8,6 +7,7 @@ Supports two modes:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
 import os
@@ -21,22 +21,21 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_METRICS = {
     "revenue": "SUM(COALESCE(revenue, 0))",
+    "dau": "SUM(COALESCE(dau, 0))",
+    "installs": "SUM(COALESCE(installed, 0))",
     "exposures": "SUM(COALESCE(exposures, 0))",
     "activations": "SUM(COALESCE(activations, 0))",
     "guardrail_crashes": "SUM(COALESCE(guardrail_crashes, 0))",
     "guardrail_errors": "SUM(COALESCE(guardrail_errors, 0))",
 }
 
-DATE_COLUMN_CANDIDATES = (
-    "date",
-    "run_date",
-    "install_date",
-    "event_date",
-    "cohort_date",
-    "segments_date",
-    "day",
-)
-TEMPORAL_TYPES = {"DATE", "DATETIME", "TIMESTAMP"}
+
+@dataclass(frozen=True)
+class MetricSourceSpec:
+    metric: str
+    table_name: str
+    date_column: str
+    value_sql: str
 
 
 class MartReader:
@@ -59,22 +58,35 @@ class MartReader:
             or self._derive_companion_table("revenue_metrics")
             or "mart_revenue_metrics"
         )
+        self.daily_active_users_table = (
+            os.environ.get("BQ_DAILY_ACTIVE_USERS_TABLE")
+            or self._derive_companion_table("daily_active_users")
+            or "mart_daily_active_users"
+        )
+        self.installs_funnel_table = (
+            os.environ.get("BQ_INSTALLS_FUNNEL_TABLE")
+            or self._derive_companion_table("installs_funnel")
+            or "mart_installs_funnel"
+        )
         self.input_path = input_path or os.environ.get("FORECAST_INPUT_PATH")
-        self._resolved_date_fields: dict[str, tuple[str, str] | None] = {}
-
+        self.last_source_diagnostics: list[dict[str, object]] = []
+        self._table_exists_cache: dict[str, bool] = {}
         if not self.project_id:
-            logger.warning("GCP_PROJECT_ID not set — BigQuery reader will stay in fallback mode")
+            logger.warning(
+                "GCP_PROJECT_ID not set — BigQuery reader will stay in fallback mode"
+            )
             self._client = None
             self._bq = None
             return
-
         try:
             from google.cloud import bigquery  # type: ignore[import-untyped]
 
             self._bq = bigquery
             self._client = bigquery.Client(project=self.project_id)
         except ImportError:
-            logger.warning("google-cloud-bigquery not installed — BigQuery reader unavailable")
+            logger.warning(
+                "google-cloud-bigquery not installed — BigQuery reader unavailable"
+            )
             self._client = None
             self._bq = None
 
@@ -89,27 +101,21 @@ class MartReader:
     def resolve_available_window(self, date_from: str, date_to: str) -> tuple[str, str]:
         if self._client is None:
             return date_from, date_to
-
         try:
             requested_from = date.fromisoformat(date_from)
             requested_to = date.fromisoformat(date_to)
         except ValueError:
             return date_from, date_to
-
         if requested_from > requested_to:
             requested_from, requested_to = requested_to, requested_from
-
         latest_available = self._latest_available_date()
         if latest_available is None:
             return requested_from.isoformat(), requested_to.isoformat()
-
         if requested_from <= latest_available <= requested_to:
             return requested_from.isoformat(), requested_to.isoformat()
-
         span_days = max((requested_to - requested_from).days, 0)
         anchored_to = latest_available
         anchored_from = latest_available - timedelta(days=span_days)
-
         logger.info(
             "requested mart history window %s..%s is outside latest available date %s; re-anchoring to %s..%s",
             requested_from.isoformat(),
@@ -130,77 +136,92 @@ class MartReader:
 
         metric_names = [
             metric
-            for metric in (metrics or ["revenue"])
+            for metric in (
+                metrics or ["revenue", "dau", "installs", "exposures", "activations"]
+            )
             if metric in ALLOWED_METRICS
         ]
         if not metric_names:
-            metric_names = ["revenue"]
-
+            metric_names = ["revenue", "dau", "installs", "exposures", "activations"]
         if self._client is None:
             return self._read_from_local_input(metric_names)
-
+        self.last_source_diagnostics = []
         frames: list[pd.DataFrame] = []
         for metric in metric_names:
-            metric_frame = self._read_metric_frame(metric, date_from, date_to)
+            spec = self._metric_source_spec(metric)
+            metric_frame = self._read_metric_frame(spec, date_from, date_to)
+            self.last_source_diagnostics.append(
+                self._build_metric_diagnostic(spec, metric_frame, date_from, date_to)
+            )
             if not metric_frame.empty:
                 frames.append(metric_frame)
-
         if not frames:
             return pd.DataFrame(columns=["date", "metric", "value"])
-
         df = pd.concat(frames, ignore_index=True)
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values(["metric", "date"]).reset_index(drop=True)
 
-    def _read_metric_frame(self, metric: str, date_from: str, date_to: str) -> "pd.DataFrame":
+    def get_source_diagnostics(self) -> list[dict[str, object]]:
+        return [dict(item) for item in self.last_source_diagnostics]
+
+    def _metric_source_spec(self, metric: str) -> MetricSourceSpec:
+        if metric == "revenue":
+            return MetricSourceSpec(
+                metric=metric,
+                table_name=self.revenue_metrics_table,
+                date_column="date",
+                value_sql="SUM(COALESCE(gross_revenue, 0))",
+            )
+        if metric == "dau":
+            return MetricSourceSpec(
+                metric=metric,
+                table_name=self.daily_active_users_table,
+                date_column="date",
+                value_sql="SUM(COALESCE(dau, 0))",
+            )
+        if metric == "installs":
+            return MetricSourceSpec(
+                metric=metric,
+                table_name=self.installs_funnel_table,
+                date_column="install_date",
+                value_sql="SUM(COALESCE(installed, 0))",
+            )
+        return MetricSourceSpec(
+            metric=metric,
+            table_name=self.experiment_daily_table,
+            date_column="date",
+            value_sql=ALLOWED_METRICS[metric],
+        )
+
+    def _read_metric_frame(
+        self, spec: MetricSourceSpec, date_from: str, date_to: str
+    ) -> "pd.DataFrame":
         import pandas as pd
 
         if self._client is None:
             return pd.DataFrame(columns=["date", "metric", "value"])
-
-        if metric == "revenue":
-            table_name = self.revenue_metrics_table
-            value_sql = "SUM(COALESCE(gross_revenue, 0))"
-        else:
-            table_name = self.experiment_daily_table
-            value_sql = ALLOWED_METRICS[metric]
-
-        resolved_date_field = self._resolve_date_field(table_name)
-        if resolved_date_field is None:
-            logger.warning(
-                "skipping metric %s because no temporal column was found for %s.%s.%s",
-                metric,
-                self.project_id,
-                self.mart_dataset,
-                table_name,
-            )
-            return pd.DataFrame(columns=["date", "metric", "value"])
-
-        date_select_sql, date_filter_sql = resolved_date_field
-
         query = f"""
             SELECT
-              {date_select_sql} AS date,
+              {spec.date_column} AS date,
               @metric AS metric,
-              CAST({value_sql} AS FLOAT64) AS value
-            FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
-            WHERE {date_filter_sql} BETWEEN @date_from AND @date_to
-            GROUP BY 1, 2
+              CAST({spec.value_sql} AS FLOAT64) AS value
+            FROM `{self.project_id}.{self.mart_dataset}.{spec.table_name}`
+            WHERE {spec.date_column} BETWEEN @date_from AND @date_to
+            GROUP BY {spec.date_column}
         """
         job_config = self._bq.QueryJobConfig(
             query_parameters=[
-                self._bq.ScalarQueryParameter("metric", "STRING", metric),
+                self._bq.ScalarQueryParameter("metric", "STRING", spec.metric),
                 self._bq.ScalarQueryParameter("date_from", "DATE", date_from),
                 self._bq.ScalarQueryParameter("date_to", "DATE", date_to),
             ]
         )
-
         logger.info(
             "reading mart data: project=%s dataset=%s table=%s metric=%s range=%s..%s",
             self.project_id,
             self.mart_dataset,
-            table_name,
-            metric,
+            spec.table_name,
+            spec.metric,
             date_from,
             date_to,
         )
@@ -209,53 +230,101 @@ class MartReader:
         except Exception as error:
             message = str(error)
             if "Not found: Table" in message:
-                logger.warning("skipping metric %s because source table is unavailable: %s", metric, message)
+                logger.warning(
+                    "skipping metric %s because source table is unavailable: %s",
+                    spec.metric,
+                    message,
+                )
                 return pd.DataFrame(columns=["date", "metric", "value"])
             raise
+
+    def _build_metric_diagnostic(
+        self,
+        spec: MetricSourceSpec,
+        metric_frame: "pd.DataFrame",
+        date_from: str,
+        date_to: str,
+    ) -> dict[str, object]:
+        min_date = None
+        max_date = None
+        total_value = 0.0
+        if not metric_frame.empty:
+            if "date" in metric_frame.columns:
+                min_date = metric_frame["date"].min()
+                max_date = metric_frame["date"].max()
+            if "value" in metric_frame.columns:
+                total_value = float(metric_frame["value"].fillna(0).sum())
+        latest_available = (
+            self._latest_available_date_for_table(spec.table_name, spec.date_column)
+            if self._table_exists(spec.table_name)
+            else None
+        )
+        return {
+            "metric": spec.metric,
+            "table": spec.table_name,
+            "dateColumn": spec.date_column,
+            "tableExists": self._table_exists(spec.table_name),
+            "requestedFrom": date_from,
+            "requestedTo": date_to,
+            "dateBucketCount": int(len(metric_frame.index)),
+            "valueTotal": round(total_value, 2),
+            "minDate": self._serialize_date_like(min_date),
+            "maxDate": self._serialize_date_like(max_date),
+            "latestAvailableDate": latest_available.isoformat()
+            if latest_available
+            else None,
+        }
+
+    def _table_exists(self, table_name: str) -> bool:
+        if self._client is None:
+            return False
+        if table_name in self._table_exists_cache:
+            return self._table_exists_cache[table_name]
+        query = f"""
+            SELECT COUNT(*) AS table_count
+            FROM `{self.project_id}.{self.mart_dataset}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_name = @table_name
+        """
+        job_config = self._bq.QueryJobConfig(
+            query_parameters=[
+                self._bq.ScalarQueryParameter("table_name", "STRING", table_name),
+            ]
+        )
+        df = self._client.query(query, job_config=job_config).to_dataframe()
+        exists = not df.empty and int(df["table_count"].iloc[0]) > 0
+        self._table_exists_cache[table_name] = exists
+        return exists
 
     def _latest_available_date(self) -> date | None:
         if self._client is None:
             return None
-
         candidates = [
-            self.experiment_daily_table,
-            self.revenue_metrics_table,
+            (self.experiment_daily_table, "date"),
+            (self.revenue_metrics_table, "date"),
+            (self.daily_active_users_table, "date"),
+            (self.installs_funnel_table, "install_date"),
         ]
         latest_dates: list[date] = []
-        seen: set[str] = set()
-
-        for table_name in candidates:
-            if table_name in seen:
+        seen: set[tuple[str, str]] = set()
+        for table_name, date_column in candidates:
+            key = (table_name, date_column)
+            if key in seen:
                 continue
-            seen.add(table_name)
-
-            latest_date = self._latest_available_date_for_table(table_name)
+            seen.add(key)
+            latest_date = self._latest_available_date_for_table(table_name, date_column)
             if latest_date is not None:
                 latest_dates.append(latest_date)
-
         if not latest_dates:
             return None
-
         return max(latest_dates)
 
-    def _latest_available_date_for_table(self, table_name: str) -> date | None:
+    def _latest_available_date_for_table(
+        self, table_name: str, date_column: str
+    ) -> date | None:
         if self._client is None:
             return None
-
-        resolved_date_field = self._resolve_date_field(table_name)
-        if resolved_date_field is None:
-            logger.warning(
-                "latest date probe skipped because no temporal column was found for %s.%s.%s",
-                self.project_id,
-                self.mart_dataset,
-                table_name,
-            )
-            return None
-
-        _, date_filter_sql = resolved_date_field
-
         query = f"""
-            SELECT MAX({date_filter_sql}) AS latest_date
+            SELECT MAX({date_column}) AS latest_date
             FROM `{self.project_id}.{self.mart_dataset}.{table_name}`
         """
         try:
@@ -269,118 +338,54 @@ class MartReader:
                 )
                 return None
             raise
-
         if df.empty or df["latest_date"].isna().all():
             return None
-
         latest_value = df["latest_date"].iloc[0]
         if latest_value is None:
             return None
-
         parsed = latest_value.date() if hasattr(latest_value, "date") else None
         if parsed is not None:
             return parsed
-
         try:
             return date.fromisoformat(str(latest_value))
         except ValueError:
             return None
 
-    def _resolve_date_field(self, table_name: str) -> tuple[str, str] | None:
-        if table_name in self._resolved_date_fields:
-            return self._resolved_date_fields[table_name]
-
-        resolved = self._resolve_date_field_uncached(table_name)
-        self._resolved_date_fields[table_name] = resolved
-        return resolved
-
-    def _resolve_date_field_uncached(self, table_name: str) -> tuple[str, str] | None:
-        if self._client is None:
-            return ("date", "date")
-
-        query = f"""
-            SELECT column_name, data_type
-            FROM `{self.project_id}.{self.mart_dataset}.INFORMATION_SCHEMA.COLUMNS`
-            WHERE table_name = @table_name
-            ORDER BY ordinal_position
-        """
-        job_config = self._bq.QueryJobConfig(
-            query_parameters=[
-                self._bq.ScalarQueryParameter("table_name", "STRING", table_name),
-            ]
-        )
-
-        try:
-            df = self._client.query(query, job_config=job_config).to_dataframe()
-        except Exception as error:
-            message = str(error)
-            if "Not found: Table" in message:
-                logger.warning(
-                    "date field resolution skipped because source table is unavailable: %s",
-                    message,
-                )
-                return None
-            raise
-
-        if df.empty:
+    @staticmethod
+    def _serialize_date_like(value: object) -> str | None:
+        if value is None:
             return None
-
-        columns = [
-            (str(row["column_name"]), str(row["data_type"]).upper())
-            for _, row in df.iterrows()
-        ]
-
-        for candidate in DATE_COLUMN_CANDIDATES:
-            match = next((column for column in columns if column[0] == candidate), None)
-            if match is not None:
-                return self._build_date_field_sql(*match)
-
-        fallback_temporal = next(
-            (column for column in columns if column[1] in TEMPORAL_TYPES),
-            None,
-        )
-        if fallback_temporal is not None:
-            logger.warning(
-                "table %s.%s.%s does not expose a preferred date column; falling back to %s (%s)",
-                self.project_id,
-                self.mart_dataset,
-                table_name,
-                fallback_temporal[0],
-                fallback_temporal[1],
-            )
-            return self._build_date_field_sql(*fallback_temporal)
-
-        return None
-
-    def _build_date_field_sql(self, column_name: str, data_type: str) -> tuple[str, str]:
-        if data_type in {"TIMESTAMP", "DATETIME"}:
-            expression = f"DATE({column_name})"
-            return expression, expression
-
-        return column_name, column_name
+        if hasattr(value, "date"):
+            try:
+                return value.date().isoformat()
+            except Exception:  # noqa: BLE001
+                return None
+        if isinstance(value, date):
+            return value.isoformat()
+        try:
+            return date.fromisoformat(str(value)).isoformat()
+        except ValueError:
+            return None
 
     def _read_from_local_input(self, metrics: list[str]) -> "pd.DataFrame":
         import pandas as pd
 
         if not self.input_path:
-            logger.info("no BigQuery client and FORECAST_INPUT_PATH is not set; returning empty frame")
+            logger.info(
+                "no BigQuery client and FORECAST_INPUT_PATH is not set; returning empty frame"
+            )
             return pd.DataFrame(columns=["date", "metric", "value"])
-
         input_path = Path(self.input_path)
         if not input_path.exists():
             logger.warning("FORECAST_INPUT_PATH does not exist: %s", input_path)
             return pd.DataFrame(columns=["date", "metric", "value"])
-
         df = pd.read_csv(input_path)
         if "date" not in df.columns:
             raise ValueError("FORECAST_INPUT_PATH must contain a 'date' column")
-
         df["date"] = pd.to_datetime(df["date"])
-
         if {"metric", "value"}.issubset(df.columns):
             filtered = df[df["metric"].isin(metrics)][["date", "metric", "value"]].copy()
             return filtered.sort_values(["metric", "date"]).reset_index(drop=True)
-
         value_columns = [metric for metric in metrics if metric in df.columns]
         if not value_columns:
             logger.warning(
@@ -388,7 +393,6 @@ class MartReader:
                 metrics,
             )
             return pd.DataFrame(columns=["date", "metric", "value"])
-
         melted = df.melt(
             id_vars=["date"],
             value_vars=value_columns,
