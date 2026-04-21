@@ -193,7 +193,7 @@ class BoundsArtifactBuilder:
         self.installs_table = f"{self.prefix}_appmetrica_installs"
         self.events_table = f"{self.prefix}_appmetrica_events"
 
-    def build(self) -> tuple[dict[int, bytes], dict[str, Any]]:
+    def build(self) -> tuple[dict[str, bytes], dict[str, Any]]:
         available_window = self._resolve_available_window()
         logger.info(
             "building notebook bounds artifacts: project=%s raw=%s.%s installs=%s events=%s window=%s..%s cutoff=%s",
@@ -209,106 +209,180 @@ class BoundsArtifactBuilder:
 
         rows = self._load_project_wide_rows(available_window["from"], available_window["to"])
         raw_cohorts, corrupted_days = self._split_project_wide_rows(rows)
-        processed_cohorts, granularity_diagnostics = build_multigranularity_processed_cohorts(
+        processed_by_granularity, granularity_diagnostics = build_multigranularity_processed_cohorts(
             raw_cohorts,
             corrupted_days,
             self.events_cutoff,
             SUPPORTED_BOUNDS_GRANULARITY_DAYS,
         )
-        training_records, diagnostics = build_bounds_training_records(
-            processed_cohorts,
-            NOTEBOOK_BOUNDS_HISTORY_DAYS,
-            NOTEBOOK_BOUNDS_PREDICTION_PERIODS,
-            365,
-        )
+        processed_cohorts = [
+            cohort
+            for step_days in SUPPORTED_BOUNDS_GRANULARITY_DAYS
+            for cohort in processed_by_granularity.get(step_days, [])
+        ]
 
-        artifacts: dict[int, bytes] = {}
-        omitted_for_coverage: list[int] = []
-        omitted_for_empty_table: list[int] = []
-        training_sizes = sorted({record.cohort_size for record in training_records})
+        artifacts: dict[str, bytes] = {}
+        generated_count_by_granularity: dict[str, int] = {}
+        omitted_for_coverage_by_granularity: dict[str, list[int]] = {}
+        omitted_for_empty_table_by_granularity: dict[str, list[int]] = {}
+        training_record_count_by_granularity: dict[str, int] = {}
+        training_size_min_by_granularity: dict[str, int | None] = {}
+        training_size_max_by_granularity: dict[str, int | None] = {}
+        training_size_preview_by_granularity: dict[str, list[int]] = {}
+        curve_diagnostics_by_granularity: dict[str, dict[str, Any]] = {}
+        total_training_records = 0
+        all_training_sizes: set[int] = set()
 
         logger.info(
-            "publishing notebook bounds tables: processed_cohorts=%d training_records=%d corrupted_days=%d min_predictions=%d smooth_coeff=%.2f",
+            "publishing notebook bounds tables: processed_cohorts=%d granularity_steps=%d corrupted_days=%d min_predictions=%d smooth_coeff=%.2f",
             len(processed_cohorts),
-            len(training_records),
+            len(processed_by_granularity),
             len(corrupted_days),
             BOUNDS_MIN_PREDICTIONS,
             BOUNDS_SIZE_SMOOTH_COEFF,
         )
 
-        for cohort_size in range(
-            NOTEBOOK_BOUNDS_MIN_COHORT_SIZE,
-            NOTEBOOK_BOUNDS_MAX_COHORT_SIZE + 1,
-        ):
-            smooth_count = smooth_record_count(training_records, cohort_size)
-            if smooth_count < BOUNDS_MIN_PREDICTIONS:
-                omitted_for_coverage.append(cohort_size)
-                if cohort_size % 100 == 0:
-                    logger.info(
-                        "skipped notebook bounds artifact %d/1000 for %s due to insufficient smoothed training coverage (%d < %d)",
-                        cohort_size,
-                        self.project_slug,
-                        smooth_count,
-                        BOUNDS_MIN_PREDICTIONS,
-                    )
-                continue
-
-            bounds_table = build_bounds_for_cohort_size(
-                training_records,
-                cohort_size,
-                365,
+        for step_days in SUPPORTED_BOUNDS_GRANULARITY_DAYS:
+            step_key = str(step_days)
+            processed_for_step = processed_by_granularity.get(step_days, [])
+            training_records, diagnostics = build_bounds_training_records(
+                processed_for_step,
                 NOTEBOOK_BOUNDS_HISTORY_DAYS,
                 NOTEBOOK_BOUNDS_PREDICTION_PERIODS,
+                365,
             )
-            if not bounds_table:
-                omitted_for_empty_table.append(cohort_size)
+            training_sizes = sorted({record.cohort_size for record in training_records})
+            total_training_records += len(training_records)
+            all_training_sizes.update(training_sizes)
+            training_record_count_by_granularity[step_key] = len(training_records)
+            training_size_min_by_granularity[step_key] = training_sizes[0] if training_sizes else None
+            training_size_max_by_granularity[step_key] = training_sizes[-1] if training_sizes else None
+            training_size_preview_by_granularity[step_key] = training_sizes[:50]
+            curve_diagnostics_by_granularity[step_key] = diagnostics
+
+            omitted_for_coverage_step: list[int] = []
+            omitted_for_empty_table_step: list[int] = []
+            generated_count = 0
+
+            for cohort_size in range(
+                NOTEBOOK_BOUNDS_MIN_COHORT_SIZE,
+                NOTEBOOK_BOUNDS_MAX_COHORT_SIZE + 1,
+            ):
+                smooth_count = smooth_record_count(training_records, cohort_size)
+                if smooth_count < BOUNDS_MIN_PREDICTIONS:
+                    omitted_for_coverage_step.append(cohort_size)
+                    if cohort_size % 100 == 0:
+                        logger.info(
+                            "skipped notebook bounds artifact %s for %s due to insufficient smoothed training coverage (%d < %d)",
+                            artifact_relative_path(step_days, cohort_size),
+                            self.project_slug,
+                            smooth_count,
+                            BOUNDS_MIN_PREDICTIONS,
+                        )
+                    continue
+
+                bounds_table = build_bounds_for_cohort_size(
+                    training_records,
+                    cohort_size,
+                    365,
+                    NOTEBOOK_BOUNDS_HISTORY_DAYS,
+                    NOTEBOOK_BOUNDS_PREDICTION_PERIODS,
+                )
+                if not bounds_table:
+                    omitted_for_empty_table_step.append(cohort_size)
+                    if cohort_size % 100 == 0:
+                        logger.info(
+                            "skipped notebook bounds artifact %s for %s because no empirical bounds keys were produced",
+                            artifact_relative_path(step_days, cohort_size),
+                            self.project_slug,
+                        )
+                    continue
+
+                artifacts[artifact_relative_path(step_days, cohort_size)] = serialize_bounds_artifact(
+                    bounds_table
+                )
+                generated_count += 1
                 if cohort_size % 100 == 0:
                     logger.info(
-                        "skipped notebook bounds artifact %d/1000 for %s because no empirical bounds keys were produced",
-                        cohort_size,
+                        "built notebook bounds artifact %s for %s",
+                        artifact_relative_path(step_days, cohort_size),
                         self.project_slug,
                     )
-                continue
 
-            artifacts[cohort_size] = serialize_bounds_artifact(bounds_table)
-            if cohort_size % 100 == 0:
-                logger.info(
-                    "built notebook bounds artifact %d/1000 for %s",
-                    cohort_size,
-                    self.project_slug,
+            generated_count_by_granularity[step_key] = generated_count
+            omitted_for_coverage_by_granularity[step_key] = omitted_for_coverage_step
+            omitted_for_empty_table_by_granularity[step_key] = omitted_for_empty_table_step
+
+            if omitted_for_coverage_step:
+                logger.warning(
+                    "omitted notebook bounds artifacts for %sd on %d cohort sizes due to insufficient smoothed coverage (<%d records); ranges=%s",
+                    step_days,
+                    len(omitted_for_coverage_step),
+                    BOUNDS_MIN_PREDICTIONS,
+                    summarize_size_ranges(omitted_for_coverage_step),
+                )
+            if omitted_for_empty_table_step:
+                logger.warning(
+                    "omitted notebook bounds artifacts for %sd on %d cohort sizes because no empirical bounds keys were produced; ranges=%s",
+                    step_days,
+                    len(omitted_for_empty_table_step),
+                    summarize_size_ranges(omitted_for_empty_table_step),
                 )
 
-        if omitted_for_coverage:
-            logger.warning(
-                "omitted notebook bounds artifacts for %d cohort sizes due to insufficient smoothed coverage (<%d records); ranges=%s",
-                len(omitted_for_coverage),
-                BOUNDS_MIN_PREDICTIONS,
-                summarize_size_ranges(omitted_for_coverage),
-            )
-        if omitted_for_empty_table:
-            logger.warning(
-                "omitted notebook bounds artifacts for %d cohort sizes because no empirical bounds keys were produced; ranges=%s",
-                len(omitted_for_empty_table),
-                summarize_size_ranges(omitted_for_empty_table),
-            )
+        omitted_for_coverage = [
+            cohort_size
+            for values in omitted_for_coverage_by_granularity.values()
+            for cohort_size in values
+        ]
+        omitted_for_empty_table = [
+            cohort_size
+            for values in omitted_for_empty_table_by_granularity.values()
+            for cohort_size in values
+        ]
+        all_training_sizes_sorted = sorted(all_training_sizes)
 
         metadata = {
             "runDate": self.run_date,
             "artifactFormat": "pickle-list-last-element-dict",
-            "artifactExpectedSizeCount": NOTEBOOK_BOUNDS_MAX_COHORT_SIZE,
+            "artifactLayoutVersion": 2,
+            "artifactPathPattern": "{granularityDays}d/{cohortSize}.pkl",
+            "artifactExpectedSizeCount": NOTEBOOK_BOUNDS_MAX_COHORT_SIZE
+            * len(SUPPORTED_BOUNDS_GRANULARITY_DAYS),
+            "artifactExpectedSizeCountPerGranularity": NOTEBOOK_BOUNDS_MAX_COHORT_SIZE,
             "artifactGeneratedSizeCount": len(artifacts),
+            "artifactGeneratedSizeCountByGranularity": generated_count_by_granularity,
             "artifactOmittedSizeCount": len(omitted_for_coverage) + len(omitted_for_empty_table),
+            "artifactOmittedSizeCountByGranularity": {
+                step_key: len(omitted_for_coverage_by_granularity.get(step_key, []))
+                + len(omitted_for_empty_table_by_granularity.get(step_key, []))
+                for step_key in generated_count_by_granularity
+            },
             "artifactOmittedForCoverageCount": len(omitted_for_coverage),
+            "artifactOmittedForCoverageCountByGranularity": {
+                step_key: len(omitted_for_coverage_by_granularity.get(step_key, []))
+                for step_key in generated_count_by_granularity
+            },
             "artifactOmittedForEmptyTableCount": len(omitted_for_empty_table),
-            "artifactOmittedSizeRanges": compress_size_ranges(
-                [*omitted_for_coverage, *omitted_for_empty_table]
-            ),
+            "artifactOmittedForEmptyTableCountByGranularity": {
+                step_key: len(omitted_for_empty_table_by_granularity.get(step_key, []))
+                for step_key in generated_count_by_granularity
+            },
+            "artifactOmittedSizeRanges": [],
+            "artifactOmittedSizeRangesByGranularity": {
+                step_key: compress_size_ranges(
+                    [
+                        *omitted_for_coverage_by_granularity.get(step_key, []),
+                        *omitted_for_empty_table_by_granularity.get(step_key, []),
+                    ]
+                )
+                for step_key in generated_count_by_granularity
+            },
             "artifactMinPredictionsRequired": BOUNDS_MIN_PREDICTIONS,
             "artifactSizeSmoothCoeff": BOUNDS_SIZE_SMOOTH_COEFF,
             "artifactWindow": available_window,
             "eventsCutoffDate": self.events_cutoff,
             "revenueMode": "total",
-            "runDateFreq": 1,
+            "runDateFreq": None,
             "historyDayRange": {
                 "from": NOTEBOOK_HISTORY_MIN_DAY,
                 "to": BOUNDS_MAX_CUTOFF,
@@ -320,12 +394,20 @@ class BoundsArtifactBuilder:
             "granularityDaysIncluded": SUPPORTED_BOUNDS_GRANULARITY_DAYS,
             "granularityDiagnostics": granularity_diagnostics,
             "processedCohortCount": len(processed_cohorts),
+            "processedCohortCountByGranularity": {
+                str(step_days): len(processed_by_granularity.get(step_days, []))
+                for step_days in SUPPORTED_BOUNDS_GRANULARITY_DAYS
+            },
             "corruptedDayCount": len(corrupted_days),
-            "trainingRecordCount": len(training_records),
-            "trainingCohortSizeMin": training_sizes[0] if training_sizes else None,
-            "trainingCohortSizeMax": training_sizes[-1] if training_sizes else None,
-            "trainingCohortSizePreview": training_sizes[:50],
-            "curveDiagnostics": diagnostics,
+            "trainingRecordCount": total_training_records,
+            "trainingRecordCountByGranularity": training_record_count_by_granularity,
+            "trainingCohortSizeMin": all_training_sizes_sorted[0] if all_training_sizes_sorted else None,
+            "trainingCohortSizeMax": all_training_sizes_sorted[-1] if all_training_sizes_sorted else None,
+            "trainingCohortSizePreview": all_training_sizes_sorted[:50],
+            "trainingCohortSizeMinByGranularity": training_size_min_by_granularity,
+            "trainingCohortSizeMaxByGranularity": training_size_max_by_granularity,
+            "trainingCohortSizePreviewByGranularity": training_size_preview_by_granularity,
+            "curveDiagnostics": curve_diagnostics_by_granularity,
         }
         return artifacts, metadata
 
@@ -562,16 +644,16 @@ def build_multigranularity_processed_cohorts(
     corrupted_days: set[str],
     today_iso: str,
     granularity_days: list[int],
-) -> tuple[list[ProcessedCohort], dict[str, Any]]:
+) -> tuple[dict[int, list[ProcessedCohort]], dict[str, Any]]:
     if not raw_cohorts:
-        return [], {
+        return {}, {
             "granularityDays": [],
             "anchorCountByGranularity": {},
             "processedCohortCountByGranularity": {},
         }
 
     min_cohort_date = min(cohort.cohort_date for cohort in raw_cohorts)
-    processed: list[ProcessedCohort] = []
+    processed_by_granularity: dict[int, list[ProcessedCohort]] = {}
     anchor_count_by_granularity: dict[str, int] = {}
     processed_count_by_granularity: dict[str, int] = {}
 
@@ -584,7 +666,7 @@ def build_multigranularity_processed_cohorts(
             anchor_date = add_days(min_cohort_date, offset)
             aggregated = aggregate_raw_cohorts(raw_cohorts, step_days, anchor_date)
             processed_for_offset = process_raw_cohorts(aggregated, corrupted_days, today_iso)
-            processed.extend(processed_for_offset)
+            processed_by_granularity.setdefault(step_days, []).extend(processed_for_offset)
             processed_count += len(processed_for_offset)
 
         processed_count_by_granularity[str(step_days)] = processed_count
@@ -594,7 +676,11 @@ def build_multigranularity_processed_cohorts(
         "anchorCountByGranularity": anchor_count_by_granularity,
         "processedCohortCountByGranularity": processed_count_by_granularity,
     }
-    return processed, diagnostics
+    return processed_by_granularity, diagnostics
+
+
+def artifact_relative_path(step_days: int, cohort_size: int) -> str:
+    return f"{max(1, int(step_days))}d/{int(cohort_size)}.pkl"
 
 
 def aggregate_raw_cohorts(

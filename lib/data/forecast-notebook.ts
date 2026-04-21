@@ -184,14 +184,22 @@ type NotebookBoundsArtifactLoadResult = {
 };
 
 type NotebookBoundsArtifactManifest = {
+  artifactLayoutVersion: number | null;
+  artifactPathPattern: string | null;
   artifactExpectedSizeCount: number | null;
+  artifactExpectedSizeCountPerGranularity: number | null;
   artifactGeneratedSizeCount: number | null;
+  artifactGeneratedSizeCountByGranularity: Record<string, number>;
   artifactOmittedSizeCount: number | null;
+  artifactOmittedSizeCountByGranularity: Record<string, number>;
   artifactOmittedForCoverageCount: number | null;
+  artifactOmittedForCoverageCountByGranularity: Record<string, number>;
   artifactOmittedForEmptyTableCount: number | null;
+  artifactOmittedForEmptyTableCountByGranularity: Record<string, number>;
   artifactMinPredictionsRequired: number | null;
   artifactSizeSmoothCoeff: number | null;
   artifactOmittedSizeRanges: Array<{ from: number; to: number }>;
+  artifactOmittedSizeRangesByGranularity: Record<string, Array<{ from: number; to: number }>>;
 };
 
 type DecodedNotebookBoundsArtifact = {
@@ -1900,7 +1908,8 @@ async function buildPredictionResources(
   const curveTasks: CurveEstimateTask[] = [];
   const notebookArtifactBounds = await loadNotebookBoundsArtifacts(
     context,
-    allCohorts.map((cohort) => cohort.cohortSize)
+    allCohorts.map((cohort) => cohort.cohortSize),
+    runDateFreq
   );
 
   for (const cohort of allCohorts) {
@@ -2378,8 +2387,15 @@ function collectBoundsTrainingWindow(
 
 function isBoundsArtifactSizeOmitted(
   manifest: NotebookBoundsArtifactManifest | null,
-  cohortSize: number
+  cohortSize: number,
+  granularityDays: number
 ) {
+  const granularityRanges =
+    manifest?.artifactOmittedSizeRangesByGranularity[String(Math.max(1, Math.round(granularityDays)))] ??
+    [];
+  if (granularityRanges.length > 0) {
+    return granularityRanges.some((range) => cohortSize >= range.from && cohortSize <= range.to);
+  }
   return (
     manifest?.artifactOmittedSizeRanges.some(
       (range) => cohortSize >= range.from && cohortSize <= range.to
@@ -2596,6 +2612,8 @@ function normalizeBoundsArtifactManifest(
   const record = value as Record<string, unknown>;
   const normalizeNumber = (input: unknown) =>
     typeof input === "number" && Number.isFinite(input) ? input : null;
+  const normalizeString = (input: unknown) =>
+    typeof input === "string" && input.trim().length > 0 ? input.trim() : null;
   const normalizeRanges = Array.isArray(record.artifactOmittedSizeRanges)
     ? record.artifactOmittedSizeRanges.flatMap((entry) => {
         if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
@@ -2607,16 +2625,70 @@ function normalizeBoundsArtifactManifest(
         return from !== null && to !== null ? [{ from, to }] : [];
       })
     : [];
+  const normalizeNumberMap = (input: unknown) => {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(input).flatMap(([key, value]) => {
+        const normalized = normalizeNumber(value);
+        return normalized !== null ? [[key, normalized]] : [];
+      })
+    );
+  };
+  const normalizeRangesByGranularity = (input: unknown) => {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(input).map(([key, value]) => {
+        const ranges = Array.isArray(value)
+          ? value.flatMap((entry) => {
+              if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                return [];
+              }
+              const item = entry as Record<string, unknown>;
+              const from = normalizeNumber(item.from);
+              const to = normalizeNumber(item.to);
+              return from !== null && to !== null ? [{ from, to }] : [];
+            })
+          : [];
+        return [key, ranges];
+      })
+    );
+  };
 
   return {
+    artifactLayoutVersion: normalizeNumber(record.artifactLayoutVersion),
+    artifactPathPattern: normalizeString(record.artifactPathPattern),
     artifactExpectedSizeCount: normalizeNumber(record.artifactExpectedSizeCount),
+    artifactExpectedSizeCountPerGranularity: normalizeNumber(
+      record.artifactExpectedSizeCountPerGranularity
+    ),
     artifactGeneratedSizeCount: normalizeNumber(record.artifactGeneratedSizeCount),
+    artifactGeneratedSizeCountByGranularity: normalizeNumberMap(
+      record.artifactGeneratedSizeCountByGranularity
+    ),
     artifactOmittedSizeCount: normalizeNumber(record.artifactOmittedSizeCount),
+    artifactOmittedSizeCountByGranularity: normalizeNumberMap(
+      record.artifactOmittedSizeCountByGranularity
+    ),
     artifactOmittedForCoverageCount: normalizeNumber(record.artifactOmittedForCoverageCount),
+    artifactOmittedForCoverageCountByGranularity: normalizeNumberMap(
+      record.artifactOmittedForCoverageCountByGranularity
+    ),
     artifactOmittedForEmptyTableCount: normalizeNumber(record.artifactOmittedForEmptyTableCount),
+    artifactOmittedForEmptyTableCountByGranularity: normalizeNumberMap(
+      record.artifactOmittedForEmptyTableCountByGranularity
+    ),
     artifactMinPredictionsRequired: normalizeNumber(record.artifactMinPredictionsRequired),
     artifactSizeSmoothCoeff: normalizeNumber(record.artifactSizeSmoothCoeff),
     artifactOmittedSizeRanges: normalizeRanges,
+    artifactOmittedSizeRangesByGranularity: normalizeRangesByGranularity(
+      record.artifactOmittedSizeRangesByGranularity
+    ),
   };
 }
 
@@ -2637,17 +2709,44 @@ function formatBoundsArtifactRanges(
 }
 
 function describeBoundsArtifactManifest(
-  manifest: NotebookBoundsArtifactManifest | null
+  manifest: NotebookBoundsArtifactManifest | null,
+  granularityDays: number
 ) {
-  if (!manifest || (manifest.artifactOmittedSizeCount ?? 0) <= 0) {
+  if (!manifest) {
     return null;
   }
 
+  const granularityKey = String(Math.max(1, Math.round(granularityDays)));
+  const perGranularityCount = manifest.artifactOmittedSizeCountByGranularity[granularityKey] ?? null;
+  const omittedCount = perGranularityCount ?? manifest.artifactOmittedSizeCount;
+  if ((omittedCount ?? 0) <= 0) {
+    return null;
+  }
+
+  const coverageCount =
+    manifest.artifactOmittedForCoverageCountByGranularity[granularityKey] ??
+    manifest.artifactOmittedForCoverageCount;
+  const emptyTableCount =
+    manifest.artifactOmittedForEmptyTableCountByGranularity[granularityKey] ??
+    manifest.artifactOmittedForEmptyTableCount;
+  const omittedRanges =
+    manifest.artifactOmittedSizeRangesByGranularity[granularityKey]?.length
+      ? manifest.artifactOmittedSizeRangesByGranularity[granularityKey]!
+      : manifest.artifactOmittedSizeRanges;
+  const expectedSizeCount =
+    manifest.artifactExpectedSizeCountPerGranularity ?? manifest.artifactExpectedSizeCount;
+
   const parts = [
-    `Latest bounds manifest omitted ${manifest.artifactOmittedSizeCount} cohort size file(s).`,
+    perGranularityCount !== null
+      ? `Latest bounds manifest omitted ${omittedCount} cohort size file(s) for step ${granularityDays}d.`
+      : `Latest bounds manifest omitted ${omittedCount} cohort size file(s).`,
   ];
 
-  if ((manifest.artifactOmittedForCoverageCount ?? 0) > 0) {
+  if (expectedSizeCount !== null) {
+    parts.push(`Expected cohort-size files for this step: ${expectedSizeCount}.`);
+  }
+
+  if ((coverageCount ?? 0) > 0) {
     const minPredictions =
       manifest.artifactMinPredictionsRequired !== null
         ? ` (<${manifest.artifactMinPredictionsRequired} smoothed training records)`
@@ -2657,19 +2756,19 @@ function describeBoundsArtifactManifest(
         ? ` with smooth coeff ${manifest.artifactSizeSmoothCoeff}`
         : "";
     parts.push(
-      `${manifest.artifactOmittedForCoverageCount} were skipped for insufficient smoothed coverage${minPredictions}${smoothCoeff}.`
+      `${coverageCount} were skipped for insufficient smoothed coverage${minPredictions}${smoothCoeff}.`
     );
   }
 
-  if ((manifest.artifactOmittedForEmptyTableCount ?? 0) > 0) {
+  if ((emptyTableCount ?? 0) > 0) {
     parts.push(
-      `${manifest.artifactOmittedForEmptyTableCount} were skipped because no empirical bounds keys were produced.`
+      `${emptyTableCount} were skipped because no empirical bounds keys were produced.`
     );
   }
 
-  if (manifest.artifactOmittedSizeRanges.length > 0) {
+  if (omittedRanges.length > 0) {
     parts.push(
-      `Omitted size ranges: ${formatBoundsArtifactRanges(manifest.artifactOmittedSizeRanges)}.`
+      `Omitted size ranges: ${formatBoundsArtifactRanges(omittedRanges)}.`
     );
   }
 
@@ -2679,6 +2778,7 @@ function describeBoundsArtifactManifest(
 async function fetchNotebookBoundsArtifact(
   context: ProjectQueryContext,
   cohortSize: number,
+  granularityDays: number,
   cacheVersion: string
 ): Promise<{ artifact: Map<string, readonly [number, number]> | null; issue: string | null }> {
   const scope = resolveBoundsArtifactScope(context.bundle);
@@ -2697,73 +2797,94 @@ async function fetchNotebookBoundsArtifact(
   }
 
   const normalizedCohortSize = normalizeBoundsCohortSize(cohortSize);
-  const objectPath = [scope.prefix, `${normalizedCohortSize}.pkl`].filter(Boolean).join("/");
-  const cacheKey = `${scope.bucket}/${objectPath}#${cacheVersion}`;
-  const cached = NOTEBOOK_BOUNDS_ARTIFACT_CACHE.get(cacheKey);
-  if (cached) {
-    return cached;
+  const objectPaths = [
+    [scope.prefix, `${Math.max(1, Math.round(granularityDays))}d`, `${normalizedCohortSize}.pkl`]
+      .filter(Boolean)
+      .join("/"),
+    [scope.prefix, `${normalizedCohortSize}.pkl`].filter(Boolean).join("/"),
+  ];
+
+  for (const objectPath of objectPaths) {
+    const cacheKey = `${scope.bucket}/${objectPath}#${cacheVersion}`;
+    const cached = NOTEBOOK_BOUNDS_ARTIFACT_CACHE.get(cacheKey);
+    if (cached) {
+      const cachedResult = await cached;
+      if (cachedResult.artifact) {
+        return cachedResult;
+      }
+      continue;
+    }
+
+    const pending = (async () => {
+      try {
+        const token = await getAccessToken(context.serviceAccount);
+        const response = await fetch(
+          `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(scope.bucket)}/o/${encodeURIComponent(objectPath)}?alt=media`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "x-goog-user-project": context.warehouseProjectId,
+            },
+            cache: "no-store",
+          }
+        );
+
+        if (response.status === 404) {
+          return {
+            artifact: null,
+            issue: `Missing file gs://${scope.bucket}/${objectPath}.`,
+          };
+        }
+
+        if (!response.ok) {
+          throw new Error(`GCS bounds fetch failed: ${response.status} ${await response.text()}`);
+        }
+
+        const payload = Buffer.from(await response.arrayBuffer());
+        const decoded = decodeNotebookBoundsArtifact(payload);
+        if (decoded.table.size === 0 && decoded.filteredPlaceholderCount > 0) {
+          return {
+            artifact: null,
+            issue: `Artifact file gs://${scope.bucket}/${objectPath} contained only placeholder [-15%, +15%] bounds entries and was ignored.`,
+          };
+        }
+
+        if (decoded.filteredPlaceholderCount > 0) {
+          console.warn(
+            `[forecast-notebook] filtered ${decoded.filteredPlaceholderCount}/${decoded.totalEntryCount} placeholder artifact bounds entries for ${context.bundle.project.slug} cohort size ${normalizedCohortSize}`
+          );
+        }
+
+        return {
+          artifact: decoded.table,
+          issue: null,
+        };
+      } catch (error) {
+        const issue = error instanceof Error ? error.message : "Unknown error";
+        console.warn(
+          `[forecast-notebook] bounds artifact fallback for ${context.bundle.project.slug} cohort size ${normalizedCohortSize}: ${
+            issue
+          }`
+        );
+        return {
+          artifact: null,
+          issue,
+        };
+      }
+    })();
+
+    NOTEBOOK_BOUNDS_ARTIFACT_CACHE.set(cacheKey, pending);
+    const result = await pending;
+    if (result.artifact) {
+      return result;
+    }
   }
 
-  const pending = (async () => {
-    try {
-      const token = await getAccessToken(context.serviceAccount);
-      const response = await fetch(
-        `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(scope.bucket)}/o/${encodeURIComponent(objectPath)}?alt=media`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "x-goog-user-project": context.warehouseProjectId,
-          },
-          cache: "no-store",
-        }
-      );
-
-      if (response.status === 404) {
-        return {
-          artifact: null,
-          issue: `Missing file gs://${scope.bucket}/${objectPath}.`,
-        };
-      }
-
-      if (!response.ok) {
-        throw new Error(`GCS bounds fetch failed: ${response.status} ${await response.text()}`);
-      }
-
-      const payload = Buffer.from(await response.arrayBuffer());
-      const decoded = decodeNotebookBoundsArtifact(payload);
-      if (decoded.table.size === 0 && decoded.filteredPlaceholderCount > 0) {
-        return {
-          artifact: null,
-          issue: `Artifact file gs://${scope.bucket}/${objectPath} contained only placeholder [-15%, +15%] bounds entries and was ignored.`,
-        };
-      }
-
-      if (decoded.filteredPlaceholderCount > 0) {
-        console.warn(
-          `[forecast-notebook] filtered ${decoded.filteredPlaceholderCount}/${decoded.totalEntryCount} placeholder artifact bounds entries for ${context.bundle.project.slug} cohort size ${normalizedCohortSize}`
-        );
-      }
-
-      return {
-        artifact: decoded.table,
-        issue: null,
-      };
-    } catch (error) {
-      const issue = error instanceof Error ? error.message : "Unknown error";
-      console.warn(
-        `[forecast-notebook] bounds artifact fallback for ${context.bundle.project.slug} cohort size ${normalizedCohortSize}: ${
-          issue
-        }`
-      );
-      return {
-        artifact: null,
-        issue,
-      };
-    }
-  })();
-
-  NOTEBOOK_BOUNDS_ARTIFACT_CACHE.set(cacheKey, pending);
-  return pending;
+  const preferredObjectPath = objectPaths[0];
+  return {
+    artifact: null,
+    issue: `Missing file gs://${scope.bucket}/${preferredObjectPath}.`,
+  };
 }
 
 async function fetchNotebookBoundsArtifactManifest(context: ProjectQueryContext) {
@@ -2838,7 +2959,8 @@ async function fetchNotebookBoundsArtifactManifest(context: ProjectQueryContext)
 
 async function loadNotebookBoundsArtifacts(
   context: ProjectQueryContext,
-  cohortSizes: number[]
+  cohortSizes: number[],
+  granularityDays: number
 ): Promise<NotebookBoundsArtifactLoadResult> {
   const uniqueSizes = uniqueSortedNumbers(
     cohortSizes
@@ -2872,7 +2994,7 @@ async function loadNotebookBoundsArtifacts(
   }
 
   for (const cohortSize of uniqueSizes) {
-    if (isBoundsArtifactSizeOmitted(manifest, cohortSize)) {
+    if (isBoundsArtifactSizeOmitted(manifest, cohortSize, granularityDays)) {
       missingSizes.push(cohortSize);
       if (issueSamples.length < 5) {
         issueSamples.push(
@@ -2882,7 +3004,12 @@ async function loadNotebookBoundsArtifacts(
       continue;
     }
 
-    const result = await fetchNotebookBoundsArtifact(context, cohortSize, cacheVersion);
+    const result = await fetchNotebookBoundsArtifact(
+      context,
+      cohortSize,
+      granularityDays,
+      cacheVersion
+    );
     if (result.artifact) {
       tables.set(cohortSize, result.artifact);
       loadedSizes.push(cohortSize);
@@ -2897,7 +3024,7 @@ async function loadNotebookBoundsArtifacts(
   const fallbackUsed = missingSizes.length > 0;
   let issue: string | null = null;
   if (fallbackUsed) {
-    const manifestSummary = describeBoundsArtifactManifest(manifest);
+    const manifestSummary = describeBoundsArtifactManifest(manifest, granularityDays);
     issue = scopeUri
       ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. Forecast intervals stay blank for the missing sizes so the issue remains visible. Live-built fallback tables are computed for diagnostics only.${manifestSummary ? ` ${manifestSummary}` : ""}`
       : `Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. Forecast intervals stay blank until artifact publication is fixed. Live-built fallback tables are computed for diagnostics only.${manifestSummary ? ` ${manifestSummary}` : ""}`;

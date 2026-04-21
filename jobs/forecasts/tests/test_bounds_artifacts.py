@@ -10,6 +10,8 @@ from src.bounds_artifacts import (  # noqa: E402
     BoundsTrainingRecord,
     RawCohortRecord,
     aggregate_raw_cohorts,
+    artifact_relative_path,
+    build_multigranularity_processed_cohorts,
     build_bounds_for_cohort_size,
     compress_size_ranges,
     get_error_bounds_from_records,
@@ -162,6 +164,38 @@ class BoundsArtifactsTest(unittest.TestCase):
         self.assertEqual(len(processed), 1)
         self.assertEqual(processed[0].cohort_num_days, 7)
         self.assertEqual(processed[0].cohort_size, 900)
+
+    def test_multigranularity_processed_cohorts_stay_separated_by_step(self):
+        raw = [
+            RawCohortRecord(
+                cohort_date=f"2026-01-{index + 1:02d}",
+                cohort_size=20,
+                cohort_num_days=1,
+                daily_revenue={0: 10.0 + index},
+            )
+            for index in range(7)
+        ]
+
+        processed_by_granularity, diagnostics = build_multigranularity_processed_cohorts(
+            raw,
+            corrupted_days=set(),
+            today_iso="2026-01-20",
+            granularity_days=[1, 7],
+        )
+
+        self.assertEqual(diagnostics["processedCohortCountByGranularity"]["1"], 7)
+        self.assertGreaterEqual(diagnostics["processedCohortCountByGranularity"]["7"], 1)
+        self.assertEqual({1, 7}, set(processed_by_granularity.keys()))
+        self.assertTrue(
+            any(
+                cohort.cohort_num_days == 7 and cohort.cohort_size == 140
+                for cohort in processed_by_granularity[7]
+            )
+        )
+
+    def test_artifact_relative_path_uses_granularity_subdirectories(self):
+        self.assertEqual(artifact_relative_path(1, 64), "1d/64.pkl")
+        self.assertEqual(artifact_relative_path(7, 1000), "7d/1000.pkl")
 
 
 if __name__ == "__main__":

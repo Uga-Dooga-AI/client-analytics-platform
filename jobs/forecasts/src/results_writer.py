@@ -116,7 +116,7 @@ class ResultsWriter:
 
     def write_bounds_artifacts(
         self,
-        artifacts: dict[int, bytes],
+        artifacts: dict[str, bytes],
         run_date: str,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -149,10 +149,10 @@ class ResultsWriter:
         if self._storage_client is not None and self.bounds_bucket:
             bucket = self._storage_client.bucket(self.bounds_bucket)
             desired_object_names = {
-                f"{self.bounds_prefix}/{cohort_size}.pkl"
+                f"{self.bounds_prefix}/{relative_path}".rstrip("/")
                 if self.bounds_prefix
-                else f"{cohort_size}.pkl"
-                for cohort_size in artifacts
+                else relative_path
+                for relative_path in artifacts
             }
             existing_prefix = f"{self.bounds_prefix}/" if self.bounds_prefix else ""
             deleted_count = 0
@@ -163,11 +163,11 @@ class ResultsWriter:
                     continue
                 blob.delete()
                 deleted_count += 1
-            for cohort_size, payload in artifacts.items():
+            for relative_path, payload in artifacts.items():
                 object_name = (
-                    f"{self.bounds_prefix}/{cohort_size}.pkl"
+                    f"{self.bounds_prefix}/{relative_path}".rstrip("/")
                     if self.bounds_prefix
-                    else f"{cohort_size}.pkl"
+                    else relative_path
                 )
                 bucket.blob(object_name).upload_from_string(
                     payload,
@@ -190,12 +190,15 @@ class ResultsWriter:
             bounds_dir = output_dir / (self.bounds_prefix or "bounds-artifacts")
             bounds_dir.mkdir(parents=True, exist_ok=True)
             deleted_count = 0
-            for artifact_path in bounds_dir.glob("*.pkl"):
-                if artifact_path.name not in {f"{cohort_size}.pkl" for cohort_size in artifacts}:
+            desired_relative_paths = {Path(relative_path) for relative_path in artifacts}
+            for artifact_path in bounds_dir.rglob("*.pkl"):
+                relative_path = artifact_path.relative_to(bounds_dir)
+                if relative_path not in desired_relative_paths:
                     artifact_path.unlink()
                     deleted_count += 1
-            for cohort_size, payload in artifacts.items():
-                artifact_path = bounds_dir / f"{cohort_size}.pkl"
+            for relative_path, payload in artifacts.items():
+                artifact_path = bounds_dir / relative_path
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
                 artifact_path.write_bytes(payload)
             result["artifactBasePath"] = str(bounds_dir)
             result["deletedArtifactCount"] = deleted_count
