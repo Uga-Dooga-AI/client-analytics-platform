@@ -2532,12 +2532,32 @@ function resolveNotebookPythonBin() {
   return process.env.ANALYTICS_NOTEBOOK_PYTHON_BIN ?? (existsSync(localVenvPython) ? localVenvPython : "python3");
 }
 
+function buildNotebookPythonEnv() {
+  const libraryPathCandidates = [
+    "/nix/var/nix/profiles/default/lib",
+    "/nix/var/nix/profiles/per-user/root/profile/lib",
+    "/root/.nix-profile/lib",
+    process.env.LD_LIBRARY_PATH,
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  const libraryPaths = libraryPathCandidates.filter((value) => existsSync(value));
+
+  if (libraryPaths.length === 0) {
+    return process.env;
+  }
+
+  return {
+    ...process.env,
+    LD_LIBRARY_PATH: libraryPaths.join(":"),
+  };
+}
+
 function decodeNotebookBoundsArtifact(payload: Buffer) {
   const scriptPath = join(process.cwd(), "scripts", "read_bounds_pickle.py");
   const result = spawnSync(resolveNotebookPythonBin(), [scriptPath], {
     input: payload,
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 64,
+    env: buildNotebookPythonEnv(),
   });
 
   if (result.status !== 0) {
@@ -3751,6 +3771,7 @@ function estimateCurvesWithNotebook(tasks: CurveEstimateTask[]) {
       input: JSON.stringify({ tasks }),
       encoding: "utf8",
       maxBuffer: 1024 * 1024 * 64,
+      env: buildNotebookPythonEnv(),
     });
 
     if (result.status !== 0) {
