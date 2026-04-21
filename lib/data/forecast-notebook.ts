@@ -134,6 +134,10 @@ export type ForecastNotebookDiagnostics = {
   boundsArtifactLoadedSizes: number[];
   boundsArtifactMissingSizes: number[];
   boundsArtifactIssueSamples: string[];
+  boundsArtifactLoadedChartableCohortCount: number;
+  boundsArtifactLoadedZeroSpendCohortCount: number;
+  boundsArtifactMissingChartableCohortCount: number;
+  boundsArtifactMissingZeroSpendCohortCount: number;
   boundsCoverage: ForecastNotebookBoundsCoverageRow[];
 };
 
@@ -533,6 +537,11 @@ export async function getForecastNotebookSurface({
       filters.granularityDays,
       context
     );
+    const boundsArtifactCohortImpact = summarizeBoundsArtifactCohortImpact(
+      groupedLines.flatMap((line) => line.cohorts),
+      predictionResourcesResult.boundsArtifacts.loadedSizes,
+      predictionResourcesResult.boundsArtifacts.missingSizes
+    );
     const predictionResources = predictionResourcesResult.resources;
     const visibleCohortCount = groupedLines
       .flatMap((line) => line.cohorts)
@@ -583,6 +592,14 @@ export async function getForecastNotebookSurface({
         boundsArtifactLoadedSizes: predictionResourcesResult.boundsArtifacts.loadedSizes,
         boundsArtifactMissingSizes: predictionResourcesResult.boundsArtifacts.missingSizes,
         boundsArtifactIssueSamples: predictionResourcesResult.boundsArtifacts.issueSamples,
+        boundsArtifactLoadedChartableCohortCount:
+          boundsArtifactCohortImpact.loadedChartableCohortCount,
+        boundsArtifactLoadedZeroSpendCohortCount:
+          boundsArtifactCohortImpact.loadedZeroSpendCohortCount,
+        boundsArtifactMissingChartableCohortCount:
+          boundsArtifactCohortImpact.missingChartableCohortCount,
+        boundsArtifactMissingZeroSpendCohortCount:
+          boundsArtifactCohortImpact.missingZeroSpendCohortCount,
         boundsCoverage: predictionResourcesResult.boundsCoverage,
       },
     };
@@ -2228,6 +2245,51 @@ function normalizeBoundsCohortSize(cohortSize: number) {
   const upper = Math.ceil(cohortSize);
   const nearest = cohortSize - lower <= upper - cohortSize ? lower : upper;
   return clamp(nearest, NOTEBOOK_BOUNDS_MIN_COHORT_SIZE, NOTEBOOK_BOUNDS_MAX_COHORT_SIZE);
+}
+
+function summarizeBoundsArtifactCohortImpact(
+  cohorts: ProcessedCohort[],
+  loadedSizes: readonly number[],
+  missingSizes: readonly number[]
+) {
+  const loadedSizeSet = new Set(loadedSizes);
+  const missingSizeSet = new Set(missingSizes);
+  let loadedChartableCohortCount = 0;
+  let loadedZeroSpendCohortCount = 0;
+  let missingChartableCohortCount = 0;
+  let missingZeroSpendCohortCount = 0;
+
+  for (const cohort of cohorts) {
+    if (!Number.isFinite(cohort.cohortSize) || cohort.cohortSize <= 0) {
+      continue;
+    }
+
+    const normalizedSize = normalizeBoundsCohortSize(cohort.cohortSize);
+    const hasSpend = cohort.spend > 0;
+
+    if (loadedSizeSet.has(normalizedSize)) {
+      if (hasSpend) {
+        loadedChartableCohortCount += 1;
+      } else {
+        loadedZeroSpendCohortCount += 1;
+      }
+    }
+
+    if (missingSizeSet.has(normalizedSize)) {
+      if (hasSpend) {
+        missingChartableCohortCount += 1;
+      } else {
+        missingZeroSpendCohortCount += 1;
+      }
+    }
+  }
+
+  return {
+    loadedChartableCohortCount,
+    loadedZeroSpendCohortCount,
+    missingChartableCohortCount,
+    missingZeroSpendCohortCount,
+  };
 }
 
 function collectBoundsTrainingWindow(
@@ -4036,6 +4098,10 @@ function buildEmptyDiagnostics(
     boundsArtifactLoadedSizes: [],
     boundsArtifactMissingSizes: [],
     boundsArtifactIssueSamples: [],
+    boundsArtifactLoadedChartableCohortCount: 0,
+    boundsArtifactLoadedZeroSpendCohortCount: 0,
+    boundsArtifactMissingChartableCohortCount: 0,
+    boundsArtifactMissingZeroSpendCohortCount: 0,
     boundsCoverage: [],
   };
 }
@@ -4074,6 +4140,10 @@ function buildIdleDiagnostics({
     boundsArtifactLoadedSizes: [],
     boundsArtifactMissingSizes: [],
     boundsArtifactIssueSamples: [],
+    boundsArtifactLoadedChartableCohortCount: 0,
+    boundsArtifactLoadedZeroSpendCohortCount: 0,
+    boundsArtifactMissingChartableCohortCount: 0,
+    boundsArtifactMissingZeroSpendCohortCount: 0,
     boundsCoverage: [],
   };
 }

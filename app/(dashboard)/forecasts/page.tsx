@@ -336,10 +336,24 @@ function buildBoundsArtifactDiagnostic({
     diagnostics.boundsArtifactIssueSamples.length > 0
       ? ` Sample issues: ${diagnostics.boundsArtifactIssueSamples.join(" | ")}.`
       : "";
+  const cohortImpactNote = [
+    diagnostics.boundsArtifactMissingChartableCohortCount > 0
+      ? `${diagnostics.boundsArtifactMissingChartableCohortCount} spend-positive cohort(s) in the current slice map to missing artifact sizes, so their forecast points stay blank.`
+      : null,
+    diagnostics.boundsArtifactLoadedChartableCohortCount > 0
+      ? `${diagnostics.boundsArtifactLoadedChartableCohortCount} spend-positive cohort(s) still map to loaded artifact sizes and can render bounds.`
+      : null,
+    diagnostics.boundsArtifactLoadedChartableCohortCount === 0 &&
+    diagnostics.boundsArtifactLoadedZeroSpendCohortCount > 0
+      ? `Loaded artifact sizes currently exist only on ${diagnostics.boundsArtifactLoadedZeroSpendCohortCount} zero-spend cohort(s), so they do not produce ROAS points on the chart.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return {
     title: "Notebook Bounds Are Missing",
-    body: `${selectedProjectLabel} could not load notebook artifact bounds for part of this slice, so affected forecast intervals stay blank instead of falling back to synthetic bands. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
+    body: `${selectedProjectLabel} could not load notebook artifact bounds for part of this slice, so affected forecast intervals stay blank instead of falling back to synthetic bands. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. ${cohortImpactNote ? `${cohortImpactNote} ` : ""}Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
   };
 }
 
