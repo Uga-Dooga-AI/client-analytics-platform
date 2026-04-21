@@ -17,6 +17,8 @@ BOUNDS_MAX_CUTOFF = 91
 BOUNDS_MIN_PREDICTIONS = 10
 BOUNDS_SIZE_SMOOTH_COEFF = 1.2
 BOUNDS_SMALL_COHORT_NEAREST_FILL_MAX_SIZE = 100
+BOUNDS_LOWER_QUANTILE = 0.05
+BOUNDS_UPPER_QUANTILE = 0.95
 NOTEBOOK_BOUNDS_MIN_COHORT_SIZE = 1
 NOTEBOOK_BOUNDS_MAX_COHORT_SIZE = 1000
 
@@ -869,8 +871,8 @@ def get_error_bounds_from_records(
                 continue
             sorted_errors = sorted(errors)
             bounds[bounds_key(period, cutoff)] = (
-                quantile(sorted_errors, 0.5),
-                quantile(sorted_errors, 0.95),
+                quantile(sorted_errors, BOUNDS_LOWER_QUANTILE),
+                quantile(sorted_errors, BOUNDS_UPPER_QUANTILE),
             )
     return bounds
 

@@ -12,6 +12,7 @@ from src.bounds_artifacts import (  # noqa: E402
     aggregate_raw_cohorts,
     build_bounds_for_cohort_size,
     compress_size_ranges,
+    get_error_bounds_from_records,
     process_raw_cohorts,
     smooth_record_count,
 )
@@ -98,6 +99,26 @@ class BoundsArtifactsTest(unittest.TestCase):
         )
 
         self.assertIn("for_7_on_4", bounds)
+
+    def test_error_bounds_use_lower_tail_not_median(self):
+        records = [
+            BoundsTrainingRecord(
+                cohort_date=f"2026-04-{index + 1:02d}",
+                cohort_size=300,
+                true_for={7: 100.0},
+                predicted_for_by_cutoff={"for_7_on_4": predicted},
+                bad_by_cutoff=set(),
+            )
+            for index, predicted in enumerate(
+                [160.0, 150.0, 145.0, 140.0, 135.0, 130.0, 120.0, 115.0, 110.0, 105.0, 100.0, 95.0]
+            )
+        ]
+
+        bounds = get_error_bounds_from_records(records, history_days=[4], prediction_periods=[7])
+        lower, upper = bounds["for_7_on_4"]
+
+        self.assertLess(lower, -50.0)
+        self.assertGreater(upper, -5.0)
 
     def test_compress_size_ranges_groups_consecutive_values(self):
         compressed = compress_size_ranges([1, 2, 3, 8, 10, 11])
