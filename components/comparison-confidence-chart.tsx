@@ -240,6 +240,8 @@ export function ComparisonConfidenceChart({
                       <div style={{ marginTop: 3, fontSize: 11.5, opacity: 0.86, lineHeight: 1.45 }}>
                         {item.value === null
                           ? "No forecast for this point"
+                          : isRealizedPoint(item.value, item.lower, item.upper, item.actual)
+                            ? `Actual ${formatForecastDisplayValue(item.actual, chart.unit, 1)}`
                           : (() => {
                               const formatted = formatForecastDisplayTriplet(
                                 item.value,
@@ -581,6 +583,23 @@ function toAlpha(color: string, alpha: number) {
 
 function isFiniteNumber(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isRealizedPoint(
+  value: number | null,
+  lower: number | null,
+  upper: number | null,
+  actual: number | null | undefined
+) {
+  if (!isFiniteNumber(value) || !isFiniteNumber(lower) || !isFiniteNumber(upper) || !isFiniteNumber(actual)) {
+    return false;
+  }
+
+  return (
+    Math.abs(value - actual) < 1e-6 &&
+    Math.abs(lower - actual) < 1e-6 &&
+    Math.abs(upper - actual) < 1e-6
+  );
 }
 
 function buildLinePaths<T>(

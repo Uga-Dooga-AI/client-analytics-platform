@@ -769,16 +769,16 @@ describe("forecast notebook live surface", () => {
     expect(__testables.normalizeConfidenceBandPercents([0.2, 6])).toEqual([-6, 6]);
 
     expect(__testables.applyNotebookBounds(100, [-12.5, -0.01])).toEqual({
-      lowerRevenue: 87.5,
-      upperRevenue: 112.5,
+      lowerRevenue: 88.88888888888889,
+      upperRevenue: 114.28571428571429,
     });
     expect(__testables.applyNotebookBounds(100, [0.2, 6])).toEqual({
-      lowerRevenue: 94,
-      upperRevenue: 106,
+      lowerRevenue: 94.33962264150944,
+      upperRevenue: 106.38297872340426,
     });
   });
 
-  it("keeps mature live forecast points separate from realized actuals", async () => {
+  it("collapses mature live forecast points to realized actuals", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
     const cohort = {
       cohortDate: "2026-04-01",
@@ -827,14 +827,14 @@ describe("forecast notebook live surface", () => {
       new Map([["selected_scope", resources]])
     );
 
-    expect(predictionPoint.predicted).toBe(80);
-    expect(predictionPoint.lower).toBe(72);
-    expect(predictionPoint.upper).toBe(96);
+    expect(predictionPoint.predicted).toBe(100);
+    expect(predictionPoint.lower).toBe(100);
+    expect(predictionPoint.upper).toBe(100);
     expect(predictionPoint.actual).toBe(100);
 
-    expect(paybackPoint.predicted).toBe(80);
-    expect(paybackPoint.lower).toBe(72);
-    expect(paybackPoint.upper).toBe(96);
+    expect(paybackPoint.predicted).toBe(100);
+    expect(paybackPoint.lower).toBe(100);
+    expect(paybackPoint.upper).toBe(100);
     expect(paybackPoint.actual).toBe(100);
   });
 
@@ -909,8 +909,8 @@ describe("forecast notebook live surface", () => {
     );
 
     expect(predictionPoint.predicted).toBe(80);
-    expect(predictionPoint.lower).toBe(64);
-    expect(predictionPoint.upper).toBe(96);
+    expect(predictionPoint.lower).toBeCloseTo(66.67, 2);
+    expect(predictionPoint.upper).toBe(100);
     expect(predictionPoint.actual).toBeNull();
   });
 

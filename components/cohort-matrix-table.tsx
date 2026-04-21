@@ -109,8 +109,10 @@ export function CohortMatrixTable({
                           {formatted.valueText}
                         </div>
                         <div style={{ marginTop: 2, fontSize: 10.5, color: "var(--color-ink-500)", lineHeight: 1.35 }}>
-                          {typeof cell.lower === "number" && typeof cell.upper === "number"
-                            ? `${formatted.lowerText}-${formatted.upperText}`
+                          {isRealizedPoint(cell.value, cell.lower, cell.upper, cell.actual)
+                            ? "Actual realized"
+                            : typeof cell.lower === "number" && typeof cell.upper === "number"
+                              ? `${formatted.lowerText}-${formatted.upperText}`
                             : "No forecast"}
                           {typeof cell.actual === "number"
                             ? ` · act ${formatForecastDisplayTriplet(
@@ -141,3 +143,20 @@ const BASE_CELL_STYLE = {
   color: "var(--color-ink-700)",
   verticalAlign: "top" as const,
 };
+
+function isRealizedPoint(
+  value: number | null,
+  lower: number | null,
+  upper: number | null,
+  actual: number | null | undefined
+) {
+  return (
+    typeof value === "number" &&
+    typeof lower === "number" &&
+    typeof upper === "number" &&
+    typeof actual === "number" &&
+    Math.abs(value - actual) < 1e-6 &&
+    Math.abs(lower - actual) < 1e-6 &&
+    Math.abs(upper - actual) < 1e-6
+  );
+}
