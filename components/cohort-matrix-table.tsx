@@ -1,4 +1,5 @@
 import type { CohortMatrixRow } from "@/lib/data/acquisition";
+import { formatForecastDisplayTriplet } from "@/lib/forecast-display-format";
 
 export function CohortMatrixTable({
   rows,
@@ -79,34 +80,52 @@ export function CohortMatrixTable({
                 <td style={BASE_CELL_STYLE}>${row.spend.toLocaleString()}</td>
                 <td style={BASE_CELL_STYLE}>{row.installs.toLocaleString()}</td>
                 <td style={BASE_CELL_STYLE}>{row.cpi.toFixed(2)}</td>
-                {row.cells.map((cell) => (
-                  <td key={`${row.cohortDate}-${cell.label}`} style={{ ...BASE_CELL_STYLE, minWidth: 102 }}>
-                    <div
-                      style={{
-                        background:
-                          typeof cell.value === "number"
-                            ? `rgba(37, 99, 235, ${0.08 + (cell.value / maxValue) * 0.2})`
-                            : "var(--color-panel-soft)",
-                        border:
-                          typeof cell.value === "number"
-                            ? "1px solid rgba(37, 99, 235, 0.12)"
-                            : "1px solid var(--color-border-soft)",
-                        borderRadius: 8,
-                        padding: "8px 9px",
-                      }}
-                    >
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-ink-950)" }}>
-                        {typeof cell.value === "number" ? `${cell.value.toFixed(0)}%` : "—"}
+                {row.cells.map((cell) => {
+                  const formatted = formatForecastDisplayTriplet(
+                    cell.value,
+                    cell.lower,
+                    cell.upper,
+                    "%",
+                    "matrix"
+                  );
+
+                  return (
+                    <td key={`${row.cohortDate}-${cell.label}`} style={{ ...BASE_CELL_STYLE, minWidth: 102 }}>
+                      <div
+                        style={{
+                          background:
+                            typeof cell.value === "number"
+                              ? `rgba(37, 99, 235, ${0.08 + (cell.value / maxValue) * 0.2})`
+                              : "var(--color-panel-soft)",
+                          border:
+                            typeof cell.value === "number"
+                              ? "1px solid rgba(37, 99, 235, 0.12)"
+                              : "1px solid var(--color-border-soft)",
+                          borderRadius: 8,
+                          padding: "8px 9px",
+                        }}
+                      >
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-ink-950)" }}>
+                          {formatted.valueText}
+                        </div>
+                        <div style={{ marginTop: 2, fontSize: 10.5, color: "var(--color-ink-500)", lineHeight: 1.35 }}>
+                          {typeof cell.lower === "number" && typeof cell.upper === "number"
+                            ? `${formatted.lowerText}-${formatted.upperText}`
+                            : "No forecast"}
+                          {typeof cell.actual === "number"
+                            ? ` · act ${formatForecastDisplayTriplet(
+                                cell.actual,
+                                cell.actual,
+                                cell.actual,
+                                "%",
+                                "matrix"
+                              ).valueText}`
+                            : ""}
+                        </div>
                       </div>
-                      <div style={{ marginTop: 2, fontSize: 10.5, color: "var(--color-ink-500)", lineHeight: 1.35 }}>
-                        {typeof cell.lower === "number" && typeof cell.upper === "number"
-                          ? `${cell.lower.toFixed(0)}-${cell.upper.toFixed(0)}%`
-                          : "No forecast"}
-                        {typeof cell.actual === "number" ? ` · act ${cell.actual.toFixed(0)}%` : ""}
-                      </div>
-                    </div>
-                  </td>
-                ))}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>

@@ -5,6 +5,7 @@ import type {
   ComparisonChartGroup,
   ComparisonConfidenceChartData,
 } from "@/lib/data/acquisition";
+import { formatForecastDisplayTriplet, formatForecastDisplayValue } from "@/lib/forecast-display-format";
 
 export type ComparisonConfidenceChartOverlay = {
   label: string;
@@ -239,10 +240,30 @@ export function ComparisonConfidenceChart({
                       <div style={{ marginTop: 3, fontSize: 11.5, opacity: 0.86, lineHeight: 1.45 }}>
                         {item.value === null
                           ? "No forecast for this point"
-                          : `Forecast ${formatChartValue(item.value, chart.unit)} · bounds ${formatChartValue(item.lower, chart.unit)}–${formatChartValue(item.upper, chart.unit)}`}
-                        {item.actual !== null ? ` · actual ${formatChartValue(item.actual, chart.unit)}` : ""}
+                          : (() => {
+                              const formatted = formatForecastDisplayTriplet(
+                                item.value,
+                                item.lower,
+                                item.upper,
+                                chart.unit,
+                                "chart"
+                              );
+                              return `Forecast ${formatted.valueText} · bounds ${formatted.lowerText}–${formatted.upperText}`;
+                            })()}
+                        {item.actual !== null
+                          ? ` · actual ${formatForecastDisplayValue(item.actual, chart.unit, 1)}`
+                          : ""}
                         {item.overlay && overlay
-                          ? ` · ${overlay.label} ${formatChartValue(item.overlay.value, chart.unit)} (${formatChartValue(item.overlay.lower, chart.unit)}–${formatChartValue(item.overlay.upper, chart.unit)})`
+                          ? (() => {
+                              const formattedOverlay = formatForecastDisplayTriplet(
+                                item.overlay.value,
+                                item.overlay.lower,
+                                item.overlay.upper,
+                                chart.unit,
+                                "chart"
+                              );
+                              return ` · ${overlay.label} ${formattedOverlay.valueText} (${formattedOverlay.lowerText}–${formattedOverlay.upperText})`;
+                            })()
                           : ""}
                       </div>
                     </div>
@@ -541,25 +562,6 @@ function formatAxisTick(value: number, unit: string) {
   }
 
   return `${value.toFixed(0)}${unit}`;
-}
-
-function formatChartValue(value: number | null, unit: string) {
-  if (!isFiniteNumber(value)) {
-    return "—";
-  }
-  if (unit === "$") {
-    return `$${value.toFixed(2)}`;
-  }
-
-  if (unit === "") {
-    return value.toLocaleString();
-  }
-
-  if (unit === "m") {
-    return `${value.toFixed(1)}m`;
-  }
-
-  return `${value.toFixed(1)}${unit}`;
 }
 
 function toAlpha(color: string, alpha: number) {
