@@ -386,47 +386,11 @@ export function ComparisonConfidenceChart({
                 {group.series.map((point, index) => {
                   const active = hoveredIndex === index;
                   const actualValue = point.actual;
-                  const hasBounds = isFiniteNumber(point.lower) && isFiniteNumber(point.upper);
-                  const x = getX(index, group.series.length);
-                  const lowerValue = hasBounds ? point.lower : null;
-                  const upperValue = hasBounds ? point.upper : null;
                   return (
                     <g key={`${group.label}-${point.label}`}>
-                      {hasBounds ? (
-                        <g>
-                          <line
-                            x1={x}
-                            y1={getY(lowerValue!)}
-                            x2={x}
-                            y2={getY(upperValue!)}
-                            stroke={toAlpha(group.color, active ? 0.92 : 0.8)}
-                            strokeWidth={active ? "1.85" : "1.4"}
-                            strokeDasharray="3 3"
-                            strokeLinecap="round"
-                          />
-                          <line
-                            x1={x - 4}
-                            y1={getY(lowerValue!)}
-                            x2={x + 4}
-                            y2={getY(lowerValue!)}
-                            stroke={toAlpha(group.color, active ? 0.92 : 0.8)}
-                            strokeWidth={active ? "1.85" : "1.4"}
-                            strokeLinecap="round"
-                          />
-                          <line
-                            x1={x - 4}
-                            y1={getY(upperValue!)}
-                            x2={x + 4}
-                            y2={getY(upperValue!)}
-                            stroke={toAlpha(group.color, active ? 0.92 : 0.8)}
-                            strokeWidth={active ? "1.85" : "1.4"}
-                            strokeLinecap="round"
-                          />
-                        </g>
-                      ) : null}
                       {isFiniteNumber(point.value) ? (
                         <circle
-                          cx={x}
+                          cx={getX(index, group.series.length)}
                           cy={getY(point.value)}
                           r={active ? "5" : "3.3"}
                           fill={group.color}
@@ -434,7 +398,7 @@ export function ComparisonConfidenceChart({
                       ) : null}
                       {isFiniteNumber(actualValue) ? (
                         <circle
-                          cx={x}
+                          cx={getX(index, group.series.length)}
                           cy={getY(actualValue)}
                           r={active ? "4" : "2.6"}
                           fill={group.actualColor ?? group.color}
@@ -514,59 +478,17 @@ export function ComparisonConfidenceChart({
                   />
                 ))}
                 {group.series.map((point, index) =>
-                  (() => {
-                    const active = hoveredIndex === index;
-                    const hasBounds = isFiniteNumber(point.lower) && isFiniteNumber(point.upper);
-                    const x = getX(index, group.series.length);
-                    const lowerValue = hasBounds ? point.lower : null;
-                    const upperValue = hasBounds ? point.upper : null;
-                    return (
-                      <g key={`overlay-${group.label}-${point.label}`}>
-                        {hasBounds ? (
-                          <g>
-                            <line
-                              x1={x}
-                              y1={getY(lowerValue!)}
-                              x2={x}
-                              y2={getY(upperValue!)}
-                              stroke={toAlpha(group.color, active ? 0.96 : 0.88)}
-                              strokeWidth={active ? "1.7" : "1.25"}
-                              strokeDasharray="3 2"
-                              strokeLinecap="round"
-                            />
-                            <line
-                              x1={x - 4}
-                              y1={getY(lowerValue!)}
-                              x2={x + 4}
-                              y2={getY(lowerValue!)}
-                              stroke={toAlpha(group.color, active ? 0.96 : 0.88)}
-                              strokeWidth={active ? "1.7" : "1.25"}
-                              strokeLinecap="round"
-                            />
-                            <line
-                              x1={x - 4}
-                              y1={getY(upperValue!)}
-                              x2={x + 4}
-                              y2={getY(upperValue!)}
-                              stroke={toAlpha(group.color, active ? 0.96 : 0.88)}
-                              strokeWidth={active ? "1.7" : "1.25"}
-                              strokeLinecap="round"
-                            />
-                          </g>
-                        ) : null}
-                        {isFiniteNumber(point.value) ? (
-                          <circle
-                            cx={x}
-                            cy={getY(point.value)}
-                            r={active ? "4.3" : "2.8"}
-                            fill={group.color}
-                            stroke="rgba(255, 255, 255, 0.75)"
-                            strokeWidth="1.2"
-                          />
-                        ) : null}
-                      </g>
-                    );
-                  })()
+                  isFiniteNumber(point.value) ? (
+                    <circle
+                      key={`overlay-${group.label}-${point.label}`}
+                      cx={getX(index, group.series.length)}
+                      cy={getY(point.value)}
+                      r={hoveredIndex === index ? "4.3" : "2.8"}
+                      fill={group.color}
+                      stroke="rgba(255, 255, 255, 0.75)"
+                      strokeWidth="1.2"
+                    />
+                  ) : null
                 )}
               </g>
             );

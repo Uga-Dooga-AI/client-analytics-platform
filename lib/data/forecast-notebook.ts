@@ -2033,23 +2033,17 @@ async function buildLinePredictionResources(
     const shouldAppendToHistory = Boolean(curveAllowed) || canUseYoungFallback;
 
     for (const horizon of requiredHorizons) {
-      if (cohort.cohortLifetime >= horizon && cohort.totalRevenue[horizon] != null) {
-        const actual = cohort.totalRevenue[horizon] ?? 0;
-        points.set(horizon, {
-          predictedRevenue: actual,
-          lowerRevenue: actual,
-          upperRevenue: actual,
-          actual,
-        });
-        continue;
-      }
+      const actual =
+        cohort.cohortLifetime >= horizon && cohort.totalRevenue[horizon] != null
+          ? cohort.totalRevenue[horizon] ?? 0
+          : null;
 
       if (cohort.cohortSize <= 0 || cohort.cohortNumDays <= 0) {
         points.set(horizon, {
           predictedRevenue: 0,
           lowerRevenue: 0,
           upperRevenue: 0,
-          actual: null,
+          actual,
         });
         continue;
       }
@@ -2059,7 +2053,7 @@ async function buildLinePredictionResources(
           predictedRevenue: null,
           lowerRevenue: null,
           upperRevenue: null,
-          actual: null,
+          actual,
         });
         continue;
       }
@@ -2111,7 +2105,7 @@ async function buildLinePredictionResources(
         predictedRevenue,
         lowerRevenue,
         upperRevenue,
-        actual: null,
+        actual,
       });
       if (predictedRevenue !== null) {
         predictedFor.set(horizon, predictedRevenue);
@@ -3427,23 +3421,27 @@ function getPredictionPoint(
 }
 
 function toRoasPoint(cohort: ProcessedCohort, prediction: PredictedPoint): AggregatedPoint {
-  const realizedRevenue = prediction.actual ?? prediction.predictedRevenue;
-  if (realizedRevenue == null || prediction.lowerRevenue == null || prediction.upperRevenue == null) {
+  const actualRoas =
+    prediction.actual == null
+      ? null
+      : Number(((prediction.actual / cohort.spend) * 100).toFixed(2));
+  if (
+    prediction.predictedRevenue == null ||
+    prediction.lowerRevenue == null ||
+    prediction.upperRevenue == null
+  ) {
     return {
       predicted: null,
       lower: null,
       upper: null,
-      actual: null,
+      actual: actualRoas,
     };
   }
   return {
-    predicted: Number(((realizedRevenue / cohort.spend) * 100).toFixed(2)),
+    predicted: Number(((prediction.predictedRevenue / cohort.spend) * 100).toFixed(2)),
     lower: Number((prediction.lowerRevenue / cohort.spend * 100).toFixed(2)),
     upper: Number((prediction.upperRevenue / cohort.spend * 100).toFixed(2)),
-    actual:
-      prediction.actual == null
-        ? null
-        : Number(((prediction.actual / cohort.spend) * 100).toFixed(2)),
+    actual: actualRoas,
   };
 }
 
@@ -3529,16 +3527,15 @@ function findPreviousPaybackContribution(
 }
 
 function toPaybackContribution(point: PredictedPoint, includeActualRevenue: boolean) {
-  if (point.actual != null) {
-    return {
-      predictedRevenue: point.actual,
-      lowerRevenue: point.actual,
-      upperRevenue: point.actual,
-      actualRevenue: includeActualRevenue ? point.actual : null,
-    };
-  }
-
   if (point.predictedRevenue == null || point.lowerRevenue == null || point.upperRevenue == null) {
+    if (point.actual != null) {
+      return {
+        predictedRevenue: point.actual,
+        lowerRevenue: point.actual,
+        upperRevenue: point.actual,
+        actualRevenue: includeActualRevenue ? point.actual : null,
+      };
+    }
     return null;
   }
 
@@ -3546,7 +3543,7 @@ function toPaybackContribution(point: PredictedPoint, includeActualRevenue: bool
     predictedRevenue: point.predictedRevenue,
     lowerRevenue: point.lowerRevenue,
     upperRevenue: point.upperRevenue,
-    actualRevenue: null,
+    actualRevenue: includeActualRevenue ? point.actual : null,
   };
 }
 
@@ -4666,7 +4663,9 @@ function formatPlatformLabel(value: string) {
 }
 
 export const __testables = {
+  aggregatePaybackPoint,
   boundsKey,
+  buildLinePredictionResources,
   buildBoundsCoverageSummary,
   buildCampaignSql,
   buildRawCohorts,
@@ -4676,9 +4675,11 @@ export const __testables = {
   buildSourceSql,
   buildBoundsForCohortSize,
   fallbackYoungCohortPrediction,
+  getPredictionPoint,
   getNotebookBounds,
   isPlaceholderArtifactBounds,
   normalizeBoundsCohortSize,
+  toRoasPoint,
 };
 
 function isPlaceholderArtifactBounds(bounds: readonly [number, number]) {

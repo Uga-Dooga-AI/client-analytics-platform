@@ -730,6 +730,65 @@ describe("forecast notebook live surface", () => {
     expect(bounds?.[0]).not.toBeCloseTo(-5, 5);
   });
 
+  it("keeps mature live forecast points separate from realized actuals", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const cohort = {
+      cohortDate: "2026-04-01",
+      groupValue: "selected_scope",
+      spend: 100,
+      installs: 80,
+      cohortSize: 80,
+      cohortNumDays: 1,
+      cohortLifetime: 10,
+      isCorrupted: 0,
+      totalRevenue: [40, 50, 60, 68, 73, 79, 88, 100, 109, 117, 124],
+    };
+
+    const artifactBounds = new Map<number, Map<string, readonly [number, number]>>([
+      [
+        80,
+        new Map<string, readonly [number, number]>([
+          [__testables.boundsKey(7, 10), [-10, 20] as const],
+        ]),
+      ],
+    ]);
+    const estimatedCurves = new Map<string, number[] | null>([
+      ["live:selected_scope:2026-04-01", [40, 47, 53, 58, 63, 69, 75, 80, 84, 87, 90]],
+    ]);
+
+    const resources = await __testables.buildLinePredictionResources(
+      [cohort],
+      [7],
+      1,
+      [10],
+      [7],
+      30,
+      artifactBounds,
+      [],
+      estimatedCurves
+    );
+    const predictionPoint = __testables.getPredictionPoint(
+      cohort,
+      7,
+      new Map([["selected_scope", resources]])
+    );
+    const paybackPoint = __testables.aggregatePaybackPoint(
+      [cohort],
+      7,
+      new Map([["selected_scope", resources]])
+    );
+
+    expect(predictionPoint.predicted).toBe(80);
+    expect(predictionPoint.lower).toBe(72);
+    expect(predictionPoint.upper).toBe(96);
+    expect(predictionPoint.actual).toBe(100);
+
+    expect(paybackPoint.predicted).toBe(80);
+    expect(paybackPoint.lower).toBe(72);
+    expect(paybackPoint.upper).toBe(96);
+    expect(paybackPoint.actual).toBe(100);
+  });
+
   it("clamps notebook bounds cohort sizes to the artifact corpus range", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
     const cache = new Map<number, Map<string, readonly [number, number]>>();
