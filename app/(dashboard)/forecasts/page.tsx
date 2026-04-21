@@ -338,7 +338,7 @@ function buildBoundsArtifactDiagnostic({
       : "";
   const cohortImpactNote = [
     diagnostics.boundsArtifactMissingChartableCohortCount > 0
-      ? `${diagnostics.boundsArtifactMissingChartableCohortCount} spend-positive cohort(s) in the current slice map to missing artifact sizes, so their forecast points stay blank.`
+      ? `${diagnostics.boundsArtifactMissingChartableCohortCount} spend-positive cohort(s) in the current slice map to missing artifact sizes, so they rely on live-built bounds tables when runtime can rebuild them.`
       : null,
     diagnostics.boundsArtifactLoadedChartableCohortCount > 0
       ? `${diagnostics.boundsArtifactLoadedChartableCohortCount} spend-positive cohort(s) still map to loaded artifact sizes and can render bounds.`
@@ -353,7 +353,7 @@ function buildBoundsArtifactDiagnostic({
 
   return {
     title: "Notebook Bounds Are Missing",
-    body: `${selectedProjectLabel} could not load notebook artifact bounds for part of this slice, so affected forecast intervals stay blank instead of falling back to synthetic bands. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. ${cohortImpactNote ? `${cohortImpactNote} ` : ""}Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
+    body: `${selectedProjectLabel} could not load notebook artifact bounds for part of this slice, so runtime is using live-built bounds where it can and leaving only unrebuildable sizes blank. ${diagnostics.boundsArtifactIssue} Expected cohort-size files: ${diagnostics.boundsArtifactExpectedSizeCount}, loaded: ${diagnostics.boundsArtifactLoadedSizeCount}, missing sizes: ${missingPreview}${missingSuffix}. ${cohortImpactNote ? `${cohortImpactNote} ` : ""}Bounds path: ${diagnostics.boundsArtifactPath ?? "not configured"}. Bounds source status: ${sourceStatus}. Last successful artifact sync: ${lastSync}. Next scheduled sync: ${nextSync}. Fix the artifact publication under that GCS prefix and rerun bounds refresh / forecast if this slice must stay 1:1 with the notebook.${issueSamples}`,
   };
 }
 
@@ -1216,7 +1216,7 @@ export default async function ForecastsPage({
               >
                 <SectionHeader
                   title="Bounds Coverage"
-                  subtitle="Diagnostic view of normalized cohort-size bounds tables. Only clean artifact bounds are chart-eligible; live-built diagnostics never render on charts."
+                  subtitle="Diagnostic view of normalized cohort-size bounds tables. Artifact bounds are preferred; live-built bounds render on charts when the exact artifact size is missing."
                 />
 
                 {boundsCoverageRows.length > 0 ? (
@@ -1329,10 +1329,10 @@ export default async function ForecastsPage({
               </div>
 
               <div style={{ marginTop: 4, fontSize: 11.5, lineHeight: 1.55, color: "var(--color-ink-500)" }}>
-                `Artifact` means a cleaned notebook bounds table loaded from GCS and eligible for chart rendering.
-                `Live-built only` means runtime diagnostics rebuilt a table locally, but those intervals stay hidden on
-                charts. `Missing` means neither a usable artifact table nor a diagnostic table exists for that cohort
-                size.
+                `Artifact` means a cleaned notebook bounds table loaded from GCS and preferred for chart rendering.
+                `Live-built only` means runtime rebuilt a compatible table locally because the exact artifact size is
+                missing, and those intervals can now render on charts. `Missing` means neither a usable artifact table
+                nor a rebuildable diagnostic table exists for that cohort size.
               </div>
             </div>
 

@@ -860,6 +860,60 @@ describe("forecast notebook live surface", () => {
     expect(__testables.normalizeBoundsCohortSize(1904.6)).toBe(1000);
   });
 
+  it("uses live-built bounds on charts when the exact artifact size is missing", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const cohort = {
+      cohortDate: "2026-04-12",
+      groupValue: "selected_scope",
+      spend: 100,
+      installs: 176,
+      cohortSize: 176,
+      cohortNumDays: 1,
+      cohortLifetime: 8,
+      isCorrupted: 0,
+      totalRevenue: Array.from({ length: 9 }, (_, index) => 20 + index * 2),
+    };
+
+    const trainingRecords = Array.from({ length: 12 }, (_, index) => ({
+      cohortDate: `2026-03-${String(index + 1).padStart(2, "0")}`,
+      cohortSize: 176,
+      trueRevenue: Array.from({ length: 9 }, (_, day) => 20 + day * 2),
+      trueFor: new Map<number, number>([[360, 100]]),
+      predictedForByCutoff: new Map<string, number>([[__testables.boundsKey(360, 8), 80]]),
+      badByCutoff: new Set<number>(),
+    }));
+
+    const estimatedCurves = new Map<string, number[] | null>([
+      [
+        "live:selected_scope:2026-04-12",
+        Array.from({ length: 361 }, (_, index) => (index <= 8 ? 20 + index * 2 : 80)),
+      ],
+    ]);
+
+    const resources = await __testables.buildLinePredictionResources(
+      [cohort],
+      [360],
+      1,
+      [8],
+      [360],
+      360,
+      new Map(),
+      trainingRecords,
+      estimatedCurves
+    );
+
+    const predictionPoint = __testables.getPredictionPoint(
+      cohort,
+      360,
+      new Map([["selected_scope", resources]])
+    );
+
+    expect(predictionPoint.predicted).toBe(80);
+    expect(predictionPoint.lower).toBe(64);
+    expect(predictionPoint.upper).toBe(96);
+    expect(predictionPoint.actual).toBeNull();
+  });
+
   it("returns null in strict mode when only live-built bounds are available", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
     const trainingRecords = Array.from({ length: 12 }, (_, index) => ({

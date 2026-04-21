@@ -2118,8 +2118,7 @@ async function buildLinePredictionResources(
             maxRequiredHorizon,
             historyDays,
             predictionPeriods,
-            notebookArtifactBounds,
-            { allowLiveFallback: false }
+            notebookArtifactBounds
           )
         : null;
       const { lowerRevenue, upperRevenue } = applyNotebookBounds(predictedRevenue, bounds);
@@ -3019,8 +3018,8 @@ async function loadNotebookBoundsArtifacts(
   if (fallbackUsed) {
     const manifestSummary = describeBoundsArtifactManifest(manifest, granularityDays);
     issue = scopeUri
-      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. Forecast intervals stay blank for the missing sizes so the issue remains visible. Live-built fallback tables are computed for diagnostics only.${manifestSummary ? ` ${manifestSummary}` : ""}`
-      : `Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. Forecast intervals stay blank until artifact publication is fixed. Live-built fallback tables are computed for diagnostics only.${manifestSummary ? ` ${manifestSummary}` : ""}`;
+      ? `Notebook bounds artifacts are missing or unreadable for ${missingSizes.length} of ${uniqueSizes.length} cohort sizes under ${scopeUri}. Runtime rebuilds fallback bounds tables for missing sizes when empirical support exists; any sizes without a rebuildable table still stay blank.${manifestSummary ? ` ${manifestSummary}` : ""}`
+      : `Notebook bounds artifacts are required for strict parity, but boundsPath is not configured. Runtime rebuilds fallback bounds tables when empirical support exists; any sizes without a rebuildable table stay blank until artifact publication is fixed.${manifestSummary ? ` ${manifestSummary}` : ""}`;
   }
 
   return {
@@ -3972,8 +3971,7 @@ function predictHistoricalCohort(
           artifacts.maxRequiredHorizon,
           artifacts.historyDays,
           artifacts.predictionPeriods,
-          artifacts.notebookArtifactBounds,
-          { allowLiveFallback: false }
+          artifacts.notebookArtifactBounds
         );
 
   const { lowerRevenue, upperRevenue } = applyNotebookBounds(predictedRevenue, bounds);
