@@ -78,6 +78,8 @@ export function ForecastHistoryChart({
         .filter((snapshot): snapshot is HistorySnapshot => snapshot !== null),
     [cutoffs, snapshotsByCutoff]
   );
+  const latestCompletedSnapshot =
+    completedSnapshots.length > 0 ? completedSnapshots[completedSnapshots.length - 1] ?? null : null;
   const activeSnapshot = activeCutoff == null ? null : snapshotsByCutoff[activeCutoff] ?? null;
   const activeSnapshotIndex = completedSnapshots.findIndex(
     (snapshot) => snapshot.cutoffDay === activeCutoff
@@ -182,6 +184,11 @@ export function ForecastHistoryChart({
               receivedComplete = true;
               receivedCutoffs = event.cutoffs;
               setCutoffs(event.cutoffs);
+              setProgress({
+                completed: event.total,
+                total: event.total,
+                currentCutoff: event.cutoffs[event.cutoffs.length - 1] ?? null,
+              });
             }
 
             if (event.type === "error") {
@@ -203,8 +210,8 @@ export function ForecastHistoryChart({
       }
 
       if (receivedComplete) {
-        const firstCutoff = receivedCutoffs[0] ?? null;
-        setActiveCutoff((current) => current ?? firstCutoff);
+        const latestCutoff = receivedCutoffs[receivedCutoffs.length - 1] ?? null;
+        setActiveCutoff(latestCutoff);
       }
     } catch (requestError) {
       if (controller.signal.aborted) {
@@ -244,7 +251,9 @@ export function ForecastHistoryChart({
       </div>
       <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-ink-700)" }}>
         {progress.total > 0
-          ? `Готово ${progress.completed} из ${progress.total}. Сейчас cutoff D${progress.currentCutoff ?? cutoffs[0] ?? "?"}.`
+          ? progress.completed > 0
+            ? `Готово ${progress.completed} из ${progress.total}. Последний подготовленный cutoff D${progress.currentCutoff ?? cutoffs[0] ?? "?"}.`
+            : `Подготавливаем ${progress.total} historical snapshots. После завершения появится слайдер для переключения cutoff-дней.`
           : "Подготавливаем данные для historical overlay."}
       </div>
       <div
@@ -308,15 +317,15 @@ export function ForecastHistoryChart({
         fontWeight: 600,
       }}
     >
-      <span
-        style={{
-          width: 10,
-          height: 10,
-          borderRadius: 999,
-          background: "#d946ef",
-        }}
-      />
-      История D{activeSnapshot.cutoffDay}
+        <span
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: 999,
+            background: "#d946ef",
+          }}
+        />
+      История D{activeSnapshot.cutoffDay} из D{latestCompletedSnapshot?.cutoffDay ?? activeSnapshot.cutoffDay}
     </div>
   ) : (
     <button
@@ -350,32 +359,118 @@ export function ForecastHistoryChart({
         </div>
       </div>
 
-      <input
-        type="range"
-        min={0}
-        max={Math.max(completedSnapshots.length - 1, 0)}
-        step={1}
-        value={Math.max(activeSnapshotIndex, 0)}
-        onChange={(event) => {
-          const nextIndex = Number(event.target.value);
-          setActiveCutoff(completedSnapshots[nextIndex]?.cutoffDay ?? null);
+      <div
+        style={{
+          display: "grid",
+          gap: 10,
+          padding: "12px 14px",
+          borderRadius: 12,
+          border: "1px solid rgba(217, 70, 239, 0.18)",
+          background: "rgba(250, 245, 255, 0.72)",
         }}
-        disabled={completedSnapshots.length <= 1}
-        style={{ width: "100%", accentColor: "#d946ef" }}
-      />
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "#a21caf" }}>
+            История прогнозов
+          </div>
+          <div style={{ fontSize: 12, color: "var(--color-ink-700)" }}>
+            Cutoff D{activeSnapshot?.cutoffDay ?? "?"} из {completedSnapshots.length}
+          </div>
+        </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 10.5, color: "var(--color-ink-500)" }}>
-        {completedSnapshots.map((snapshot) => (
-          <span
-            key={snapshot.cutoffDay}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            type="button"
+            onClick={() => {
+              const previousIndex = Math.max(activeSnapshotIndex - 1, 0);
+              setActiveCutoff(completedSnapshots[previousIndex]?.cutoffDay ?? null);
+            }}
+            disabled={completedSnapshots.length <= 1 || activeSnapshotIndex <= 0}
             style={{
-              color: snapshot.cutoffDay === activeCutoff ? "#86198f" : "var(--color-ink-500)",
-              fontWeight: snapshot.cutoffDay === activeCutoff ? 700 : 500,
+              border: "1px solid rgba(217, 70, 239, 0.24)",
+              borderRadius: 999,
+              background: "var(--color-panel-base)",
+              color:
+                completedSnapshots.length <= 1 || activeSnapshotIndex <= 0
+                  ? "var(--color-ink-400)"
+                  : "#86198f",
+              minHeight: 32,
+              padding: "0 12px",
+              fontSize: 11.5,
+              fontWeight: 700,
+              cursor:
+                completedSnapshots.length <= 1 || activeSnapshotIndex <= 0
+                  ? "default"
+                  : "pointer",
             }}
           >
-            D{snapshot.cutoffDay}
-          </span>
-        ))}
+            Назад
+          </button>
+
+          <input
+            type="range"
+            min={0}
+            max={Math.max(completedSnapshots.length - 1, 0)}
+            step={1}
+            value={Math.max(activeSnapshotIndex, 0)}
+            onChange={(event) => {
+              const nextIndex = Number(event.target.value);
+              setActiveCutoff(completedSnapshots[nextIndex]?.cutoffDay ?? null);
+            }}
+            disabled={completedSnapshots.length <= 1}
+            style={{ width: "100%", accentColor: "#d946ef" }}
+          />
+
+          <button
+            type="button"
+            onClick={() => {
+              const nextIndex = Math.min(
+                activeSnapshotIndex + 1,
+                Math.max(completedSnapshots.length - 1, 0)
+              );
+              setActiveCutoff(completedSnapshots[nextIndex]?.cutoffDay ?? null);
+            }}
+            disabled={
+              completedSnapshots.length <= 1 ||
+              activeSnapshotIndex >= completedSnapshots.length - 1
+            }
+            style={{
+              border: "1px solid rgba(217, 70, 239, 0.24)",
+              borderRadius: 999,
+              background: "var(--color-panel-base)",
+              color:
+                completedSnapshots.length <= 1 ||
+                activeSnapshotIndex >= completedSnapshots.length - 1
+                  ? "var(--color-ink-400)"
+                  : "#86198f",
+              minHeight: 32,
+              padding: "0 12px",
+              fontSize: 11.5,
+              fontWeight: 700,
+              cursor:
+                completedSnapshots.length <= 1 ||
+                activeSnapshotIndex >= completedSnapshots.length - 1
+                  ? "default"
+                  : "pointer",
+            }}
+          >
+            Вперёд
+          </button>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 10.5, color: "var(--color-ink-500)" }}>
+          {completedSnapshots.map((snapshot) => (
+            <span
+              key={snapshot.cutoffDay}
+              style={{
+                color: snapshot.cutoffDay === activeCutoff ? "#86198f" : "var(--color-ink-500)",
+                fontWeight: snapshot.cutoffDay === activeCutoff ? 700 : 500,
+              }}
+            >
+              D{snapshot.cutoffDay}
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   ) : error ? (
