@@ -888,6 +888,38 @@ describe("forecast notebook live surface", () => {
     expect(bounds).toEqual([20, 20]);
   });
 
+  it("falls back to live-built bounds when artifact upper tail would exceed five times the forecast", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const trainingRecords = Array.from({ length: 12 }, (_, index) => ({
+      cohortDate: `2026-03-${String(index + 1).padStart(2, "0")}`,
+      cohortSize: 54,
+      trueRevenue: [0, 0, 0, 0, 0, 0, 0],
+      trueFor: new Map<number, number>([[180, 100]]),
+      predictedForByCutoff: new Map<string, number>([
+        [__testables.boundsKey(180, 8), 80],
+      ]),
+      badByCutoff: new Set<number>(),
+    }));
+
+    const artifactBounds = new Map<number, Map<string, readonly [number, number]>>([
+      [54, new Map([[__testables.boundsKey(180, 8), [-78, 82] as const]])],
+    ]);
+
+    const bounds = __testables.getNotebookBounds(
+      new Map(),
+      trainingRecords,
+      54,
+      8,
+      180,
+      360,
+      [8],
+      [180],
+      artifactBounds
+    );
+
+    expect(bounds).toEqual([20, 20]);
+  });
+
   it("uses live-built bounds on charts when the exact artifact size is missing", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
     const cohort = {

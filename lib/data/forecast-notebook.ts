@@ -3105,7 +3105,10 @@ function isUsableNotebookBounds(bounds: readonly [number, number]) {
   return (
     Number.isFinite(lowerPercent) &&
     Number.isFinite(upperPercent) &&
-    upperPercent < 99
+    // Treat artifact tails above 80% as unusable. In inverse space that pushes
+    // the upper band beyond 5x of the point forecast, which is where stale
+    // extrapolated notebook artifacts start dominating the chart scale.
+    upperPercent < 80
   );
 }
 
