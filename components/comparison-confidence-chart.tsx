@@ -312,6 +312,20 @@ export function ComparisonConfidenceChart({
 
           {visibleGroups.map((group) => {
             const bandPaths = buildBandPaths(group.series, group.series.length, getX, getY);
+            const upperBandPaths = buildLinePaths(
+              group.series,
+              group.series.length,
+              getX,
+              getY,
+              (point) => point.upper
+            );
+            const lowerBandPaths = buildLinePaths(
+              group.series,
+              group.series.length,
+              getX,
+              getY,
+              (point) => point.lower
+            );
             const predictedPaths = buildLinePaths(group.series, group.series.length, getX, getY, (point) => point.value);
             const actualPaths = buildLinePaths(group.series, group.series.length, getX, getY, (point) => point.actual ?? null);
 
@@ -321,7 +335,29 @@ export function ComparisonConfidenceChart({
                   <path
                     key={`${group.label}-band-${index}`}
                     d={path}
-                    fill={toAlpha(group.color, 0.1)}
+                    fill={toAlpha(group.color, 0.16)}
+                  />
+                ))}
+                {upperBandPaths.map((path, index) => (
+                  <path
+                    key={`${group.label}-band-upper-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={toAlpha(group.color, 0.6)}
+                    strokeWidth="1.35"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                ))}
+                {lowerBandPaths.map((path, index) => (
+                  <path
+                    key={`${group.label}-band-lower-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={toAlpha(group.color, 0.6)}
+                    strokeWidth="1.35"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
                   />
                 ))}
                 {predictedPaths.map((path, index) => (
@@ -377,6 +413,20 @@ export function ComparisonConfidenceChart({
 
           {visibleOverlayGroups.map((group) => {
             const bandPaths = buildBandPaths(group.series, group.series.length, getX, getY);
+            const upperBandPaths = buildLinePaths(
+              group.series,
+              group.series.length,
+              getX,
+              getY,
+              (point) => point.upper
+            );
+            const lowerBandPaths = buildLinePaths(
+              group.series,
+              group.series.length,
+              getX,
+              getY,
+              (point) => point.lower
+            );
             const predictedPaths = buildLinePaths(
               group.series,
               group.series.length,
@@ -391,7 +441,29 @@ export function ComparisonConfidenceChart({
                   <path
                     key={`overlay-${group.label}-band-${index}`}
                     d={path}
-                    fill={toAlpha(group.color, overlay?.bandAlpha ?? 0.14)}
+                    fill={toAlpha(group.color, overlay?.bandAlpha ?? 0.2)}
+                  />
+                ))}
+                {upperBandPaths.map((path, index) => (
+                  <path
+                    key={`overlay-${group.label}-band-upper-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={toAlpha(group.color, 0.72)}
+                    strokeWidth="1.25"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                ))}
+                {lowerBandPaths.map((path, index) => (
+                  <path
+                    key={`overlay-${group.label}-band-lower-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={toAlpha(group.color, 0.72)}
+                    strokeWidth="1.25"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
                   />
                 ))}
                 {predictedPaths.map((path, index) => (
