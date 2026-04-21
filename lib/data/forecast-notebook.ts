@@ -2061,11 +2061,31 @@ async function buildLinePredictionResources(
       let predictedRevenue: number | null = null;
       let cutoffToLook = NOTEBOOK_FALLBACK_CUTOFF;
       let allowBounds = false;
+      const historicalCutoffForMaturePoint =
+        actual != null && horizon > NOTEBOOK_HISTORY_MIN_DAY
+          ? nearestHistoryDay(Math.min(cohort.cohortLifetime, horizon - 1))
+          : null;
 
-      if (curveAllowed && horizon < predictedCurve.length) {
-        predictedRevenue = predictedCurve[horizon] ?? 0;
-        cutoffToLook = nearestHistoryDay(cohort.cohortLifetime);
-        allowBounds = true;
+      if (curveAllowed) {
+        if (historicalCutoffForMaturePoint != null && historicalCutoffForMaturePoint < horizon) {
+          const historicalCurve = getUsableEstimatedCurve(
+            estimatedCurves.get(
+              `train:${cohort.groupValue}:${cohort.cohortDate}:${historicalCutoffForMaturePoint}`
+            ) ?? estimateCurveFallback(cohort.totalRevenue, historicalCutoffForMaturePoint, maxRequiredHorizon)
+          );
+
+          if (historicalCurve && horizon < historicalCurve.length) {
+            predictedRevenue = historicalCurve[horizon] ?? null;
+            cutoffToLook = historicalCutoffForMaturePoint;
+            allowBounds = predictedRevenue !== null;
+          }
+        }
+
+        if (predictedRevenue == null && horizon < predictedCurve.length) {
+          predictedRevenue = predictedCurve[horizon] ?? 0;
+          cutoffToLook = nearestHistoryDay(cohort.cohortLifetime);
+          allowBounds = true;
+        }
       }
 
       if (canUseYoungFallback) {

@@ -748,19 +748,20 @@ describe("forecast notebook live surface", () => {
       [
         80,
         new Map<string, readonly [number, number]>([
-          [__testables.boundsKey(7, 10), [-10, 20] as const],
+          [__testables.boundsKey(7, 6), [-10, 20] as const],
         ]),
       ],
     ]);
     const estimatedCurves = new Map<string, number[] | null>([
-      ["live:selected_scope:2026-04-01", [40, 47, 53, 58, 63, 69, 75, 80, 84, 87, 90]],
+      ["live:selected_scope:2026-04-01", [40, 47, 53, 58, 63, 69, 75, 99, 104, 108, 111]],
+      ["train:selected_scope:2026-04-01:6", [40, 47, 53, 58, 63, 69, 75, 80, 84, 87, 90]],
     ]);
 
     const resources = await __testables.buildLinePredictionResources(
       [cohort],
       [7],
       1,
-      [10],
+      [6],
       [7],
       30,
       artifactBounds,
