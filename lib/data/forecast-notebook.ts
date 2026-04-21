@@ -3048,7 +3048,11 @@ function getNotebookBounds(
   const notebookHorizon = clamp(Math.round(horizon), 7, 365);
   const key = boundsKey(notebookHorizon, nearestHistoryDay(cutoff));
   const artifactBounds = artifactCache?.get(normalizedCohortSize)?.get(key);
-  if (artifactBounds && !isPlaceholderArtifactBounds(artifactBounds)) {
+  if (
+    artifactBounds &&
+    !isPlaceholderArtifactBounds(artifactBounds) &&
+    isUsableNotebookBounds(artifactBounds)
+  ) {
     return artifactBounds;
   }
 
@@ -3094,6 +3098,15 @@ function normalizeConfidenceBandPercents(bounds: readonly [number, number]) {
   }
 
   return [lowerPercent, upperPercent] as const;
+}
+
+function isUsableNotebookBounds(bounds: readonly [number, number]) {
+  const [lowerPercent, upperPercent] = normalizeConfidenceBandPercents(bounds);
+  return (
+    Number.isFinite(lowerPercent) &&
+    Number.isFinite(upperPercent) &&
+    upperPercent < 99
+  );
 }
 
 function applyNotebookBounds(
@@ -4837,37 +4850,12 @@ function extrapolateSeries(values: number[], historyWindow: number, extendBy: nu
     return [...values];
   }
 
-  const safeWindow = Math.max(1, Math.min(historyWindow, values.length));
-  const fitValues = values.slice(-safeWindow);
-  const baseline = fitValues[0] === 0 ? 1 : fitValues[0];
-  const normalized = fitValues.map((value) => value / baseline);
-  const xValues = rangeInclusive(1, fitValues.length);
-
-  let sumX = 0;
-  let sumY = 0;
-  let sumXY = 0;
-  let sumXX = 0;
-  for (let index = 0; index < xValues.length; index += 1) {
-    const x = xValues[index] ?? 0;
-    const y = normalized[index] ?? 0;
-    sumX += x;
-    sumY += y;
-    sumXY += x * y;
-    sumXX += x * x;
-  }
-
-  const n = xValues.length;
-  const denominator = (n * sumXX) - (sumX * sumX);
-  const slope = denominator === 0 ? 0 : ((n * sumXY) - (sumX * sumY)) / denominator;
-  const intercept = n === 0 ? 0 : (sumY - (slope * sumX)) / n;
-  const extended = [...values];
-
-  for (let index = 1; index <= extendBy; index += 1) {
-    const x = fitValues.length + index;
-    extended.push((baseline * ((slope * x) + intercept)) || 0);
-  }
-
-  return extended;
+  // Carry forward the last empirically supported quantile instead of
+  // linearly extrapolating in error space. Linear tail growth can overshoot
+  // toward 100%+ upper error and blow long-horizon ROAS intervals up by
+  // orders of magnitude.
+  const tailValue = values[values.length - 1] ?? 0;
+  return [...values, ...new Array(extendBy).fill(tailValue)];
 }
 
 function rangeInclusive(start: number, end: number) {

@@ -730,7 +730,7 @@ describe("forecast notebook live surface", () => {
     expect(bounds?.[0]).not.toBeCloseTo(-5, 5);
   });
 
-  it("ignores under-supported direct long-horizon keys so wider interpolated bounds can win", async () => {
+  it("carries forward the widest supported long-horizon bounds without tail overshoot", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
     const trainingRecords = Array.from({ length: 10 }, (_, index) => ({
       cohortDate: `2026-04-${String(index + 1).padStart(2, "0")}`,
@@ -755,11 +755,7 @@ describe("forecast notebook live surface", () => {
       .buildBoundsForCohortSize(trainingRecords, 64, 360, [8], [30, 60, 120, 360])
       .get(__testables.boundsKey(360, 8));
 
-    expect(bounds).toBeDefined();
-    expect(Math.abs(bounds?.[0] ?? 0)).toBeGreaterThan(5);
-    expect(Math.abs(bounds?.[1] ?? 0)).toBeGreaterThan(5);
-    expect(bounds?.[0]).not.toBeCloseTo(1, 3);
-    expect(bounds?.[1]).not.toBeCloseTo(1, 3);
+    expect(bounds).toEqual([40, 40]);
   });
 
   it("normalizes one-sided notebook bounds into a band around the forecast point", async () => {
@@ -858,6 +854,38 @@ describe("forecast notebook live surface", () => {
 
     expect(bounds).toEqual([4, 12]);
     expect(__testables.normalizeBoundsCohortSize(1904.6)).toBe(1000);
+  });
+
+  it("falls back to live-built bounds when artifact bounds imply near-infinite upside", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const trainingRecords = Array.from({ length: 12 }, (_, index) => ({
+      cohortDate: `2026-02-${String(index + 1).padStart(2, "0")}`,
+      cohortSize: 176,
+      trueRevenue: [0, 0, 0, 0, 0, 0, 0],
+      trueFor: new Map<number, number>([[360, 100]]),
+      predictedForByCutoff: new Map<string, number>([
+        [__testables.boundsKey(360, 8), 80],
+      ]),
+      badByCutoff: new Set<number>(),
+    }));
+
+    const artifactBounds = new Map<number, Map<string, readonly [number, number]>>([
+      [176, new Map([[__testables.boundsKey(360, 8), [-10, 100] as const]])],
+    ]);
+
+    const bounds = __testables.getNotebookBounds(
+      new Map(),
+      trainingRecords,
+      176,
+      8,
+      360,
+      360,
+      [8],
+      [360],
+      artifactBounds
+    );
+
+    expect(bounds).toEqual([20, 20]);
   });
 
   it("uses live-built bounds on charts when the exact artifact size is missing", async () => {

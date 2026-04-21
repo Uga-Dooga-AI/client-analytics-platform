@@ -1255,24 +1255,12 @@ def interpolate_series(values: list[float]) -> list[float]:
 def extrapolate_series(values: list[float], history_window: int, extend_by: int) -> list[float]:
     if not values or extend_by <= 0:
         return list(values)
-    safe_window = max(1, min(history_window, len(values)))
-    fit_values = values[-safe_window:]
-    baseline = fit_values[0] if fit_values[0] != 0 else 1.0
-    normalized = [value / baseline for value in fit_values]
-    x_values = list(range(1, len(fit_values) + 1))
-    sum_x = sum(x_values)
-    sum_y = sum(normalized)
-    sum_xy = sum(x * y for x, y in zip(x_values, normalized))
-    sum_xx = sum(x * x for x in x_values)
-    count = len(x_values)
-    denominator = (count * sum_xx) - (sum_x * sum_x)
-    slope = 0.0 if denominator == 0 else ((count * sum_xy) - (sum_x * sum_y)) / denominator
-    intercept = 0.0 if count == 0 else (sum_y - (slope * sum_x)) / count
-    extended = list(values)
-    for index in range(1, extend_by + 1):
-        x_value = len(fit_values) + index
-        extended.append((baseline * ((slope * x_value) + intercept)) or 0.0)
-    return extended
+
+    # Carry forward the last empirically supported quantile instead of
+    # linearly extrapolating in error space. Linear tail growth can overshoot
+    # toward 100%+ upper error and make long-horizon ROAS intervals explode.
+    tail_value = values[-1] if values else 0.0
+    return [*values, *([tail_value] * extend_by)]
 
 
 def safe_ratio_aggregate(values: list[float]) -> float:
