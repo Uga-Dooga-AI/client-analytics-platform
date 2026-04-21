@@ -873,11 +873,8 @@ def build_bounds_for_cohort_size(
         return {}
 
     table = get_error_bounds_from_records(smooth_records, history_days, prediction_periods)
-    if (
-        not table
-        and normalized_cohort_size <= BOUNDS_SMALL_COHORT_NEAREST_FILL_MAX_SIZE
-        and len(smooth_records) < len(training_records)
-    ):
+    candidate_key_count = count_candidate_bounds_keys(history_days, prediction_periods)
+    if len(table) < candidate_key_count and len(smooth_records) < len(training_records):
         table = build_progressively_expanded_bounds_table(
             training_records,
             normalized_cohort_size,
@@ -937,29 +934,61 @@ def get_error_bounds_from_records(
     history_days: list[int],
     prediction_periods: list[int],
 ) -> dict[str, tuple[float, float]]:
-    bounds: dict[str, tuple[float, float]] = {}
+    return get_error_bounds_from_samples(
+        collect_error_samples(records, history_days, prediction_periods)
+    )
+
+
+def collect_error_samples(
+    records: list[BoundsTrainingRecord],
+    history_days: list[int],
+    prediction_periods: list[int],
+) -> dict[str, list[float]]:
+    errors_by_key: dict[str, list[float]] = {}
+    for record in records:
+        append_record_error_samples(errors_by_key, record, history_days, prediction_periods)
+    return errors_by_key
+
+
+def append_record_error_samples(
+    errors_by_key: dict[str, list[float]],
+    record: BoundsTrainingRecord,
+    history_days: list[int],
+    prediction_periods: list[int],
+) -> None:
     for period in prediction_periods:
+        actual = record.true_for.get(period)
+        if actual is None or actual == 0:
+            continue
         for cutoff in history_days:
             if cutoff >= period:
                 continue
-            errors: list[float] = []
-            for record in records:
-                if cutoff in record.bad_by_cutoff:
-                    continue
-                actual = record.true_for.get(period)
-                predicted = record.predicted_for_by_cutoff.get(bounds_key(period, cutoff))
-                if actual is None or predicted is None or actual == 0:
-                    continue
-                error = ((actual - predicted) / actual) * 100
-                if math.isfinite(error):
-                    errors.append(error)
-            if not errors:
+            if cutoff in record.bad_by_cutoff:
                 continue
-            sorted_errors = sorted(errors)
-            bounds[bounds_key(period, cutoff)] = (
-                quantile(sorted_errors, BOUNDS_LOWER_QUANTILE),
-                quantile(sorted_errors, BOUNDS_UPPER_QUANTILE),
-            )
+            predicted = record.predicted_for_by_cutoff.get(bounds_key(period, cutoff))
+            if predicted is None:
+                continue
+            error = ((actual - predicted) / actual) * 100
+            if not math.isfinite(error):
+                continue
+            errors_by_key.setdefault(bounds_key(period, cutoff), []).append(error)
+    return None
+
+
+def get_error_bounds_from_samples(
+    errors_by_key: dict[str, list[float]],
+    *,
+    min_predictions: int = BOUNDS_MIN_PREDICTIONS,
+) -> dict[str, tuple[float, float]]:
+    bounds: dict[str, tuple[float, float]] = {}
+    for key, errors in errors_by_key.items():
+        if len(errors) < min_predictions:
+            continue
+        sorted_errors = sorted(errors)
+        bounds[key] = (
+            quantile(sorted_errors, BOUNDS_LOWER_QUANTILE),
+            quantile(sorted_errors, BOUNDS_UPPER_QUANTILE),
+        )
     return bounds
 
 
@@ -1005,6 +1034,10 @@ def build_progressively_expanded_bounds_table(
     expanded_records = list(base_records)
     seen = record_identity_set(expanded_records)
     nearest_records = sort_records_by_size_distance(training_records, normalized_cohort_size)
+    candidate_key_count = count_candidate_bounds_keys(history_days, prediction_periods)
+    errors_by_key = collect_error_samples(expanded_records, history_days, prediction_periods)
+    best_supported_key_count = count_supported_error_keys(errors_by_key)
+    best_prefix_length = len(expanded_records)
 
     for record in nearest_records:
         key = record_identity(record)
@@ -1012,15 +1045,22 @@ def build_progressively_expanded_bounds_table(
             continue
         expanded_records.append(record)
         seen.add(key)
-        table = get_error_bounds_from_records(
-            expanded_records,
-            history_days,
-            prediction_periods,
-        )
-        if table:
-            return table
+        append_record_error_samples(errors_by_key, record, history_days, prediction_periods)
+        supported_key_count = count_supported_error_keys(errors_by_key)
+        if supported_key_count > best_supported_key_count:
+            best_supported_key_count = supported_key_count
+            best_prefix_length = len(expanded_records)
+            if supported_key_count >= candidate_key_count:
+                break
 
-    return {}
+    if best_supported_key_count == 0:
+        return {}
+
+    return get_error_bounds_from_records(
+        expanded_records[:best_prefix_length],
+        history_days,
+        prediction_periods,
+    )
 
 
 def sort_records_by_size_distance(
@@ -1053,6 +1093,21 @@ def smooth_record_count(
     cohort_size: int,
 ) -> int:
     return len(smooth_records_for_size(training_records, cohort_size))
+
+
+def count_candidate_bounds_keys(
+    history_days: list[int],
+    prediction_periods: list[int],
+) -> int:
+    return sum(1 for period in prediction_periods for cutoff in history_days if cutoff < period)
+
+
+def count_supported_error_keys(
+    errors_by_key: dict[str, list[float]],
+    *,
+    min_predictions: int = BOUNDS_MIN_PREDICTIONS,
+) -> int:
+    return sum(1 for errors in errors_by_key.values() if len(errors) >= min_predictions)
 
 
 def align_to_bucket(value: str, anchor: str, step_days: int) -> str:

@@ -730,6 +730,38 @@ describe("forecast notebook live surface", () => {
     expect(bounds?.[0]).not.toBeCloseTo(-5, 5);
   });
 
+  it("ignores under-supported direct long-horizon keys so wider interpolated bounds can win", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const trainingRecords = Array.from({ length: 10 }, (_, index) => ({
+      cohortDate: `2026-04-${String(index + 1).padStart(2, "0")}`,
+      cohortSize: 64,
+      trueRevenue: [0, 0, 0, 0, 0, 0, 0, 0],
+      trueFor: new Map<number, number>([
+        [30, 100],
+        [60, 100],
+        [120, 100],
+        [360, 100],
+      ]),
+      predictedForByCutoff: new Map<string, number>([
+        [__testables.boundsKey(30, 8), 80],
+        [__testables.boundsKey(60, 8), 70],
+        [__testables.boundsKey(120, 8), 60],
+        ...(index === 0 ? [[__testables.boundsKey(360, 8), 99] as const] : []),
+      ]),
+      badByCutoff: new Set<number>(),
+    }));
+
+    const bounds = __testables
+      .buildBoundsForCohortSize(trainingRecords, 64, 360, [8], [30, 60, 120, 360])
+      .get(__testables.boundsKey(360, 8));
+
+    expect(bounds).toBeDefined();
+    expect(Math.abs(bounds?.[0] ?? 0)).toBeGreaterThan(5);
+    expect(Math.abs(bounds?.[1] ?? 0)).toBeGreaterThan(5);
+    expect(bounds?.[0]).not.toBeCloseTo(1, 3);
+    expect(bounds?.[1]).not.toBeCloseTo(1, 3);
+  });
+
   it("normalizes one-sided notebook bounds into a band around the forecast point", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
 

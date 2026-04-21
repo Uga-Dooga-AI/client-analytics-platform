@@ -3139,9 +3139,28 @@ function buildBoundsForCohortSize(
     return table;
   }
 
-  const rawBounds = getErrorBoundsFromRecords(smoothRecords, historyDays, predictionPeriods);
+  const candidateKeyCount = countCandidateBoundsKeys(historyDays, predictionPeriods);
+  const baseErrorsByKey = collectErrorSamples(smoothRecords, historyDays, predictionPeriods);
+  const baseSupportedKeyCount = countSupportedErrorKeys(baseErrorsByKey);
+  const recordsForBounds =
+    baseSupportedKeyCount < candidateKeyCount && smoothRecords.length < trainingRecords.length
+      ? buildProgressivelyExpandedBoundsRecords(
+          trainingRecords,
+          cohortSize,
+          smoothRecords,
+          historyDays,
+          predictionPeriods
+        )
+      : smoothRecords;
+  const rawBounds =
+    recordsForBounds === smoothRecords
+      ? getErrorBoundsFromSamples(baseErrorsByKey)
+      : getErrorBoundsFromRecords(recordsForBounds, historyDays, predictionPeriods);
   for (const [key, value] of rawBounds.entries()) {
     table.set(key, value);
+  }
+  if (table.size === 0) {
+    return table;
   }
 
   const expandedHistoryMax = Math.min(BOUNDS_MAX_CUTOFF, Math.max(...historyDays));
@@ -3196,40 +3215,160 @@ function getErrorBoundsFromRecords(
   historyDays: readonly number[],
   predictionPeriods: readonly number[]
 ) {
+  return getErrorBoundsFromSamples(collectErrorSamples(records, historyDays, predictionPeriods));
+}
+
+function collectErrorSamples(
+  records: BoundsTrainingRecord[],
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[]
+) {
+  const errorsByKey = new Map<string, number[]>();
+  for (const record of records) {
+    appendRecordErrorSamples(errorsByKey, record, historyDays, predictionPeriods);
+  }
+  return errorsByKey;
+}
+
+function appendRecordErrorSamples(
+  errorsByKey: Map<string, number[]>,
+  record: BoundsTrainingRecord,
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[]
+) {
+  for (const period of predictionPeriods) {
+    const actual = record.trueFor.get(period);
+    if (actual == null || actual === 0) {
+      continue;
+    }
+
+    for (const cutoff of historyDays) {
+      if (cutoff >= period || record.badByCutoff.has(cutoff)) {
+        continue;
+      }
+
+      const predicted = record.predictedForByCutoff.get(boundsKey(period, cutoff));
+      if (predicted == null) {
+        continue;
+      }
+
+      const error = ((actual - predicted) / actual) * 100;
+      if (!Number.isFinite(error)) {
+        continue;
+      }
+
+      const key = boundsKey(period, cutoff);
+      const errors = errorsByKey.get(key) ?? [];
+      errors.push(error);
+      errorsByKey.set(key, errors);
+    }
+  }
+}
+
+function getErrorBoundsFromSamples(
+  errorsByKey: Map<string, number[]>,
+  minPredictions = BOUNDS_MIN_PREDICTIONS
+) {
   const bounds = new Map<string, readonly [number, number]>();
 
-  for (const period of predictionPeriods) {
-    for (const cutoff of historyDays) {
-      if (cutoff >= period) {
-        continue;
-      }
+  for (const [key, errors] of errorsByKey.entries()) {
+    if (errors.length < minPredictions) {
+      continue;
+    }
 
-      const errors: number[] = [];
-      for (const record of records) {
-        if (record.badByCutoff.has(cutoff)) {
-          continue;
-        }
-        const actual = record.trueFor.get(period);
-        const predicted = record.predictedForByCutoff.get(boundsKey(period, cutoff));
-        if (actual == null || predicted == null) {
-          continue;
-        }
-        errors.push(((actual - predicted) / actual) * 100);
-      }
-
-      if (errors.length === 0) {
-        continue;
-      }
-
-      const sorted = errors.sort((left, right) => left - right);
-      bounds.set(boundsKey(period, cutoff), [
+    const sorted = [...errors].sort((left, right) => left - right);
+    bounds.set(key, [
         quantile(sorted, BOUNDS_LOWER_QUANTILE),
         quantile(sorted, BOUNDS_UPPER_QUANTILE),
       ]);
-    }
   }
 
   return bounds;
+}
+
+function buildProgressivelyExpandedBoundsRecords(
+  trainingRecords: BoundsTrainingRecord[],
+  cohortSize: number,
+  baseRecords: BoundsTrainingRecord[],
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[]
+) {
+  const seen = new Set(baseRecords.map((record) => `${record.cohortDate}:${record.cohortSize}`));
+  const expandedRecords = [...baseRecords];
+  const nearestRecords = [...trainingRecords].sort((left, right) => {
+    const leftLogDistance = Math.abs(
+      Math.log(Math.max(left.cohortSize, 1)) - Math.log(Math.max(cohortSize, 1))
+    );
+    const rightLogDistance = Math.abs(
+      Math.log(Math.max(right.cohortSize, 1)) - Math.log(Math.max(cohortSize, 1))
+    );
+    if (leftLogDistance !== rightLogDistance) {
+      return leftLogDistance - rightLogDistance;
+    }
+    const leftAbsoluteDistance = Math.abs(left.cohortSize - cohortSize);
+    const rightAbsoluteDistance = Math.abs(right.cohortSize - cohortSize);
+    if (leftAbsoluteDistance !== rightAbsoluteDistance) {
+      return leftAbsoluteDistance - rightAbsoluteDistance;
+    }
+    return left.cohortDate.localeCompare(right.cohortDate);
+  });
+  const errorsByKey = collectErrorSamples(expandedRecords, historyDays, predictionPeriods);
+  const candidateKeyCount = countCandidateBoundsKeys(historyDays, predictionPeriods);
+  let bestSupportedKeyCount = countSupportedErrorKeys(errorsByKey);
+  let bestPrefixLength = expandedRecords.length;
+
+  for (const record of nearestRecords) {
+    const key = `${record.cohortDate}:${record.cohortSize}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    expandedRecords.push(record);
+    seen.add(key);
+    appendRecordErrorSamples(errorsByKey, record, historyDays, predictionPeriods);
+    const supportedKeyCount = countSupportedErrorKeys(errorsByKey);
+    if (supportedKeyCount > bestSupportedKeyCount) {
+      bestSupportedKeyCount = supportedKeyCount;
+      bestPrefixLength = expandedRecords.length;
+      if (supportedKeyCount >= candidateKeyCount) {
+        break;
+      }
+    }
+  }
+
+  if (bestSupportedKeyCount === 0) {
+    return [];
+  }
+
+  return expandedRecords.slice(0, bestPrefixLength);
+}
+
+function countCandidateBoundsKeys(
+  historyDays: readonly number[],
+  predictionPeriods: readonly number[]
+) {
+  let count = 0;
+  for (const period of predictionPeriods) {
+    for (const cutoff of historyDays) {
+      if (cutoff < period) {
+        count += 1;
+      }
+    }
+  }
+  return count;
+}
+
+function countSupportedErrorKeys(
+  errorsByKey: Map<string, number[]>,
+  minPredictions = BOUNDS_MIN_PREDICTIONS
+) {
+  let count = 0;
+  for (const errors of errorsByKey.values()) {
+    if (errors.length >= minPredictions) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function interpolateAcrossHistory(

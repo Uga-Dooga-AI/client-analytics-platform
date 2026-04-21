@@ -84,16 +84,19 @@ class BoundsArtifactsTest(unittest.TestCase):
             )
             for index, size in enumerate([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         ]
-        valid_record = BoundsTrainingRecord(
-            cohort_date="2026-03-20",
-            cohort_size=30,
-            true_for={7: 100.0},
-            predicted_for_by_cutoff={"for_7_on_4": 95.0},
-            bad_by_cutoff=set(),
-        )
+        valid_records = [
+            BoundsTrainingRecord(
+                cohort_date=f"2026-03-{20 + index:02d}",
+                cohort_size=30 + index,
+                true_for={7: 100.0},
+                predicted_for_by_cutoff={"for_7_on_4": 95.0},
+                bad_by_cutoff=set(),
+            )
+            for index in range(10)
+        ]
 
         bounds = build_bounds_for_cohort_size(
-            [*invalid_records, valid_record],
+            [*invalid_records, *valid_records],
             cohort_size=11,
             max_prediction_horizon=30,
             history_days=[4],
@@ -101,6 +104,40 @@ class BoundsArtifactsTest(unittest.TestCase):
         )
 
         self.assertIn("for_7_on_4", bounds)
+
+    def test_sparse_direct_long_horizon_key_does_not_override_supported_interpolation(self):
+        records = []
+        for index in range(10):
+            predicted_for_by_cutoff = {
+                "for_30_on_8": 80.0,
+                "for_60_on_8": 70.0,
+                "for_120_on_8": 60.0,
+            }
+            if index == 0:
+                predicted_for_by_cutoff["for_360_on_8"] = 99.0
+            records.append(
+                BoundsTrainingRecord(
+                    cohort_date=f"2026-04-{index + 1:02d}",
+                    cohort_size=64,
+                    true_for={30: 100.0, 60: 100.0, 120: 100.0, 360: 100.0},
+                    predicted_for_by_cutoff=predicted_for_by_cutoff,
+                    bad_by_cutoff=set(),
+                )
+            )
+
+        bounds = build_bounds_for_cohort_size(
+            records,
+            cohort_size=64,
+            max_prediction_horizon=360,
+            history_days=[8],
+            prediction_periods=[30, 60, 120, 360],
+        )
+
+        lower, upper = bounds["for_360_on_8"]
+        self.assertGreater(abs(lower), 5.0)
+        self.assertGreater(abs(upper), 5.0)
+        self.assertNotAlmostEqual(lower, 1.0, places=3)
+        self.assertNotAlmostEqual(upper, 1.0, places=3)
 
     def test_error_bounds_use_lower_tail_not_median(self):
         records = [
