@@ -70,6 +70,35 @@ class BoundsArtifactsTest(unittest.TestCase):
         self.assertIn("for_7_on_4", bounds)
         self.assertNotIn("for_8_on_4", bounds)
 
+    def test_small_cohort_bounds_expand_neighbors_until_empirical_keys_exist(self):
+        invalid_records = [
+            BoundsTrainingRecord(
+                cohort_date=f"2026-03-{index + 1:02d}",
+                cohort_size=size,
+                true_for={7: 100.0},
+                predicted_for_by_cutoff={"for_8_on_4": 95.0},
+                bad_by_cutoff=set(),
+            )
+            for index, size in enumerate([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        ]
+        valid_record = BoundsTrainingRecord(
+            cohort_date="2026-03-20",
+            cohort_size=30,
+            true_for={7: 100.0},
+            predicted_for_by_cutoff={"for_7_on_4": 95.0},
+            bad_by_cutoff=set(),
+        )
+
+        bounds = build_bounds_for_cohort_size(
+            [*invalid_records, valid_record],
+            cohort_size=11,
+            max_prediction_horizon=30,
+            history_days=[4],
+            prediction_periods=[7],
+        )
+
+        self.assertIn("for_7_on_4", bounds)
+
     def test_compress_size_ranges_groups_consecutive_values(self):
         compressed = compress_size_ranges([1, 2, 3, 8, 10, 11])
         self.assertEqual(

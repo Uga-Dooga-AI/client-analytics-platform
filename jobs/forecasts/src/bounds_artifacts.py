@@ -779,11 +779,24 @@ def build_bounds_for_cohort_size(
     history_days: list[int],
     prediction_periods: list[int],
 ) -> dict[str, tuple[float, float]]:
+    normalized_cohort_size = normalize_bounds_cohort_size(cohort_size)
     smooth_records = smooth_records_for_size(training_records, cohort_size)
     if len(smooth_records) < BOUNDS_MIN_PREDICTIONS:
         return {}
 
     table = get_error_bounds_from_records(smooth_records, history_days, prediction_periods)
+    if (
+        not table
+        and normalized_cohort_size <= BOUNDS_SMALL_COHORT_NEAREST_FILL_MAX_SIZE
+        and len(smooth_records) < len(training_records)
+    ):
+        table = build_progressively_expanded_bounds_table(
+            training_records,
+            normalized_cohort_size,
+            smooth_records,
+            history_days,
+            prediction_periods,
+        )
     if not table:
         return {}
 
@@ -881,8 +894,52 @@ def smooth_records_for_size(
     ):
         return smooth_records
 
-    seen = {(record.cohort_date, record.cohort_size) for record in smooth_records}
-    nearest_records = sorted(
+    seen = record_identity_set(smooth_records)
+    nearest_records = sort_records_by_size_distance(training_records, normalized_cohort_size)
+    for record in nearest_records:
+        key = record_identity(record)
+        if key in seen:
+            continue
+        smooth_records.append(record)
+        seen.add(key)
+        if len(smooth_records) >= BOUNDS_MIN_PREDICTIONS:
+            break
+    return smooth_records
+
+
+def build_progressively_expanded_bounds_table(
+    training_records: list[BoundsTrainingRecord],
+    normalized_cohort_size: int,
+    base_records: list[BoundsTrainingRecord],
+    history_days: list[int],
+    prediction_periods: list[int],
+) -> dict[str, tuple[float, float]]:
+    expanded_records = list(base_records)
+    seen = record_identity_set(expanded_records)
+    nearest_records = sort_records_by_size_distance(training_records, normalized_cohort_size)
+
+    for record in nearest_records:
+        key = record_identity(record)
+        if key in seen:
+            continue
+        expanded_records.append(record)
+        seen.add(key)
+        table = get_error_bounds_from_records(
+            expanded_records,
+            history_days,
+            prediction_periods,
+        )
+        if table:
+            return table
+
+    return {}
+
+
+def sort_records_by_size_distance(
+    training_records: list[BoundsTrainingRecord],
+    normalized_cohort_size: int,
+) -> list[BoundsTrainingRecord]:
+    return sorted(
         training_records,
         key=lambda record: (
             abs(
@@ -893,15 +950,14 @@ def smooth_records_for_size(
             record.cohort_date,
         ),
     )
-    for record in nearest_records:
-        key = (record.cohort_date, record.cohort_size)
-        if key in seen:
-            continue
-        smooth_records.append(record)
-        seen.add(key)
-        if len(smooth_records) >= BOUNDS_MIN_PREDICTIONS:
-            break
-    return smooth_records
+
+
+def record_identity(record: BoundsTrainingRecord) -> tuple[str, int]:
+    return (record.cohort_date, record.cohort_size)
+
+
+def record_identity_set(records: list[BoundsTrainingRecord]) -> set[tuple[str, int]]:
+    return {record_identity(record) for record in records}
 
 
 def smooth_record_count(
