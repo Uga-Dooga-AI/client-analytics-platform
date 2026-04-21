@@ -380,6 +380,7 @@ const NOTEBOOK_HISTORY_MIN_DAY = 4;
 const BOUNDS_MAX_CUTOFF = 91;
 const BOUNDS_MIN_PREDICTIONS = 10;
 const BOUNDS_SIZE_SMOOTH_COEFF = 1.2;
+const BOUNDS_SMALL_COHORT_NEAREST_FILL_MAX_SIZE = 100;
 const BOUNDS_LOWER_QUANTILE = 0.05;
 const BOUNDS_UPPER_QUANTILE = 0.95;
 const NOTEBOOK_BOUNDS_MIN_COHORT_SIZE = 1;
@@ -2316,11 +2317,60 @@ function collectBoundsTrainingWindow(
   const records = trainingRecords.filter(
     (record) => record.cohortSize >= minSize && record.cohortSize <= maxSize
   );
+
+  if (
+    records.length < BOUNDS_MIN_PREDICTIONS &&
+    cohortSize <= BOUNDS_SMALL_COHORT_NEAREST_FILL_MAX_SIZE &&
+    records.length < trainingRecords.length
+  ) {
+    const seen = new Set(records.map((record) => `${record.cohortDate}:${record.cohortSize}`));
+    const nearestRecords = [...trainingRecords].sort((left, right) => {
+      const leftLogDistance = Math.abs(
+        Math.log(Math.max(left.cohortSize, 1)) - Math.log(Math.max(cohortSize, 1))
+      );
+      const rightLogDistance = Math.abs(
+        Math.log(Math.max(right.cohortSize, 1)) - Math.log(Math.max(cohortSize, 1))
+      );
+      if (leftLogDistance !== rightLogDistance) {
+        return leftLogDistance - rightLogDistance;
+      }
+      const leftAbsoluteDistance = Math.abs(left.cohortSize - cohortSize);
+      const rightAbsoluteDistance = Math.abs(right.cohortSize - cohortSize);
+      if (leftAbsoluteDistance !== rightAbsoluteDistance) {
+        return leftAbsoluteDistance - rightAbsoluteDistance;
+      }
+      return left.cohortDate.localeCompare(right.cohortDate);
+    });
+
+    for (const record of nearestRecords) {
+      const key = `${record.cohortDate}:${record.cohortSize}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      records.push(record);
+      seen.add(key);
+      if (records.length >= BOUNDS_MIN_PREDICTIONS) {
+        break;
+      }
+    }
+  }
+
   return {
     minSize,
     maxSize,
     records,
   };
+}
+
+function isBoundsArtifactSizeOmitted(
+  manifest: NotebookBoundsArtifactManifest | null,
+  cohortSize: number
+) {
+  return (
+    manifest?.artifactOmittedSizeRanges.some(
+      (range) => cohortSize >= range.from && cohortSize <= range.to
+    ) ?? false
+  );
 }
 
 function summarizeBoundsTable(table: Map<string, readonly [number, number]>) {
@@ -2594,7 +2644,8 @@ function describeBoundsArtifactManifest(
 
 async function fetchNotebookBoundsArtifact(
   context: ProjectQueryContext,
-  cohortSize: number
+  cohortSize: number,
+  cacheVersion: string
 ): Promise<{ artifact: Map<string, readonly [number, number]> | null; issue: string | null }> {
   const scope = resolveBoundsArtifactScope(context.bundle);
   if (!scope?.bucket) {
@@ -2613,7 +2664,7 @@ async function fetchNotebookBoundsArtifact(
 
   const normalizedCohortSize = normalizeBoundsCohortSize(cohortSize);
   const objectPath = [scope.prefix, `${normalizedCohortSize}.pkl`].filter(Boolean).join("/");
-  const cacheKey = `${scope.bucket}/${objectPath}`;
+  const cacheKey = `${scope.bucket}/${objectPath}#${cacheVersion}`;
   const cached = NOTEBOOK_BOUNDS_ARTIFACT_CACHE.get(cacheKey);
   if (cached) {
     return cached;
@@ -2768,6 +2819,7 @@ async function loadNotebookBoundsArtifacts(
   const loadedSizes: number[] = [];
   const missingSizes: number[] = [];
   const issueSamples: string[] = [];
+  const cacheVersion = boundsSource?.lastSyncAt?.toISOString() ?? "unversioned";
 
   if (process.env.NODE_ENV === "test") {
     return {
@@ -2786,7 +2838,17 @@ async function loadNotebookBoundsArtifacts(
   }
 
   for (const cohortSize of uniqueSizes) {
-    const result = await fetchNotebookBoundsArtifact(context, cohortSize);
+    if (isBoundsArtifactSizeOmitted(manifest, cohortSize)) {
+      missingSizes.push(cohortSize);
+      if (issueSamples.length < 5) {
+        issueSamples.push(
+          `size ${cohortSize}: Latest bounds manifest omitted this cohort size during the last rebuild, so no artifact file is expected for it.`
+        );
+      }
+      continue;
+    }
+
+    const result = await fetchNotebookBoundsArtifact(context, cohortSize, cacheVersion);
     if (result.artifact) {
       tables.set(cohortSize, result.artifact);
       loadedSizes.push(cohortSize);

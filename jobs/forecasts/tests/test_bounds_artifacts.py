@@ -33,6 +33,20 @@ class BoundsArtifactsTest(unittest.TestCase):
         self.assertGreaterEqual(smooth_record_count(records, 300), 10)
         self.assertEqual(smooth_record_count(records, 1000), 0)
 
+    def test_smooth_record_count_backfills_small_sizes_with_nearest_neighbors(self):
+        records = [
+            BoundsTrainingRecord(
+                cohort_date=f"2026-01-{index + 1:02d}",
+                cohort_size=size,
+                true_for={7: 100.0},
+                predicted_for_by_cutoff={"for_7_on_4": 95.0},
+                bad_by_cutoff=set(),
+            )
+            for index, size in enumerate([1, 2, 3, 4, 6, 7, 19, 20, 26, 150])
+        ]
+
+        self.assertGreaterEqual(smooth_record_count(records, 47), 10)
+
     def test_bounds_table_stays_sparse_when_empirical_keys_are_missing(self):
         records = [
             BoundsTrainingRecord(

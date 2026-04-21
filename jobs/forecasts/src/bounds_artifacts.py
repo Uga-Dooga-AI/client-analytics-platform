@@ -16,6 +16,7 @@ NOTEBOOK_HISTORY_MIN_DAY = 4
 BOUNDS_MAX_CUTOFF = 91
 BOUNDS_MIN_PREDICTIONS = 10
 BOUNDS_SIZE_SMOOTH_COEFF = 1.2
+BOUNDS_SMALL_COHORT_NEAREST_FILL_MAX_SIZE = 100
 NOTEBOOK_BOUNDS_MIN_COHORT_SIZE = 1
 NOTEBOOK_BOUNDS_MAX_COHORT_SIZE = 1000
 
@@ -868,11 +869,39 @@ def smooth_records_for_size(
     normalized_cohort_size = normalize_bounds_cohort_size(cohort_size)
     min_size = math.floor(normalized_cohort_size / BOUNDS_SIZE_SMOOTH_COEFF)
     max_size = math.ceil(normalized_cohort_size * BOUNDS_SIZE_SMOOTH_COEFF) + 1
-    return [
+    smooth_records = [
         record
         for record in training_records
         if min_size <= record.cohort_size <= max_size
     ]
+    if (
+        len(smooth_records) >= BOUNDS_MIN_PREDICTIONS
+        or normalized_cohort_size > BOUNDS_SMALL_COHORT_NEAREST_FILL_MAX_SIZE
+        or len(smooth_records) >= len(training_records)
+    ):
+        return smooth_records
+
+    seen = {(record.cohort_date, record.cohort_size) for record in smooth_records}
+    nearest_records = sorted(
+        training_records,
+        key=lambda record: (
+            abs(
+                math.log(max(record.cohort_size, 1))
+                - math.log(max(normalized_cohort_size, 1))
+            ),
+            abs(record.cohort_size - normalized_cohort_size),
+            record.cohort_date,
+        ),
+    )
+    for record in nearest_records:
+        key = (record.cohort_date, record.cohort_size)
+        if key in seen:
+            continue
+        smooth_records.append(record)
+        seen.add(key)
+        if len(smooth_records) >= BOUNDS_MIN_PREDICTIONS:
+            break
+    return smooth_records
 
 
 def smooth_record_count(

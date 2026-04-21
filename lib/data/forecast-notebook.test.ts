@@ -632,6 +632,30 @@ describe("forecast notebook live surface", () => {
     expect(__testables.normalizeBoundsCohortSize(100.5)).toBe(100);
   });
 
+  it("backfills sparse small cohort sizes with nearest empirical neighbors", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+    const trainingRecords = [1, 2, 3, 4, 6, 7, 19, 20, 26, 150].map((size, index) => ({
+      cohortDate: `2026-02-${String(index + 1).padStart(2, "0")}`,
+      cohortSize: size,
+      trueRevenue: [0, 0, 0, 0, 0],
+      trueFor: new Map<number, number>([[30, 100]]),
+      predictedForByCutoff: new Map<string, number>([
+        [__testables.boundsKey(30, 7), 90],
+      ]),
+      badByCutoff: new Set<number>(),
+    }));
+
+    const bounds = __testables.buildBoundsForCohortSize(
+      trainingRecords,
+      47,
+      30,
+      [7],
+      [30]
+    );
+
+    expect(bounds.get(__testables.boundsKey(30, 7))).toBeDefined();
+  });
+
   it("caps notebook bounds lookup and expansion at 365 days", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
     const cache = new Map<number, Map<string, readonly [number, number]>>();
