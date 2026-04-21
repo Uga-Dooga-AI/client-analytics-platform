@@ -111,6 +111,7 @@ gcloud scheduler jobs create http forecasts-daily \
 
 - `bounds_refresh` rebuilds upstream marts and republishes notebook-style bounds artifacts under the configured GCS prefix.
 - Sizes without enough smoothed historical coverage are omitted entirely instead of being backfilled with synthetic `[-15%, +15%]` placeholders.
+- Bounds training now unions daily and bucketed cohort-date slices for the common forecast step sizes (`1/2/3/5/7/14/30d`) so weekly and custom broad slices are not forced into a missing `1000.pkl` bucket just because the builder only learned from daily cohorts.
 - Partially calculated tables stay sparse: missing cutoff / horizon keys remain absent so the UI can surface the gap instead of masking it.
 - The published `p10 / p50 / p90` bands are still generated inside the forecast run itself.
 - Holt intervals use residual standard deviation around the fitted series, scaled by the configured confidence interval.

@@ -8,8 +8,11 @@ if str(ROOT) not in sys.path:
 
 from src.bounds_artifacts import (  # noqa: E402
     BoundsTrainingRecord,
+    RawCohortRecord,
+    aggregate_raw_cohorts,
     build_bounds_for_cohort_size,
     compress_size_ranges,
+    process_raw_cohorts,
     smooth_record_count,
 )
 
@@ -63,6 +66,38 @@ class BoundsArtifactsTest(unittest.TestCase):
                 {"from": 10, "to": 11},
             ],
         )
+
+    def test_aggregate_raw_cohorts_builds_weekly_bucket_sizes(self):
+        raw = [
+            RawCohortRecord(
+                cohort_date=f"2026-01-{index + 1:02d}",
+                cohort_size=150,
+                cohort_num_days=1,
+                daily_revenue={0: 10.0 + index},
+            )
+            for index in range(7)
+        ]
+
+        weekly = aggregate_raw_cohorts(raw, step_days=7, anchor_date="2026-01-01")
+        self.assertEqual(len(weekly), 1)
+        self.assertEqual(weekly[0].cohort_size, 1050)
+        self.assertEqual(weekly[0].cohort_num_days, 7)
+        self.assertEqual(weekly[0].daily_revenue[0], sum(10.0 + index for index in range(7)))
+
+    def test_process_raw_cohorts_preserves_bucket_day_count(self):
+        raw = [
+            RawCohortRecord(
+                cohort_date="2026-01-01",
+                cohort_size=900,
+                cohort_num_days=7,
+                daily_revenue={0: 100.0, 1: 60.0, 2: 30.0, 3: 10.0},
+            )
+        ]
+
+        processed = process_raw_cohorts(raw, corrupted_days=set(), today_iso="2026-01-10")
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0].cohort_num_days, 7)
+        self.assertEqual(processed[0].cohort_size, 900)
 
 
 if __name__ == "__main__":

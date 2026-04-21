@@ -56,11 +56,14 @@ NOTEBOOK_BOUNDS_PREDICTION_PERIODS = [
     360,
 ]
 
+SUPPORTED_BOUNDS_GRANULARITY_DAYS = [1, 2, 3, 5, 7, 14, 30]
+
 
 @dataclass(frozen=True)
 class RawCohortRecord:
     cohort_date: str
     cohort_size: int
+    cohort_num_days: int
     daily_revenue: dict[int, float]
 
 
@@ -203,7 +206,12 @@ class BoundsArtifactBuilder:
 
         rows = self._load_project_wide_rows(available_window["from"], available_window["to"])
         raw_cohorts, corrupted_days = self._split_project_wide_rows(rows)
-        processed_cohorts = process_raw_cohorts(raw_cohorts, corrupted_days, self.events_cutoff)
+        processed_cohorts, granularity_diagnostics = build_multigranularity_processed_cohorts(
+            raw_cohorts,
+            corrupted_days,
+            self.events_cutoff,
+            SUPPORTED_BOUNDS_GRANULARITY_DAYS,
+        )
         training_records, diagnostics = build_bounds_training_records(
             processed_cohorts,
             NOTEBOOK_BOUNDS_HISTORY_DAYS,
@@ -306,6 +314,8 @@ class BoundsArtifactBuilder:
                 "from": 7,
                 "to": 365,
             },
+            "granularityDaysIncluded": SUPPORTED_BOUNDS_GRANULARITY_DAYS,
+            "granularityDiagnostics": granularity_diagnostics,
             "processedCohortCount": len(processed_cohorts),
             "corruptedDayCount": len(corrupted_days),
             "trainingRecordCount": len(training_records),
@@ -507,6 +517,7 @@ class BoundsArtifactBuilder:
             RawCohortRecord(
                 cohort_date=cohort_date,
                 cohort_size=max(0, cohort_sizes.get(cohort_date, 0)),
+                cohort_num_days=1,
                 daily_revenue=revenue_by_cohort.get(cohort_date, {}),
             )
             for cohort_date in sorted(cohort_sizes.keys())
@@ -534,13 +545,85 @@ def process_raw_cohorts(
             ProcessedCohort(
                 cohort_date=cohort.cohort_date,
                 cohort_size=cohort.cohort_size,
-                cohort_num_days=1,
+                cohort_num_days=max(1, cohort.cohort_num_days),
                 cohort_lifetime=max(0, len(repaired["daily"]) - 1),
                 is_corrupted=int(repaired["is_corrupted"]),
                 total_revenue=total_revenue,
             )
         )
     return processed
+
+
+def build_multigranularity_processed_cohorts(
+    raw_cohorts: list[RawCohortRecord],
+    corrupted_days: set[str],
+    today_iso: str,
+    granularity_days: list[int],
+) -> tuple[list[ProcessedCohort], dict[str, Any]]:
+    if not raw_cohorts:
+        return [], {
+            "granularityDays": [],
+            "anchorCountByGranularity": {},
+            "processedCohortCountByGranularity": {},
+        }
+
+    min_cohort_date = min(cohort.cohort_date for cohort in raw_cohorts)
+    processed: list[ProcessedCohort] = []
+    anchor_count_by_granularity: dict[str, int] = {}
+    processed_count_by_granularity: dict[str, int] = {}
+
+    for step_days in granularity_days:
+        offsets = [0] if step_days <= 1 else list(range(step_days))
+        anchor_count_by_granularity[str(step_days)] = len(offsets)
+        processed_count = 0
+
+        for offset in offsets:
+            anchor_date = add_days(min_cohort_date, offset)
+            aggregated = aggregate_raw_cohorts(raw_cohorts, step_days, anchor_date)
+            processed_for_offset = process_raw_cohorts(aggregated, corrupted_days, today_iso)
+            processed.extend(processed_for_offset)
+            processed_count += len(processed_for_offset)
+
+        processed_count_by_granularity[str(step_days)] = processed_count
+
+    diagnostics = {
+        "granularityDays": granularity_days,
+        "anchorCountByGranularity": anchor_count_by_granularity,
+        "processedCohortCountByGranularity": processed_count_by_granularity,
+    }
+    return processed, diagnostics
+
+
+def aggregate_raw_cohorts(
+    raw_cohorts: list[RawCohortRecord],
+    step_days: int,
+    anchor_date: str,
+) -> list[RawCohortRecord]:
+    if step_days <= 1:
+        return raw_cohorts
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for cohort in raw_cohorts:
+        bucket_date = align_to_bucket(cohort.cohort_date, anchor_date, step_days)
+        bucket = buckets.setdefault(
+            bucket_date,
+            {"cohort_size": 0, "cohort_num_days": 0, "daily_revenue": {}},
+        )
+        bucket["cohort_size"] += cohort.cohort_size
+        bucket["cohort_num_days"] += cohort.cohort_num_days
+        revenue_by_day: dict[int, float] = bucket["daily_revenue"]
+        for lifetime_day, value in cohort.daily_revenue.items():
+            revenue_by_day[lifetime_day] = revenue_by_day.get(lifetime_day, 0.0) + value
+
+    return [
+        RawCohortRecord(
+            cohort_date=cohort_date,
+            cohort_size=max(0, int(values["cohort_size"])),
+            cohort_num_days=max(1, int(values["cohort_num_days"])),
+            daily_revenue=dict(values["daily_revenue"]),
+        )
+        for cohort_date, values in sorted(buckets.items())
+    ]
 
 
 def calculate_revenue_ratios(cohorts: Iterable[RawCohortRecord]) -> dict[str, float]:
@@ -611,7 +694,7 @@ def build_bounds_training_records(
     eligible_cohorts = [
         cohort
         for cohort in cohorts
-        if cohort.cohort_num_days == 1
+        if cohort.cohort_num_days > 0
         and cohort.cohort_size > 0
         and cohort.is_corrupted == 0
         and cohort.cohort_lifetime >= NOTEBOOK_HISTORY_MIN_DAY
@@ -797,6 +880,15 @@ def smooth_record_count(
     cohort_size: int,
 ) -> int:
     return len(smooth_records_for_size(training_records, cohort_size))
+
+
+def align_to_bucket(value: str, anchor: str, step_days: int) -> str:
+    diff = day_diff(anchor, value)
+    if diff < 0:
+        bucket_index = -((-diff - 1) // step_days) - 1
+    else:
+        bucket_index = diff // step_days
+    return add_days(anchor, bucket_index * step_days)
 
 
 def interpolate_across_history(
