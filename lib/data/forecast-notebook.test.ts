@@ -730,6 +730,22 @@ describe("forecast notebook live surface", () => {
     expect(bounds?.[0]).not.toBeCloseTo(-5, 5);
   });
 
+  it("normalizes one-sided notebook bounds into a band around the forecast point", async () => {
+    const { __testables } = await import("@/lib/data/forecast-notebook");
+
+    expect(__testables.normalizeConfidenceBandPercents([-12.5, -0.01])).toEqual([-12.5, 12.5]);
+    expect(__testables.normalizeConfidenceBandPercents([0.2, 6])).toEqual([-6, 6]);
+
+    expect(__testables.applyNotebookBounds(100, [-12.5, -0.01])).toEqual({
+      lowerRevenue: 87.5,
+      upperRevenue: 112.5,
+    });
+    expect(__testables.applyNotebookBounds(100, [0.2, 6])).toEqual({
+      lowerRevenue: 94,
+      upperRevenue: 106,
+    });
+  });
+
   it("keeps mature live forecast points separate from realized actuals", async () => {
     const { __testables } = await import("@/lib/data/forecast-notebook");
     const cohort = {

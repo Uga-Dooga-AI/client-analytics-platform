@@ -2122,14 +2122,7 @@ async function buildLinePredictionResources(
             { allowLiveFallback: false }
           )
         : null;
-      const lowerRevenue =
-        predictedRevenue == null || bounds == null
-          ? null
-          : Math.max(0, predictedRevenue + (predictedRevenue * bounds[0]) / 100);
-      const upperRevenue =
-        predictedRevenue == null || bounds == null
-          ? null
-          : Math.max(lowerRevenue ?? 0, predictedRevenue + (predictedRevenue * bounds[1]) / 100);
+      const { lowerRevenue, upperRevenue } = applyNotebookBounds(predictedRevenue, bounds);
       points.set(horizon, {
         predictedRevenue,
         lowerRevenue,
@@ -3091,6 +3084,47 @@ function getNotebookBounds(
   return null;
 }
 
+function normalizeConfidenceBandPercents(bounds: readonly [number, number]) {
+  let [lowerPercent, upperPercent] = bounds;
+  if (lowerPercent > upperPercent) {
+    [lowerPercent, upperPercent] = [upperPercent, lowerPercent];
+  }
+
+  // Artifact quantiles can become one-sided when the notebook forecast is
+  // systematically biased high or low for a cutoff. Render a band around the
+  // point forecast instead of collapsing one edge onto the forecast line.
+  if (upperPercent <= 0 && lowerPercent < 0) {
+    return [lowerPercent, Math.abs(lowerPercent)] as const;
+  }
+
+  if (lowerPercent >= 0 && upperPercent > 0) {
+    return [-Math.abs(upperPercent), upperPercent] as const;
+  }
+
+  return [lowerPercent, upperPercent] as const;
+}
+
+function applyNotebookBounds(
+  predictedRevenue: number | null,
+  bounds: readonly [number, number] | null
+) {
+  if (predictedRevenue == null || bounds == null) {
+    return {
+      lowerRevenue: null,
+      upperRevenue: null,
+    };
+  }
+
+  const [lowerPercent, upperPercent] = normalizeConfidenceBandPercents(bounds);
+  const lowerRevenue = Math.max(0, predictedRevenue + (predictedRevenue * lowerPercent) / 100);
+  const upperRevenue = Math.max(lowerRevenue, predictedRevenue + (predictedRevenue * upperPercent) / 100);
+
+  return {
+    lowerRevenue,
+    upperRevenue,
+  };
+}
+
 function buildBoundsForCohortSize(
   trainingRecords: BoundsTrainingRecord[],
   cohortSize: number,
@@ -3803,14 +3837,7 @@ function predictHistoricalCohort(
           { allowLiveFallback: false }
         );
 
-  const lowerRevenue =
-    predictedRevenue == null || bounds == null
-      ? null
-      : Math.max(0, predictedRevenue + (predictedRevenue * bounds[0]) / 100);
-  const upperRevenue =
-    predictedRevenue == null || bounds == null
-      ? null
-      : Math.max(lowerRevenue ?? 0, predictedRevenue + (predictedRevenue * bounds[1]) / 100);
+  const { lowerRevenue, upperRevenue } = applyNotebookBounds(predictedRevenue, bounds);
 
   return {
     predictedRevenue,
@@ -4832,6 +4859,7 @@ function formatPlatformLabel(value: string) {
 
 export const __testables = {
   aggregatePaybackPoint,
+  applyNotebookBounds,
   boundsKey,
   buildLinePredictionResources,
   buildBoundsCoverageSummary,
@@ -4846,6 +4874,7 @@ export const __testables = {
   getPredictionPoint,
   getNotebookBounds,
   isPlaceholderArtifactBounds,
+  normalizeConfidenceBandPercents,
   normalizeBoundsCohortSize,
   toRoasPoint,
 };
